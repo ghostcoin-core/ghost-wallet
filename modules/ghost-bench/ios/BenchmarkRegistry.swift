@@ -10,6 +10,7 @@ enum BenchmarkRegistry {
   static let benchmarks: [String: BenchmarkFunction] = [
     DummyBenchmark.name: DummyBenchmark.run,
     SummonBenchmark.name: SummonBenchmark.run,
+    HeaderSyncBenchmark.name: HeaderSyncBenchmark.run,
   ]
 
   static var names: [String] { benchmarks.keys.sorted() }

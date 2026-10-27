@@ -8,8 +8,10 @@ use core::fmt;
 
 use ghost_client::account::{SeedError, WalletSeed};
 
+pub mod header_sync;
 pub mod summon;
 
+pub use header_sync::{HeaderChainConstants, HeaderProgress, HeaderSync, HeaderSyncError, PinnedKeyBlock};
 pub use summon::{SummonError, SummonReport, prove_test_summon};
 
 uniffi::setup_scaffolding!();
