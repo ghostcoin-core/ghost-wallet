@@ -1,0 +1,24 @@
+---
+# uniffi-bindgen-react-native: wraps the Rust crate in core/ as a turbo module.
+# `ubrn build ios --and-generate` builds the XCFramework and writes the
+# generated C++, TypeScript, ios/ and podspec files next to this file. None of
+# them are committed.
+rust:
+  directory: ../../core
+  manifestPath: Cargo.toml
+
+bindings:
+  cpp: cpp/generated
+  ts: src/generated
+
+ios:
+  directory: ios
+  targets:
+    - aarch64-apple-ios
+    - aarch64-apple-ios-sim
+  frameworkName: build/GhostWalletCoreFramework
+
+turboModule:
+  cpp: cpp
+  ts: src
+  entrypoint: src/index.tsx

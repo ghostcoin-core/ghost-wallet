@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Merge gate: clean install, typecheck, lint and unit tests.
+# Merge gate: clean install, typecheck, lint, unit tests and the Rust core tests.
 # Exits non-zero as soon as any step fails.
 set -euo pipefail
 
@@ -16,5 +16,8 @@ pnpm exec eslint . --max-warnings 0
 
 echo "==> unit tests"
 pnpm exec jest --ci --passWithNoTests=false
+
+echo "==> rust core tests"
+cargo test --manifest-path core/Cargo.toml --locked
 
 echo "==> gate passed"
