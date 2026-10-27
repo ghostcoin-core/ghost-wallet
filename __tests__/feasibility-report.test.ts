@@ -1,4 +1,4 @@
-import { buildReport, buildReportText, verdictOf } from '../scripts/feasibility-report';
+import { buildReport, buildReportText, STRESS_LABEL, verdictOf } from '../scripts/feasibility-report';
 import fixture from './fixtures/feasibility-results.json';
 
 const MIB = 1024 * 1024;
@@ -65,6 +65,7 @@ const WARNING = 5;
 const KEY_NUMBERS = 8;
 const VERDICT = 9;
 const WHY = 10;
+const WORST_CASE = 'worst-case (stress benchmark only)';
 
 function ok(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -97,10 +98,18 @@ describe('feasibility-report', () => {
         'header-sync',
         'restore',
         'kill-recovery',
-        'worst-case',
+        WORST_CASE,
       ]);
     }
     expect(report).not.toContain('dummy');
+  });
+
+  it('labels the worst case a stress benchmark only', () => {
+    expect(STRESS_LABEL).toBe('stress benchmark only');
+    expect(report).toContain('- worst-case is a stress benchmark only');
+    expect(report).not.toMatch(/\| worst-case \|/);
+    const notRun = buildReport(fixture.filter((record) => record.benchmark !== 'worst-case'));
+    expect(rows(notRun, 'iPhone17,1').get(WORST_CASE)![VERDICT]).toBe('not run');
   });
 
   it('names each phone with its iOS version and whether it is a simulator', () => {
@@ -123,6 +132,9 @@ describe('feasibility-report', () => {
     // Serious heat now fails the run.
     expect(phone.get('header-sync')![VERDICT]).toBe("doesn't work");
     expect(phone.get('header-sync')![WHY]).toBe('thermal serious');
+    expect(phone.get('header-sync')![KEY_NUMBERS]).toBe(
+      'headers 4000, headers/s 12.5, max caches 2, resume s 9.000, budget ok true',
+    );
 
     expect(phone.get('restore')![VERDICT]).toBe("doesn't work");
     expect(phone.get('restore')![WHY]).toBe('found 2 of 3 accounts');
@@ -135,7 +147,7 @@ describe('feasibility-report', () => {
     expect(phone.get('kill-recovery')![VERDICT]).toBe('works');
 
     // The later worst-case run, with its memory warning and 1.6 GiB, under the 4 GiB limit.
-    const worst = phone.get('worst-case')!;
+    const worst = phone.get(WORST_CASE)!;
     expect(worst[RUN]).toBe('2026-10-20T10:30:00Z');
     expect(worst[FOOTPRINT]).toBe('1640.0 MiB');
     expect(worst[WARNING]).toBe('yes');
@@ -160,8 +172,8 @@ describe('feasibility-report', () => {
     expect(phone.get('kill-recovery')![WHY]).toBe(
       'only 6 of 7 kill points passed; killPoint.prepared: FAILED: the record is gone and the chain has 0 payments',
     );
-    expect(phone.get('worst-case')![VERDICT]).toBe("doesn't work");
-    expect(phone.get('worst-case')![WHY]).toContain('1 RandomX caches held, not 2');
+    expect(phone.get(WORST_CASE)![VERDICT]).toBe("doesn't work");
+    expect(phone.get(WORST_CASE)![WHY]).toContain('1 RandomX caches held, not 2');
   });
 
   it("never passes a simulator run, however good its numbers", () => {
@@ -170,7 +182,7 @@ describe('feasibility-report', () => {
     expect(summon[WHY]).toContain("simulator run: can't pass a real-device limit");
   });
 
-  it("puts a PLAN change line right under each doesn't-work row and nowhere else", () => {
+  it("puts a PLAN change line right under each doesn't-work row but the stress one, and nowhere else", () => {
     for (const model of ['iPhone17,1', 'iPhone13,2', 'arm64']) {
       const lines = section(report, model).slice(2);
       lines.forEach((line, index) => {
@@ -180,12 +192,17 @@ describe('feasibility-report', () => {
           expect(row[0]).toBe('');
           expect(row[VERDICT]).toBe('PLAN change needed: (fill in)');
           expect(cells(lines[index - 1])[VERDICT]).toBe("doesn't work");
-        } else if (row[VERDICT] === "doesn't work") {
+          expect(cells(lines[index - 1])[0]).not.toBe(WORST_CASE);
+        } else if (row[VERDICT] === "doesn't work" && row[0] !== WORST_CASE) {
           expect(lines[index + 1]).toContain('PLAN change needed: (fill in)');
+        } else if (row[0] === WORST_CASE) {
+          expect(lines[index + 1] ?? '').not.toContain('PLAN change needed');
         }
       });
     }
-    expect(report.match(/PLAN change needed: \(fill in\)/g)).toHaveLength(7);
+    // Header-sync and restore on the first phone; summon, header-sync and
+    // kill-recovery on the second (not its stress worst case); summon in the simulator.
+    expect(report.match(/PLAN change needed: \(fill in\)/g)).toHaveLength(6);
   });
 
   it('does not say a minimum-phone run is owed when the iPhone 12 ran on a real device', () => {
@@ -263,14 +280,47 @@ describe('feasibility-report', () => {
     it("is doesn't work for a worst case that proved all three but without both caches", () => {
       const run = ok({
         benchmark: 'worst-case',
-        notes: { cacheCountBeforeProve: '1', runs: '3', verifiedCount: '3' },
+        notes: { workerStress: 'true', cacheCountBeforeProve: '1', runs: '3', verifiedCount: '3' },
       });
       expect(verdictOf(run).verdict).toBe("doesn't work");
       const both = ok({
         benchmark: 'worst-case',
-        notes: { cacheCountBeforeProve: '2', runs: '3', verifiedCount: '3' },
+        notes: { workerStress: 'true', cacheCountBeforeProve: '2', runs: '3', verifiedCount: '3' },
       });
       expect(verdictOf(both).verdict).toBe('works');
+    });
+
+    it("is doesn't work for a worst case not run as the stress case", () => {
+      const notStress = ok({
+        benchmark: 'worst-case',
+        notes: { workerStress: 'false', cacheCountBeforeProve: '2', runs: '3', verifiedCount: '3' },
+      });
+      expect(verdictOf(notStress)).toEqual({
+        verdict: "doesn't work",
+        reasons: ['workerStress false: not run as the stress case'],
+      });
+      // A run from before the note existed is judged by its caches alone.
+      const unnoted = ok({
+        benchmark: 'worst-case',
+        notes: { cacheCountBeforeProve: '2', runs: '3', verifiedCount: '3' },
+      });
+      expect(verdictOf(unnoted).verdict).toBe('works');
+    });
+
+    it("is doesn't work for a header sync over its run budget or without the note", () => {
+      const header = (notes: { [key: string]: string }) => ok({ benchmark: 'header-sync', notes });
+      expect(verdictOf(header({ headerBudgetOk: 'true' }))).toEqual({ verdict: 'works', reasons: [] });
+      expect(verdictOf(header({ headerBudgetOk: 'false' }))).toEqual({
+        verdict: "doesn't work",
+        reasons: ['header checks over budget'],
+      });
+      expect(verdictOf(header({}))).toEqual({
+        verdict: "doesn't work",
+        reasons: ['header budget not measured (no headerBudgetOk note)'],
+      });
+      // Other benchmarks do not need the note.
+      const summon = ok({ benchmark: 'summon', notes: { runs: '1', verifiedCount: '1', 'proveMillis-1': '4000' } });
+      expect(verdictOf(summon).verdict).toBe('works');
     });
   });
 

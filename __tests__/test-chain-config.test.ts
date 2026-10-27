@@ -171,6 +171,32 @@ describe('the node benchmarks', () => {
     expect(worstCase).toMatch(/guard before == wantedCaches else \{\s*throw WorstCaseBenchmarkError\.cachesNotLoaded/);
   });
 
+  it('worst-case is noted as the stress case and releases the caches after its proofs', () => {
+    expect(worstCase).toContain('context.note("workerStress", "true")');
+    expect(worstCase).toContain('static let kind = "stress benchmark only"');
+    const lastProof = worstCase.indexOf('throw WorstCaseBenchmarkError.notVerified(index)');
+    expect(worstCase.indexOf('sync.releaseCaches()')).toBeGreaterThan(lastProof);
+  });
+
+  it('header-sync checks headers in budgeted runs and resumes from the saved state', () => {
+    expect(headerSync).toContain('static let runBudget = RunBudget(');
+    expect(headerSync.match(/sync\.startRun\(budget: runBudget, conditions: conditions\(\)\)/g)).toHaveLength(2);
+    // The thermal state and Low Power Mode come from the phone before each batch.
+    expect(headerSync).toContain('info.isLowPowerModeEnabled');
+    expect(headerSync).toMatch(/run\.setConditions\(conditions: conditions\(\)\)\s*let checkStart/);
+    expect(headerSync).not.toContain('sync.addHeaders(');
+    // The caches are released between the stages, so resume rebuilds the chain.
+    const release = headerSync.indexOf('sync.releaseCaches()');
+    expect(release).toBeGreaterThan(headerSync.indexOf('try context.stage("sync")'));
+    expect(release).toBeLessThan(headerSync.indexOf('try context.stage("resume")'));
+    expect(headerSync.indexOf('sync.allowCaches()')).toBeGreaterThan(release);
+    // headerBudgetOk is true only once both runs are done, false on a budget stop.
+    expect(headerSync.indexOf('context.note("headerBudgetOk", "true")')).toBeGreaterThan(
+      headerSync.indexOf('try context.stage("resume")'),
+    );
+    expect(headerSync).toMatch(/case \.cpuBudget, \.headerBudget, \.byteBudget: context\.note\("headerBudgetOk", "false"\)/);
+  });
+
   it('header-sync waits for the background for the configured time', () => {
     expect(headerSync).toContain('entered.wait(timeout: .now() + TestChainConfig.backgroundWaitSeconds)');
   });

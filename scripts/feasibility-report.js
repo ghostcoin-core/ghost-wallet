@@ -35,7 +35,11 @@ const LIMITS = {
 
 /** Checks in the notes that are not user-facing limits but still fail a run. */
 const THRESHOLDS = {
-  /** RandomX caches the worst-case run must hold while it proves. */
+  /**
+   * RandomX caches the worst-case stress run holds while it proves. The app
+   * releases the caches before a proof, so this is a stress case, not a
+   * requirement.
+   */
   worstCaseCaches: 2,
 };
 
@@ -70,6 +74,17 @@ const DEVICE_KINDS = {
 
 /** The Phase 0 benchmarks, in report order. */
 const BENCHMARKS = ['summon', 'header-sync', 'restore', 'kill-recovery', 'worst-case'];
+
+/**
+ * Benchmarks that measure a stress case the app avoids in its normal path:
+ * their row is labelled, and a doesn't-work verdict asks for no PLAN change.
+ */
+const STRESS_LABEL = 'stress benchmark only';
+const STRESS_BENCHMARKS = ['worst-case'];
+
+function benchmarkLabel(benchmark) {
+  return STRESS_BENCHMARKS.includes(benchmark) ? `${benchmark} (${STRESS_LABEL})` : benchmark;
+}
 
 const VERDICTS = {
   works: 'works',
@@ -348,7 +363,12 @@ function failedChecks(benchmark, notes) {
       reasons.push(`only ${points.passed} of ${points.total} kill points passed`);
     }
   }
+  // The header budget (header-sync note `headerBudgetOk`) is a limit in
+  // LIMIT_CHECKS.
   if (benchmark === 'worst-case') {
+    if (notes.workerStress !== undefined && notes.workerStress !== 'true') {
+      reasons.push(`workerStress ${notes.workerStress}: not run as the stress case`);
+    }
     if (int(notes.cacheCountBeforeProve) !== THRESHOLDS.worstCaseCaches) {
       reasons.push(
         `${notes.cacheCountBeforeProve ?? 'no'} RandomX caches held, not ${THRESHOLDS.worstCaseCaches}`,
@@ -438,8 +458,9 @@ function phoneRows(runs) {
   const verdicts = [];
   for (const benchmark of BENCHMARKS) {
     const entry = runs.get(benchmark);
+    const label = benchmarkLabel(benchmark);
     if (!entry) {
-      lines.push(tableLine([benchmark, '-', '-', '-', '-', '-', '-', '-', '-', VERDICTS.notRun, '-']));
+      lines.push(tableLine([label, '-', '-', '-', '-', '-', '-', '-', '-', VERDICTS.notRun, '-']));
       verdicts.push({ benchmark, verdict: VERDICTS.notRun });
       continue;
     }
@@ -449,7 +470,7 @@ function phoneRows(runs) {
     verdicts.push({ benchmark, verdict });
     lines.push(
       tableLine([
-        benchmark,
+        label,
         record.startedAt || '-',
         deviceText(deviceOf(record)),
         record.status || '-',
@@ -462,7 +483,7 @@ function phoneRows(runs) {
         reasons.length > 0 ? reasons.join('; ') : '-',
       ]),
     );
-    if (verdict === VERDICTS.doesntWork) {
+    if (verdict === VERDICTS.doesntWork && !STRESS_BENCHMARKS.includes(benchmark)) {
       lines.push(
         tableLine(['', '', '', '', '', '', '', '', '', 'PLAN change needed: (fill in)', '']),
       );
@@ -471,10 +492,11 @@ function phoneRows(runs) {
   return { lines, verdicts };
 }
 
-/** One phone's overall verdict: it passes only when every benchmark works. */
+/** One phone's overall verdict: it passes only when every benchmark but a stress one works. */
 function phoneVerdictLine(verdicts) {
   const failing = verdicts.filter(
-    ({ verdict }) => verdict !== VERDICTS.works && verdict !== VERDICTS.limits,
+    ({ benchmark, verdict }) =>
+      !STRESS_BENCHMARKS.includes(benchmark) && verdict !== VERDICTS.works && verdict !== VERDICTS.limits,
   );
   if (failing.length === 0) {
     return 'Verdict: passes every user-facing limit.';
@@ -528,6 +550,15 @@ function resultLines(records, heading) {
   return lines;
 }
 
+/** The stress benchmarks, and why their verdict asks for no PLAN change. */
+function stressLines() {
+  return [
+    `- worst-case is a ${STRESS_LABEL}: it holds ${THRESHOLDS.worstCaseCaches} RandomX caches while it proves, ` +
+      'which the app avoids by releasing the caches before a proof; its verdict asks for no PLAN change ' +
+      'and does not fail the phone',
+  ];
+}
+
 function minimumPhoneOwed() {
   return `Minimum-phone (${MINIMUM_PHONE.name}) real-device run still owed.`;
 }
@@ -541,7 +572,7 @@ function checkRecords(records) {
 /** The markdown report of an array of run records. */
 function buildReport(records) {
   checkRecords(records);
-  const lines = ['# Feasibility report', '', ...limitLines(), '', minimumPhoneLine(), ''];
+  const lines = ['# Feasibility report', '', ...limitLines(), '', ...stressLines(), '', minimumPhoneLine(), ''];
   lines.push(...resultLines(records, '##'));
   return lines.join('\n').trimEnd();
 }
@@ -594,4 +625,5 @@ module.exports = {
   BENCHMARKS,
   VERDICTS,
   DEVICE_KINDS,
+  STRESS_LABEL,
 };
