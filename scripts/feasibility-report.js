@@ -1,32 +1,71 @@
 #!/usr/bin/env node
 // Turns bench-results.json (written on the phone by modules/ghost-bench) into
-// a markdown go/no-go report: for each phone model, the latest run of each
-// Phase 0 benchmark with its key numbers and a verdict.
+// a markdown go/no-go report: for each phone, the latest run of each Phase 0
+// benchmark with its key numbers and a verdict judged against the
+// user-facing limits (LIMITS).
 //
 //   node scripts/feasibility-report.js bench-results.json
 //   node scripts/feasibility-report.js < bench-results.json
 //
-// The verdicts are a starting point for docs/feasibility.md, not the decision.
+// The verdicts are a starting point for docs/feasibility.md
+// (scripts/feasibility-doc.js), not the decision.
 'use strict';
 
 const fs = require('fs');
 
 const MIB = 1024 * 1024;
-const GIB = 1024 * MIB;
 
 /**
- * Where the verdicts change. PLAN.md names no numbers, so these are the
- * report's own; change them here.
+ * The user-facing limits. A run that misses any limit that applies to it, or
+ * does not record the number a limit needs, doesn't work. Every limit is a
+ * real-device limit: a simulator run never passes one.
  */
+const LIMITS = {
+  /** Balance on screen from the cache (restore note `balanceFromCacheSeconds`). */
+  cachedBalanceSeconds: 2,
+  /** Restore to the first balance on screen (restore note `timeToFirstBalanceSeconds`). */
+  timeToFirstBalanceSeconds: 10,
+  /** The slowest Summon proof of a run (summon notes `proveMillis-<n>`). */
+  summonProofSeconds: 10,
+  /** Worst thermal states that fail any run. */
+  failingThermalStates: ['serious', 'critical'],
+  /** Thermal states a run may reach and still pass. */
+  passingThermalStates: ['nominal', 'fair'],
+};
+
+/** Checks in the notes that are not user-facing limits but still fail a run. */
 const THRESHOLDS = {
-  /** Peak footprint at or above this: doesn't work. */
-  doesntWorkFootprintBytes: 2.0 * GIB,
-  /** Peak footprint at or above this: works with limits. */
-  limitsFootprintBytes: 1.5 * GIB,
-  /** Worst thermal states that mean works with limits. */
-  limitsThermalStates: ['serious', 'critical'],
   /** RandomX caches the worst-case run must hold while it proves. */
   worstCaseCaches: 2,
+};
+
+/**
+ * The memory iOS lets a foreground app use before jetsam ends it, per
+ * hardware model. Starting values of about half the phone's RAM; replace each
+ * with a measured one (a real-device run's peakFootprintBytes plus its
+ * minAvailableBytes). A model not listed here can't pass the memory limit.
+ */
+const JETSAM_LIMIT_BYTES = {
+  'iPhone13,1': 2048 * MIB, // iPhone 12 mini, 4 GB
+  'iPhone13,2': 2048 * MIB, // iPhone 12, 4 GB
+  'iPhone13,3': 3072 * MIB, // iPhone 12 Pro, 6 GB
+  'iPhone13,4': 3072 * MIB, // iPhone 12 Pro Max, 6 GB
+  'iPhone17,1': 4096 * MIB, // iPhone 16 Pro, 8 GB
+  'iPhone17,2': 4096 * MIB, // iPhone 16 Pro Max, 8 GB
+  'iPhone17,3': 4096 * MIB, // iPhone 16, 8 GB
+  'iPhone17,4': 4096 * MIB, // iPhone 16 Plus, 8 GB
+};
+
+/** The slowest phone the app must work on. iPhone 12 until it is decided. */
+const MINIMUM_PHONE = { name: 'iPhone 12', models: ['iPhone13,2'] };
+
+/** What uname reports as the model inside the iOS simulator. */
+const SIMULATOR_MODELS = ['arm64', 'x86_64', 'i386'];
+
+const DEVICE_KINDS = {
+  real: 'real device',
+  simulator: 'simulator',
+  unknown: 'unknown device kind',
 };
 
 /** The Phase 0 benchmarks, in report order. */
@@ -42,6 +81,7 @@ const VERDICTS = {
 const COLUMNS = [
   'Benchmark',
   'Run',
+  'Device',
   'Status',
   'Peak footprint',
   'Memory warning',
@@ -70,6 +110,52 @@ function int(text) {
   return Number(text.trim());
 }
 
+/** A non-negative decimal note, or null. */
+function decimal(text) {
+  if (typeof text !== 'string' || !/^\d+(\.\d+)?$/.test(text.trim())) {
+    return null;
+  }
+  return Number(text.trim());
+}
+
+/** The model, iOS version and kind (simulator or real device) of a run. */
+function deviceOf(record) {
+  const device = record.device || {};
+  const model = typeof device.model === 'string' && device.model !== '' ? device.model : null;
+  const systemVersion =
+    typeof device.systemVersion === 'string' && device.systemVersion !== '' ? device.systemVersion : null;
+  let kind = DEVICE_KINDS.unknown;
+  if (typeof device.simulator === 'boolean') {
+    kind = device.simulator ? DEVICE_KINDS.simulator : DEVICE_KINDS.real;
+  } else if (model && SIMULATOR_MODELS.includes(model)) {
+    kind = DEVICE_KINDS.simulator;
+  } else if (model && /^iPhone\d+,\d+$/.test(model)) {
+    kind = DEVICE_KINDS.real;
+  }
+  return { model, systemVersion, kind };
+}
+
+function deviceText(device) {
+  return `${device.model || 'unknown model'}, iOS ${device.systemVersion || '-'}, ${device.kind}`;
+}
+
+/** Why a run's device can't pass a real-device limit, if it can't. */
+function deviceProblems(device) {
+  const reasons = [];
+  if (!device.model) {
+    reasons.push('no device model recorded');
+  }
+  if (!device.systemVersion) {
+    reasons.push('no iOS version recorded');
+  }
+  if (device.kind === DEVICE_KINDS.simulator) {
+    reasons.push("simulator run: can't pass a real-device limit");
+  } else if (device.kind === DEVICE_KINDS.unknown) {
+    reasons.push('not recorded whether simulator or real device');
+  }
+  return reasons;
+}
+
 /** The prove times of notes `proveMillis-<n>`, in run order. */
 function proveMillis(notes) {
   return Object.keys(notes)
@@ -85,6 +171,102 @@ function proveSummary(notes) {
     return [];
   }
   return [`prove ${Math.min(...times)}-${Math.max(...times)} ms`];
+}
+
+/** `killPointsPassed` ("N of M kill points recorded") as numbers, or null. */
+function killPoints(notes) {
+  const match = /^\s*(\d+) of (\d+)\b/.exec(String(notes.killPointsPassed ?? ''));
+  return match ? { passed: Number(match[1]), total: Number(match[2]) } : null;
+}
+
+/** A limit on a seconds note: a failure reason, or null when it is met. */
+function secondsLimit(label, key, max) {
+  return (record) => {
+    const notes = record.notes || {};
+    const value = decimal(notes[key]);
+    if (value === null) {
+      return `${label} not measured (no ${key} note)`;
+    }
+    return value > max ? `${label} ${value} s, over ${max} s` : null;
+  };
+}
+
+/**
+ * The user-facing limits as checks, in report order. `benchmarks` null means
+ * every benchmark. Each check returns why the run misses it, or null.
+ */
+const LIMIT_CHECKS = [
+  {
+    text: `balance on screen ≤ ${LIMITS.cachedBalanceSeconds} s from cache (restore note \`balanceFromCacheSeconds\`)`,
+    benchmarks: ['restore'],
+    check: secondsLimit('balance from cache', 'balanceFromCacheSeconds', LIMITS.cachedBalanceSeconds),
+  },
+  {
+    text: `restore time to first balance ≤ ${LIMITS.timeToFirstBalanceSeconds} s (restore note \`timeToFirstBalanceSeconds\`)`,
+    benchmarks: ['restore'],
+    check: secondsLimit('time to first balance', 'timeToFirstBalanceSeconds', LIMITS.timeToFirstBalanceSeconds),
+  },
+  {
+    text: `every Summon proof ≤ ${LIMITS.summonProofSeconds} s (summon notes \`proveMillis-<n>\`)`,
+    benchmarks: ['summon'],
+    check: (record) => {
+      const times = proveMillis(record.notes || {});
+      if (times.length === 0) {
+        return 'Summon proof not measured (no proveMillis notes)';
+      }
+      const slowest = Math.max(...times);
+      return slowest > LIMITS.summonProofSeconds * 1000
+        ? `Summon proof ${slowest / 1000} s, over ${LIMITS.summonProofSeconds} s`
+        : null;
+    },
+  },
+  {
+    text: "peak memory under the device's jetsam limit (\`JETSAM_LIMIT_BYTES\`)",
+    benchmarks: null,
+    check: (record) => {
+      const footprint = (record.memory || {}).peakFootprintBytes;
+      if (typeof footprint !== 'number') {
+        return 'peak memory not measured';
+      }
+      const { model } = deviceOf(record);
+      const limit = model ? JETSAM_LIMIT_BYTES[model] : undefined;
+      if (limit === undefined) {
+        return `no jetsam limit known for ${model || 'an unknown model'}`;
+      }
+      return footprint >= limit
+        ? `peak footprint ${mib(footprint)}, not under the ${model} jetsam limit ${mib(limit)}`
+        : null;
+    },
+  },
+  {
+    text: `no thermal state of ${LIMITS.failingThermalStates.join(' or ')}`,
+    benchmarks: null,
+    check: (record) => {
+      const worst = (record.thermal || {}).worst;
+      if (LIMITS.failingThermalStates.includes(worst)) {
+        return `thermal ${worst}`;
+      }
+      return LIMITS.passingThermalStates.includes(worst) ? null : 'thermal state not measured';
+    },
+  },
+  {
+    text: 'header checks within their budget (header-sync note `headerBudgetOk`)',
+    benchmarks: ['header-sync'],
+    check: (record) => {
+      const value = (record.notes || {}).headerBudgetOk;
+      if (value === 'true') {
+        return null;
+      }
+      return value === 'false' ? 'header checks over budget' : 'header budget not measured (no headerBudgetOk note)';
+    },
+  },
+];
+
+/** Why a run misses the user-facing limits that apply to it. */
+function limitFailures(record) {
+  return LIMIT_CHECKS.filter(({ benchmarks }) => !benchmarks || benchmarks.includes(record.benchmark))
+    .map(({ check }) => check(record))
+    .filter(Boolean);
 }
 
 /** The numbers that matter for each benchmark, from its notes. */
@@ -108,12 +290,15 @@ function keyNumbers(benchmark, notes) {
       add('headers/s', 'headersPerSecond');
       add('max caches', 'maxCacheCount');
       add('resume s', 'resumeSeconds');
+      add('budget ok', 'headerBudgetOk');
       break;
     case 'restore':
       if (notes.accountsFound !== undefined || notes.accountsExpected !== undefined) {
         parts.push(`accounts ${notes.accountsFound ?? '-'}/${notes.accountsExpected ?? '-'}`);
       }
       add('scan complete', 'scanComplete');
+      add('cached balance s', 'balanceFromCacheSeconds');
+      add('first balance s', 'timeToFirstBalanceSeconds');
       add('restore s', 'restoreSeconds');
       break;
     case 'kill-recovery':
@@ -154,6 +339,15 @@ function failedChecks(benchmark, notes) {
       reasons.push('scan not complete');
     }
   }
+  if (benchmark === 'kill-recovery') {
+    // Every kill point must be covered: "N of M" with N = M.
+    const points = killPoints(notes);
+    if (!points) {
+      reasons.push('kill points not counted (no killPointsPassed note)');
+    } else if (points.total === 0 || points.passed !== points.total) {
+      reasons.push(`only ${points.passed} of ${points.total} kill points passed`);
+    }
+  }
   if (benchmark === 'worst-case') {
     if (int(notes.cacheCountBeforeProve) !== THRESHOLDS.worstCaseCaches) {
       reasons.push(
@@ -173,9 +367,7 @@ function failedChecks(benchmark, notes) {
 /** The verdict of one run record, and why. */
 function verdictOf(record) {
   const memory = record.memory || {};
-  const thermal = record.thermal || {};
   const notes = record.notes || {};
-  const footprint = memory.peakFootprintBytes;
 
   const fatal = [];
   if (record.status !== 'ok') {
@@ -184,26 +376,14 @@ function verdictOf(record) {
   if (memory.killed) {
     fatal.push('killed');
   }
-  if (typeof footprint === 'number' && footprint >= THRESHOLDS.doesntWorkFootprintBytes) {
-    fatal.push(`peak footprint ${mib(footprint)}`);
-  }
+  fatal.push(...deviceProblems(deviceOf(record)));
   fatal.push(...failedChecks(record.benchmark, notes));
+  fatal.push(...limitFailures(record));
   if (fatal.length > 0) {
     return { verdict: VERDICTS.doesntWork, reasons: fatal };
   }
-
-  const limits = [];
   if (memory.warning) {
-    limits.push('memory warning');
-  }
-  if (THRESHOLDS.limitsThermalStates.includes(thermal.worst)) {
-    limits.push(`thermal ${thermal.worst}`);
-  }
-  if (typeof footprint === 'number' && footprint >= THRESHOLDS.limitsFootprintBytes) {
-    limits.push(`peak footprint ${mib(footprint)}`);
-  }
-  if (limits.length > 0) {
-    return { verdict: VERDICTS.limits, reasons: limits };
+    return { verdict: VERDICTS.limits, reasons: ['memory warning'] };
   }
   return { verdict: VERDICTS.works, reasons: [] };
 }
@@ -216,18 +396,22 @@ function deliberateKill(record) {
   return record.benchmark === 'kill-recovery' && Boolean((record.notes || {}).killedAt);
 }
 
-/** Phone models in the order they first appear, each with its latest run per benchmark. */
+/**
+ * Phones (model and device kind) in the order they first appear, each with its
+ * latest run per benchmark.
+ */
 function latestRuns(records) {
   const phones = new Map();
   records.forEach((record, index) => {
     if (!record || !BENCHMARKS.includes(record.benchmark) || deliberateKill(record)) {
       return;
     }
-    const model = (record.device && record.device.model) || 'unknown phone';
-    if (!phones.has(model)) {
-      phones.set(model, new Map());
+    const device = deviceOf(record);
+    const key = `${device.model || 'unknown model'} (${device.kind})`;
+    if (!phones.has(key)) {
+      phones.set(key, { model: device.model || 'unknown model', kind: device.kind, runs: new Map() });
     }
-    const runs = phones.get(model);
+    const { runs } = phones.get(key);
     const current = runs.get(record.benchmark);
     const newer =
       !current ||
@@ -248,22 +432,26 @@ function tableLine(cells) {
   return `| ${cells.map(cell).join(' | ')} |`;
 }
 
-/** The report rows of one phone, as markdown table lines. */
+/** The report rows of one phone, as markdown table lines, and its benchmark verdicts. */
 function phoneRows(runs) {
   const lines = [];
+  const verdicts = [];
   for (const benchmark of BENCHMARKS) {
     const entry = runs.get(benchmark);
     if (!entry) {
-      lines.push(tableLine([benchmark, '-', '-', '-', '-', '-', '-', '-', VERDICTS.notRun, '-']));
+      lines.push(tableLine([benchmark, '-', '-', '-', '-', '-', '-', '-', '-', VERDICTS.notRun, '-']));
+      verdicts.push({ benchmark, verdict: VERDICTS.notRun });
       continue;
     }
     const { record } = entry;
     const memory = record.memory || {};
     const { verdict, reasons } = verdictOf(record);
+    verdicts.push({ benchmark, verdict });
     lines.push(
       tableLine([
         benchmark,
         record.startedAt || '-',
+        deviceText(deviceOf(record)),
         record.status || '-',
         mib(memory.peakFootprintBytes),
         yesNo(memory.warning),
@@ -276,61 +464,103 @@ function phoneRows(runs) {
     );
     if (verdict === VERDICTS.doesntWork) {
       lines.push(
-        tableLine(['', '', '', '', '', '', '', '', 'PLAN change needed: (fill in)', '']),
+        tableLine(['', '', '', '', '', '', '', '', '', 'PLAN change needed: (fill in)', '']),
       );
     }
+  }
+  return { lines, verdicts };
+}
+
+/** One phone's overall verdict: it passes only when every benchmark works. */
+function phoneVerdictLine(verdicts) {
+  const failing = verdicts.filter(
+    ({ verdict }) => verdict !== VERDICTS.works && verdict !== VERDICTS.limits,
+  );
+  if (failing.length === 0) {
+    return 'Verdict: passes every user-facing limit.';
+  }
+  return `Verdict: fails (${failing.map(({ benchmark, verdict }) => `${benchmark} ${verdict}`).join(', ')}).`;
+}
+
+/** The limits as markdown, for the report and docs/feasibility.md. */
+function limitLines() {
+  return [
+    'Limits (`LIMITS` in `scripts/feasibility-report.js`). Miss any one, or record no number for it, ' +
+      "and the run doesn't work. Every limit is a real-device limit: a simulator run can't pass.",
+    '',
+    ...LIMIT_CHECKS.map(({ text, benchmarks }) => `- ${text}${benchmarks ? '' : ', every benchmark'}`),
+    '- kill recovery covers every kill point (kill-recovery note `killPointsPassed`, "N of M" with N = M)',
+    '',
+    "Also doesn't work: status not ok, a kill or crash, no device model, iOS version or simulator/real-device " +
+      'record, a failed check in the notes (proofs not all verified, accounts not all found, scan not complete, ' +
+      `fewer than ${THRESHOLDS.worstCaseCaches} RandomX caches in the worst case, a kill point lost or paid twice). ` +
+      'Works with limits: a memory warning. Works: otherwise.',
+  ];
+}
+
+function minimumPhoneLine() {
+  return `Minimum phone: ${MINIMUM_PHONE.name} (${MINIMUM_PHONE.models.join(', ')}), until it is decided.`;
+}
+
+/** The phone sections of the report, each heading starting with `heading`. */
+function resultLines(records, heading) {
+  const phones = latestRuns(records);
+  if (phones.size === 0) {
+    return ['No Phase 0 benchmark runs recorded.', '', minimumPhoneOwed()];
+  }
+  const lines = [];
+  for (const { model, kind, runs } of phones.values()) {
+    const systems = [...new Set([...runs.values()].map(({ record }) => (record.device || {}).systemVersion))]
+      .filter(Boolean)
+      .sort();
+    const about = [systems.length > 0 ? `iOS ${systems.join(', ')}` : 'iOS -', kind].join(', ');
+    lines.push(`${heading} ${model} (${about})`, '');
+    lines.push(tableLine(COLUMNS), tableLine(COLUMNS.map(() => '---')));
+    const { lines: rowLines, verdicts } = phoneRows(runs);
+    lines.push(...rowLines, '', phoneVerdictLine(verdicts), '');
+  }
+  const ranOnMinimum = [...phones.values()].some(
+    ({ model, kind }) => kind === DEVICE_KINDS.real && MINIMUM_PHONE.models.includes(model),
+  );
+  if (!ranOnMinimum) {
+    lines.push(minimumPhoneOwed());
   }
   return lines;
 }
 
-function thresholdLines() {
-  return [
-    'Thresholds (THRESHOLDS in scripts/feasibility-report.js):',
-    '',
-    `- doesn't work: status not ok, a kill or crash, peak footprint ${mib(THRESHOLDS.doesntWorkFootprintBytes)} or more, ` +
-      'a failed check in the notes (proofs not all verified, accounts not all found, scan not complete, ' +
-      `fewer than ${THRESHOLDS.worstCaseCaches} RandomX caches in the worst case, a kill point lost or paid twice)`,
-    `- works with limits: a memory warning, worst thermal ${THRESHOLDS.limitsThermalStates.join(' or ')}, ` +
-      `or peak footprint ${mib(THRESHOLDS.limitsFootprintBytes)} or more`,
-    '- works: otherwise',
-  ];
+function minimumPhoneOwed() {
+  return `Minimum-phone (${MINIMUM_PHONE.name}) real-device run still owed.`;
+}
+
+function checkRecords(records) {
+  if (!Array.isArray(records)) {
+    throw new Error('bench results must be a JSON array of run records');
+  }
 }
 
 /** The markdown report of an array of run records. */
 function buildReport(records) {
-  if (!Array.isArray(records)) {
-    throw new Error('bench results must be a JSON array of run records');
-  }
-  const phones = latestRuns(records);
-  const lines = ['# Feasibility report', ''];
-  if (phones.size === 0) {
-    lines.push('No Phase 0 benchmark runs recorded.');
-    return lines.join('\n');
-  }
-  lines.push(...thresholdLines(), '');
-  for (const [model, runs] of phones) {
-    const systems = [...new Set([...runs.values()].map(({ record }) => (record.device || {}).systemVersion))]
-      .filter(Boolean)
-      .sort();
-    lines.push(`## ${model}${systems.length > 0 ? ` (iOS ${systems.join(', ')})` : ''}`, '');
-    lines.push(tableLine(COLUMNS), tableLine(COLUMNS.map(() => '---')));
-    lines.push(...phoneRows(runs), '');
-  }
-  if (phones.size === 1) {
-    lines.push('Older-phone run still owed.');
-  }
+  checkRecords(records);
+  const lines = ['# Feasibility report', '', ...limitLines(), '', minimumPhoneLine(), ''];
+  lines.push(...resultLines(records, '##'));
   return lines.join('\n').trimEnd();
 }
 
-/** Parses the text of bench-results.json and builds the report. */
-function buildReportText(text) {
+/** Parses the text of bench-results.json into run records. */
+function parseResults(text) {
   let records;
   try {
     records = JSON.parse(text);
   } catch (error) {
     throw new Error(`bench results are not valid JSON: ${error.message}`);
   }
-  return buildReport(records);
+  checkRecords(records);
+  return records;
+}
+
+/** Parses the text of bench-results.json and builds the report. */
+function buildReportText(text) {
+  return buildReport(parseResults(text));
 }
 
 function main(argv) {
@@ -348,4 +578,20 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildReport, buildReportText, verdictOf, THRESHOLDS, BENCHMARKS, VERDICTS };
+module.exports = {
+  buildReport,
+  buildReportText,
+  parseResults,
+  verdictOf,
+  deviceOf,
+  limitLines,
+  minimumPhoneLine,
+  resultLines,
+  LIMITS,
+  THRESHOLDS,
+  JETSAM_LIMIT_BYTES,
+  MINIMUM_PHONE,
+  BENCHMARKS,
+  VERDICTS,
+  DEVICE_KINDS,
+};

@@ -1,4 +1,4 @@
-import { buildReport, buildReportText, THRESHOLDS, verdictOf } from '../scripts/feasibility-report';
+import { buildReport, buildReportText, verdictOf } from '../scripts/feasibility-report';
 import fixture from './fixtures/feasibility-results.json';
 
 const MIB = 1024 * 1024;
@@ -6,7 +6,7 @@ const MIB = 1024 * 1024;
 /** One run record, as the phone writes it to bench-results.json. */
 type RunRecord = {
   benchmark: string;
-  device: { model: string; systemName: string; systemVersion: string; lowPowerMode: boolean };
+  device: { model: string; systemName: string; systemVersion: string; lowPowerMode: boolean; simulator?: boolean };
   memory: {
     killed: boolean;
     warning: boolean;
@@ -31,14 +31,19 @@ function cells(line: string): string[] {
     .map((cell) => cell.trim());
 }
 
-/** The table lines of one phone's section of the report. */
-function section(report: string, model: string): string[] {
+/** The lines of one phone's section of the report. */
+function sectionLines(report: string, model: string): string[] {
   const lines = report.split('\n');
-  const start = lines.findIndex((line) => line.startsWith(`## ${model}`));
+  const start = lines.findIndex((line) => line.startsWith(`## ${model} `));
   expect(start).toBeGreaterThanOrEqual(0);
   const rest = lines.slice(start + 1);
   const end = rest.findIndex((line) => line.startsWith('## '));
-  return (end === -1 ? rest : rest.slice(0, end)).filter((line) => line.startsWith('|'));
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
+/** The table lines of one phone's section of the report. */
+function section(report: string, model: string): string[] {
+  return sectionLines(report, model).filter((line) => line.startsWith('|'));
 }
 
 /** Benchmark name -> its row's cells, for one phone (the header row and divider skipped). */
@@ -53,21 +58,26 @@ function rows(report: string, model: string): Map<string, string[]> {
   return byName;
 }
 
-const VERDICT = 8;
-const WHY = 9;
+const RUN = 1;
+const DEVICE = 2;
+const FOOTPRINT = 4;
+const WARNING = 5;
+const KEY_NUMBERS = 8;
+const VERDICT = 9;
+const WHY = 10;
 
 function ok(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
-    benchmark: 'header-sync',
-    device: { model: 'iPhone17,1', systemName: 'iOS', systemVersion: '18.1.0', lowPowerMode: false },
+    benchmark: 'kill-recovery',
+    device: { model: 'iPhone13,2', systemName: 'iOS', systemVersion: '18.1.0', lowPowerMode: false },
     memory: {
       killed: false,
       warning: false,
       peakFootprintBytes: 500 * MIB,
       peakResidentBytes: 500 * MIB,
-      minAvailableBytes: 2000 * MIB,
+      minAvailableBytes: 1000 * MIB,
     },
-    notes: {},
+    notes: { killPointsPassed: '7 of 7 kill points recorded' },
     stages: [],
     startedAt: '2026-10-20T09:00:00Z',
     status: 'ok',
@@ -81,7 +91,7 @@ describe('feasibility-report', () => {
   const report = buildReport(fixture);
 
   it('gives every Phase 0 benchmark one row per phone, in order', () => {
-    for (const model of ['iPhone17,1', 'iPhone13,2']) {
+    for (const model of ['iPhone17,1', 'iPhone13,2', 'arm64']) {
       expect([...rows(report, model).keys()]).toEqual([
         'summon',
         'header-sync',
@@ -93,109 +103,134 @@ describe('feasibility-report', () => {
     expect(report).not.toContain('dummy');
   });
 
-  it('names each phone with its iOS version', () => {
-    expect(report).toContain('## iPhone17,1 (iOS 18.1.0)');
-    expect(report).toContain('## iPhone13,2 (iOS 17.6.1)');
+  it('names each phone with its iOS version and whether it is a simulator', () => {
+    expect(report).toContain('## iPhone17,1 (iOS 18.1.0, real device)');
+    expect(report).toContain('## iPhone13,2 (iOS 17.6.1, real device)');
+    expect(report).toContain('## arm64 (iOS 18.1.0, simulator)');
+  });
+
+  it('records the device of every run in its row', () => {
+    expect(rows(report, 'iPhone13,2').get('summon')![DEVICE]).toBe('iPhone13,2, iOS 17.6.1, real device');
+    expect(rows(report, 'arm64').get('summon')![DEVICE]).toBe('arm64, iOS 18.1.0, simulator');
   });
 
   it('judges the first phone from its latest run of each benchmark', () => {
     const phone = rows(report, 'iPhone17,1');
 
     expect(phone.get('summon')![VERDICT]).toBe('works');
-    expect(phone.get('summon')![7]).toBe('verified 5/5, prove 4100-4800 ms, proof bytes 1800');
+    expect(phone.get('summon')![KEY_NUMBERS]).toBe('verified 5/5, prove 4100-4800 ms, proof bytes 1800');
 
-    expect(phone.get('header-sync')![VERDICT]).toBe('works with limits');
+    // Serious heat now fails the run.
+    expect(phone.get('header-sync')![VERDICT]).toBe("doesn't work");
     expect(phone.get('header-sync')![WHY]).toBe('thermal serious');
 
     expect(phone.get('restore')![VERDICT]).toBe("doesn't work");
     expect(phone.get('restore')![WHY]).toBe('found 2 of 3 accounts');
+    expect(phone.get('restore')![KEY_NUMBERS]).toBe(
+      'accounts 2/3, scan complete true, cached balance s 0.800, first balance s 4.200, restore s 61.000',
+    );
 
     // The failed run is older and the deliberate kill is not judged.
-    expect(phone.get('kill-recovery')![1]).toBe('2026-10-20T09:40:00Z');
+    expect(phone.get('kill-recovery')![RUN]).toBe('2026-10-20T09:40:00Z');
     expect(phone.get('kill-recovery')![VERDICT]).toBe('works');
 
-    // The later worst-case run, with its memory warning and 1.6 GiB.
+    // The later worst-case run, with its memory warning and 1.6 GiB, under the 4 GiB limit.
     const worst = phone.get('worst-case')!;
-    expect(worst[1]).toBe('2026-10-20T10:30:00Z');
-    expect(worst[3]).toBe('1640.0 MiB');
-    expect(worst[4]).toBe('yes');
-    expect(worst[7]).toBe('caches 2, verified 3/3, prove 5600-7000 ms');
+    expect(worst[RUN]).toBe('2026-10-20T10:30:00Z');
+    expect(worst[FOOTPRINT]).toBe('1640.0 MiB');
+    expect(worst[WARNING]).toBe('yes');
+    expect(worst[KEY_NUMBERS]).toBe('caches 2, verified 3/3, prove 5600-7000 ms');
     expect(worst[VERDICT]).toBe('works with limits');
-    expect(worst[WHY]).toBe('memory warning; peak footprint 1640.0 MiB');
+    expect(worst[WHY]).toBe('memory warning');
+
+    expect(sectionLines(report, 'iPhone17,1')).toContain(
+      "Verdict: fails (header-sync doesn't work, restore doesn't work).",
+    );
   });
 
   it('judges the second phone, with a benchmark not run', () => {
     const phone = rows(report, 'iPhone13,2');
 
     expect(phone.get('summon')![VERDICT]).toBe("doesn't work");
-    expect(phone.get('summon')![WHY]).toBe('status killed; killed; only 1 of 5 proofs verified');
-    expect(phone.get('header-sync')![VERDICT]).toBe('works');
+    expect(phone.get('summon')![WHY]).toBe('status killed; killed; only 1 of 5 proofs verified; thermal serious');
+    expect(phone.get('header-sync')![VERDICT]).toBe("doesn't work");
+    expect(phone.get('header-sync')![WHY]).toBe('header checks over budget');
     expect(phone.get('restore')![VERDICT]).toBe('not run');
     expect(phone.get('kill-recovery')![VERDICT]).toBe("doesn't work");
     expect(phone.get('kill-recovery')![WHY]).toBe(
-      'killPoint.prepared: FAILED: the record is gone and the chain has 0 payments',
+      'only 6 of 7 kill points passed; killPoint.prepared: FAILED: the record is gone and the chain has 0 payments',
     );
     expect(phone.get('worst-case')![VERDICT]).toBe("doesn't work");
     expect(phone.get('worst-case')![WHY]).toContain('1 RandomX caches held, not 2');
   });
 
+  it("never passes a simulator run, however good its numbers", () => {
+    const summon = rows(report, 'arm64').get('summon')!;
+    expect(summon[VERDICT]).toBe("doesn't work");
+    expect(summon[WHY]).toContain("simulator run: can't pass a real-device limit");
+  });
+
   it("puts a PLAN change line right under each doesn't-work row and nowhere else", () => {
-    for (const model of ['iPhone17,1', 'iPhone13,2']) {
+    for (const model of ['iPhone17,1', 'iPhone13,2', 'arm64']) {
       const lines = section(report, model).slice(2);
       lines.forEach((line, index) => {
         const row = cells(line);
         const isPlanLine = line.includes('PLAN change needed: (fill in)');
         if (isPlanLine) {
           expect(row[0]).toBe('');
+          expect(row[VERDICT]).toBe('PLAN change needed: (fill in)');
           expect(cells(lines[index - 1])[VERDICT]).toBe("doesn't work");
         } else if (row[VERDICT] === "doesn't work") {
           expect(lines[index + 1]).toContain('PLAN change needed: (fill in)');
         }
       });
     }
-    expect(report.match(/PLAN change needed: \(fill in\)/g)).toHaveLength(4);
+    expect(report.match(/PLAN change needed: \(fill in\)/g)).toHaveLength(7);
   });
 
-  it('does not say an older-phone run is owed when two phones ran', () => {
-    expect(report).not.toContain('Older-phone run still owed.');
+  it('does not say a minimum-phone run is owed when the iPhone 12 ran on a real device', () => {
+    expect(report).not.toContain('real-device run still owed');
   });
 
-  it('ends with the older-phone run owed when only one phone ran', () => {
+  it('ends with the minimum-phone run owed when the iPhone 12 did not run', () => {
     const onePhone = fixture.filter((record) => record.device.model === 'iPhone17,1');
     const single = buildReport(onePhone);
 
-    expect(single).not.toContain('iPhone13,2');
-    expect(single.trimEnd().endsWith('Older-phone run still owed.')).toBe(true);
+    expect(single).not.toContain('iPhone13,2 (');
+    expect(single.trimEnd().endsWith('Minimum-phone (iPhone 12) real-device run still owed.')).toBe(true);
   });
 
-  it('shows the thresholds it judged by', () => {
-    expect(report).toContain('2048.0 MiB or more');
-    expect(report).toContain('1536.0 MiB or more');
-    expect(report).toContain('serious or critical');
+  it('owes the minimum-phone run when the iPhone 12 ran only in the simulator', () => {
+    const simulated = fixture
+      .filter((record) => record.device.model === 'iPhone13,2')
+      .map((record) => ({ ...record, device: { ...record.device, simulator: true } }));
+    const single = buildReport(simulated);
+
+    expect(single).toContain('## iPhone13,2 (iOS 17.6.1, simulator)');
+    expect(single).toContain('Minimum-phone (iPhone 12) real-device run still owed.');
+  });
+
+  it('shows the limits it judged by and the minimum phone', () => {
+    expect(report).toContain('balance on screen ≤ 2 s from cache');
+    expect(report).toContain('restore time to first balance ≤ 10 s');
+    expect(report).toContain('every Summon proof ≤ 10 s');
+    expect(report).toContain("peak memory under the device's jetsam limit");
+    expect(report).toContain('no thermal state of serious or critical');
+    expect(report).toContain('header checks within their budget');
+    expect(report).toContain('"N of M" with N = M');
+    expect(report).toContain('Minimum phone: iPhone 12 (iPhone13,2), until it is decided.');
   });
 
   describe('verdicts', () => {
-    it('is works for a clean run', () => {
+    it('is works for a clean real-device run', () => {
       expect(verdictOf(ok())).toEqual({ verdict: 'works', reasons: [] });
     });
 
-    it("is doesn't work at the footprint limit, and with limits just below it", () => {
-      const at = ok({ memory: { ...ok().memory, peakFootprintBytes: THRESHOLDS.doesntWorkFootprintBytes } });
-      const below = ok({ memory: { ...ok().memory, peakFootprintBytes: THRESHOLDS.doesntWorkFootprintBytes - 1 } });
-      expect(verdictOf(at).verdict).toBe("doesn't work");
-      expect(verdictOf(below).verdict).toBe('works with limits');
-    });
-
-    it('is works with limits at the lower footprint limit, and works just below it', () => {
-      const at = ok({ memory: { ...ok().memory, peakFootprintBytes: THRESHOLDS.limitsFootprintBytes } });
-      const below = ok({ memory: { ...ok().memory, peakFootprintBytes: THRESHOLDS.limitsFootprintBytes - 1 } });
-      expect(verdictOf(at).verdict).toBe('works with limits');
-      expect(verdictOf(below).verdict).toBe('works');
-    });
-
-    it('is works with limits at critical heat', () => {
-      const hot = ok({ thermal: { start: 'fair', end: 'critical', worst: 'critical' } });
-      expect(verdictOf(hot)).toEqual({ verdict: 'works with limits', reasons: ['thermal critical'] });
+    it('is works with limits for a memory warning', () => {
+      expect(verdictOf(ok({ memory: { ...ok().memory, warning: true } }))).toEqual({
+        verdict: 'works with limits',
+        reasons: ['memory warning'],
+      });
     });
 
     it("is doesn't work for a failed or killed run", () => {
@@ -204,22 +239,20 @@ describe('feasibility-report', () => {
     });
 
     it("is doesn't work for a restore whose scan did not complete", () => {
-      const run = ok({
-        benchmark: 'restore',
-        notes: { accountsFound: '3', accountsExpected: '3', scanComplete: 'false' },
-      });
+      const notes = { accountsFound: '3', accountsExpected: '3', balanceFromCacheSeconds: '1', timeToFirstBalanceSeconds: '5' };
+      const run = ok({ benchmark: 'restore', notes: { ...notes, scanComplete: 'false' } });
       expect(verdictOf(run)).toEqual({ verdict: "doesn't work", reasons: ['scan not complete'] });
-      const complete = ok({
-        benchmark: 'restore',
-        notes: { accountsFound: '3', accountsExpected: '3', scanComplete: 'true' },
-      });
+      const complete = ok({ benchmark: 'restore', notes: { ...notes, scanComplete: 'true' } });
       expect(verdictOf(complete).verdict).toBe('works');
     });
 
     it("is doesn't work for a kill point that paid twice", () => {
       const run = ok({
-        benchmark: 'kill-recovery',
-        notes: { 'killPoint.sent': 'FAILED: broadcast 2 times', 'killPoint.none': 'ok: paid once' },
+        notes: {
+          'killPoint.sent': 'FAILED: broadcast 2 times',
+          'killPoint.none': 'ok: paid once',
+          killPointsPassed: '7 of 7 kill points recorded',
+        },
       });
       expect(verdictOf(run)).toEqual({
         verdict: "doesn't work",
