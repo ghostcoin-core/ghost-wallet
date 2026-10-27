@@ -3,7 +3,25 @@ import fixture from './fixtures/feasibility-results.json';
 
 const MIB = 1024 * 1024;
 
-type Record = (typeof fixture)[number];
+/** One run record, as the phone writes it to bench-results.json. */
+type RunRecord = {
+  benchmark: string;
+  device: { model: string; systemName: string; systemVersion: string; lowPowerMode: boolean };
+  memory: {
+    killed: boolean;
+    warning: boolean;
+    peakFootprintBytes: number;
+    peakResidentBytes: number;
+    minAvailableBytes: number;
+  };
+  notes: { [key: string]: string };
+  stages: { name: string; seconds: number }[];
+  startedAt: string;
+  status: string;
+  error?: string;
+  thermal: { start: string; end: string; worst: string };
+  totalSeconds: number;
+};
 
 function cells(line: string): string[] {
   return line
@@ -38,7 +56,7 @@ function rows(report: string, model: string): Map<string, string[]> {
 const VERDICT = 8;
 const WHY = 9;
 
-function ok(overrides: Partial<Record> & { notes?: { [key: string]: string } } = {}) {
+function ok(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     benchmark: 'header-sync',
     device: { model: 'iPhone17,1', systemName: 'iOS', systemVersion: '18.1.0', lowPowerMode: false },
