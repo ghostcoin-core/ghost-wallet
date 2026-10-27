@@ -37,7 +37,8 @@ enum RestoreBenchmarkError: LocalizedError {
 ///
 /// Stage `sync` checks the test chain's headers from the pinned start in
 /// TestChainConfig.swift with HeaderSync, as the header-sync benchmark does,
-/// and takes its best header as the tip: a height and a block hash. The
+/// in one budgeted header run (`HeaderSyncBenchmark.runBudget`), and takes
+/// its best header as the tip: a height and a block hash. The
 /// pinned start only anchors that header check: the restore itself does not
 /// start at any height, and finds accounts funded long before it.
 ///
@@ -82,9 +83,14 @@ enum RestoreBenchmark {
       try context.stage("sync") {
         let tip = try headerNode.blockNumber()
         var tally = HeaderSyncBenchmark.Tally()
+        // One budgeted header run, stopped by heat and Low Power Mode like the
+        // header-sync benchmark's.
+        let run = sync.startRun(
+          budget: HeaderSyncBenchmark.runBudget, conditions: HeaderSyncBenchmark.conditions())
         try HeaderSyncBenchmark.syncThrough(
-          tip, sync: sync, node: headerNode, context: context, tally: &tally)
+          tip, sync: sync, run: run, node: headerNode, context: context, tally: &tally)
         context.note("syncedHeaders", String(tally.accepted))
+        context.note("syncCpuSeconds", String(format: "%.3f", tally.cpuSeconds))
         context.note("maxCacheCount", String(tally.maxCacheCount))
       }
       let tipHeight = sync.bestHeight()
