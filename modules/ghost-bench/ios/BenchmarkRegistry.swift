@@ -11,6 +11,7 @@ enum BenchmarkRegistry {
     DummyBenchmark.name: DummyBenchmark.run,
     SummonBenchmark.name: SummonBenchmark.run,
     HeaderSyncBenchmark.name: HeaderSyncBenchmark.run,
+    RestoreBenchmark.name: RestoreBenchmark.run,
   ]
 
   static var names: [String] { benchmarks.keys.sorted() }
