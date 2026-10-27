@@ -1,0 +1,7 @@
+# Written by `ubrn build ios --and-generate`; never committed.
+build/
+cpp/
+ios/
+src/
+*.podspec
+*.xcframework

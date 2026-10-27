@@ -20,7 +20,7 @@ fail() {
 DEVICE="${GHOST_WALLET_DEVICE:-}"
 [ -n "$DEVICE" ] || fail "set GHOST_WALLET_DEVICE to the UDID of the connected iPhone"
 
-for tool in git node corepack pod xcodebuild xcrun; do
+for tool in git node corepack pod xcodebuild xcrun cargo rustup; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed"
 done
 
@@ -34,6 +34,11 @@ git pull --ff-only origin main
 echo "==> pnpm install"
 corepack enable
 pnpm install --frozen-lockfile
+
+echo "==> rust core (XCFramework and bindings)"
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+cargo test --manifest-path core/Cargo.toml --locked
+(cd modules/ghost-core && ../../node_modules/.bin/ubrn build ios --config ubrn.config.yaml --and-generate --release)
 
 echo "==> expo prebuild (ios)"
 pnpm exec expo prebuild --platform ios --clean
