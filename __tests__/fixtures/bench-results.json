@@ -1,0 +1,70 @@
+[
+  {
+    "battery": {
+      "drop": 0.01,
+      "endLevel": 0.8,
+      "startLevel": 0.81,
+      "state": "unplugged"
+    },
+    "benchmark": "dummy",
+    "device": {
+      "lowPowerMode": false,
+      "model": "iPhone16,1",
+      "systemName": "iOS",
+      "systemVersion": "18.1.0"
+    },
+    "memory": {
+      "killed": false,
+      "minAvailableBytes": 1258291200,
+      "peakFootprintBytes": 692060160,
+      "peakResidentBytes": 702545920,
+      "warning": false
+    },
+    "notes": {
+      "allocatedMiB": "600",
+      "hashedMiB": "61440"
+    },
+    "stages": [
+      { "name": "allocate", "seconds": 0.8421 },
+      { "name": "hash", "seconds": 30.0012 }
+    ],
+    "startedAt": "2026-10-20T09:15:00Z",
+    "status": "ok",
+    "thermal": {
+      "end": "fair",
+      "start": "nominal",
+      "worst": "fair"
+    },
+    "totalSeconds": 30.8501
+  },
+  {
+    "battery": {
+      "startLevel": 0.8,
+      "state": "unplugged"
+    },
+    "benchmark": "dummy",
+    "device": {
+      "lowPowerMode": false,
+      "model": "iPhone16,1",
+      "systemName": "iOS",
+      "systemVersion": "18.1.0"
+    },
+    "memory": {
+      "killed": true,
+      "minAvailableBytes": 52428800,
+      "peakFootprintBytes": 2147483648,
+      "peakResidentBytes": 2202009600,
+      "warning": true
+    },
+    "notes": {},
+    "stages": [{ "name": "allocate", "seconds": 1.5 }],
+    "startedAt": "2026-10-20T09:20:00Z",
+    "status": "killed",
+    "thermal": {
+      "end": "serious",
+      "start": "fair",
+      "worst": "serious"
+    },
+    "totalSeconds": 4
+  }
+]
