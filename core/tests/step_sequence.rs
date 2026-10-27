@@ -1,70 +1,74 @@
-//! The restart-safe step sequence of `step_sequence`, over an in-memory
-//! `StepStore` (records kept in their stored form) and a fake chain that
-//! counts every broadcast.
+//! The payment records of `step_sequence`, over an in-memory `PaymentStore`
+//! (records kept in their stored form, payloads apart) and a small fake
+//! chain where a broadcast goes into the next block.
 //!
-//! For each of the six steps, and right after the broadcast before its reply,
-//! the payment is killed (the sequence is dropped), reopened from the store
-//! and recovered: it ends on the chain exactly once, broadcast once, signed
-//! once, with the hash it had at the kill, and the record is gone. A record
-//! on the chain is never resent, a tampered or unreadable record is refused
-//! and nothing is sent, and a record never moves backwards.
+//! A settled record is kept with its block hash, never deleted; a record
+//! moves back only when the chain takes its block away; steps are otherwise
+//! saved in order; a tampered or unreadable record or payload is refused and
+//! nothing is sent; and new attempts keep the payment's identity.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use ghost_wallet_core::{
-    ChainView, RECORD_VERSION, Recovery, SETTLE_CONFIRMATIONS, Step, StepError, StepRecord, StepSequence, StepStore,
-    decode_step_record, encode_step_record, recover, transaction_hash,
+    Attempt, ChainView, Identity, Inclusion, MAX_ATTEMPTS, PaymentIntent, PaymentKind, PaymentRecord, PaymentSequence,
+    PaymentStore, RECORD_VERSION, Receipt, ReceiptStatus, Recovery, SETTLE_CONFIRMATIONS, Step, StepError,
+    decode_payment_record, encode_payment_record, transaction_hash,
 };
 
 const ID: &str = "test-payment-1";
 
+fn intent() -> PaymentIntent {
+    PaymentIntent {
+        kind: PaymentKind::Vanish,
+        identity: Identity::AccountNonce { account: b"test-account-1".to_vec(), nonce: 3 },
+        details: b"test vanish of 2".to_vec(),
+    }
+}
+
 #[derive(Default)]
 struct StoreState {
-    /// Every record in its stored form, as the Keychain holds it.
     records: BTreeMap<String, Vec<u8>>,
-    /// Every save, in order.
-    saves: Vec<(String, Step)>,
+    payloads: BTreeMap<(String, Vec<u8>), Vec<u8>>,
+    saves: Vec<Step>,
     fail_saves: bool,
 }
 
-/// An in-memory store. Clones share the records, as two launches share the
-/// Keychain.
 #[derive(Clone, Default)]
 struct MemoryStore(Arc<Mutex<StoreState>>);
 
 impl MemoryStore {
-    fn state(&self) -> std::sync::MutexGuard<'_, StoreState> {
+    fn state(&self) -> MutexGuard<'_, StoreState> {
         self.0.lock().unwrap()
     }
 
-    fn saved_steps(&self, id: &str) -> Vec<Step> {
-        self.state().saves.iter().filter(|(saved, _)| saved == id).map(|(_, step)| *step).collect()
+    fn stored(&self) -> PaymentRecord {
+        decode_payment_record(self.state().records[ID].clone()).unwrap()
     }
 
-    fn stored(&self, id: &str) -> Option<StepRecord> {
-        self.state().records.get(id).map(|bytes| decode_step_record(bytes.clone()).unwrap())
+    fn put_raw(&self, bytes: Vec<u8>) {
+        self.state().records.insert(ID.to_owned(), bytes);
     }
 
-    fn put_raw(&self, id: &str, bytes: Vec<u8>) {
-        self.state().records.insert(id.to_owned(), bytes);
+    fn open(&self) -> Result<Arc<PaymentSequence>, StepError> {
+        PaymentSequence::open(Box::new(self.clone()), ID.to_owned())
     }
 }
 
-impl StepStore for MemoryStore {
-    fn save(&self, record: StepRecord) -> Result<(), StepError> {
+impl PaymentStore for MemoryStore {
+    fn save(&self, record: PaymentRecord) -> Result<(), StepError> {
         let mut state = self.state();
         if state.fail_saves {
             return Err(StepError::Store { reason: "the test store refuses saves".to_owned() });
         }
-        state.saves.push((record.id.clone(), record.step));
-        state.records.insert(record.id.clone(), encode_step_record(record));
+        state.saves.push(record.step);
+        state.records.insert(record.id.clone(), encode_payment_record(record));
         Ok(())
     }
 
-    fn load(&self, id: String) -> Result<Option<StepRecord>, StepError> {
+    fn load(&self, id: String) -> Result<Option<PaymentRecord>, StepError> {
         let Some(bytes) = self.state().records.get(&id).cloned() else { return Ok(None) };
-        decode_step_record(bytes).map(Some).map_err(|error| match error {
+        decode_payment_record(bytes).map(Some).map_err(|error| match error {
             StepError::Unreadable { reason, .. } => StepError::Unreadable { id, reason },
             other => other,
         })
@@ -75,26 +79,40 @@ impl StepStore for MemoryStore {
     }
 
     fn remove(&self, id: String) -> Result<(), StepError> {
-        self.state().records.remove(&id);
+        let mut state = self.state();
+        state.records.remove(&id);
+        state.payloads.retain(|(owner, _), _| *owner != id);
         Ok(())
+    }
+
+    fn save_payload(&self, id: String, hash: Vec<u8>, signed_transaction: Vec<u8>) -> Result<(), StepError> {
+        let mut state = self.state();
+        if state.fail_saves {
+            return Err(StepError::Store { reason: "the test store refuses saves".to_owned() });
+        }
+        state.payloads.insert((id, hash), signed_transaction);
+        Ok(())
+    }
+
+    fn load_payload(&self, id: String, hash: Vec<u8>) -> Result<Option<Vec<u8>>, StepError> {
+        Ok(self.state().payloads.get(&(id, hash)).cloned())
     }
 }
 
 #[derive(Default)]
 struct ChainState {
-    height: u64,
-    /// Every transaction in a block: its bytes and the height of its block.
-    included: Vec<(Vec<u8>, u64)>,
-    /// How many times each hash was broadcast.
-    broadcasts: BTreeMap<Vec<u8>, u32>,
+    /// Each block: its hash and its transactions' hashes.
+    blocks: Vec<(Vec<u8>, Vec<Vec<u8>>)>,
+    broadcasts: u32,
+    made: u64,
 }
 
-/// A fake chain: a broadcast transaction goes into the next block, once.
+/// A broadcast goes into a new block at once; `reorg` takes blocks away.
 #[derive(Clone, Default)]
 struct FakeChain(Arc<Mutex<ChainState>>);
 
 impl FakeChain {
-    fn state(&self) -> std::sync::MutexGuard<'_, ChainState> {
+    fn state(&self) -> MutexGuard<'_, ChainState> {
         self.0.lock().unwrap()
     }
 
@@ -102,367 +120,333 @@ impl FakeChain {
         Box::new(self.clone())
     }
 
-    fn broadcast(&self, bytes: Vec<u8>) {
-        let hash = transaction_hash(bytes.clone());
+    fn block(&self, txs: Vec<Vec<u8>>) {
         let mut state = self.state();
-        *state.broadcasts.entry(hash.clone()).or_default() += 1;
-        if !state.included.iter().any(|(tx, _)| transaction_hash(tx.clone()) == hash) {
-            state.height += 1;
-            let height = state.height;
-            state.included.push((bytes, height));
+        state.made += 1;
+        let hash = transaction_hash(format!("test block {}", state.made).into_bytes());
+        state.blocks.push((hash, txs));
+    }
+
+    fn broadcast(&self, bytes: Vec<u8>) {
+        self.state().broadcasts += 1;
+        if self.receipt(transaction_hash(bytes.clone())).unwrap().is_none() {
+            self.block(vec![transaction_hash(bytes)]);
         }
     }
 
     fn mine(&self) {
-        self.state().height += 1;
+        self.block(Vec::new());
     }
 
-    fn broadcasts(&self, hash: &[u8]) -> u32 {
-        self.state().broadcasts.get(hash).copied().unwrap_or(0)
-    }
-
-    fn total_broadcasts(&self) -> u32 {
-        self.state().broadcasts.values().sum()
-    }
-
-    /// The hashes of every transaction in a block that pays `id`.
-    fn payments(&self, id: &str) -> Vec<Vec<u8>> {
-        let tag = format!(" {id} ");
-        self.state()
-            .included
-            .iter()
-            .filter(|(tx, _)| String::from_utf8_lossy(tx).contains(&tag))
-            .map(|(tx, _)| transaction_hash(tx.clone()))
-            .collect()
-    }
-
-    fn included_height(&self, hash: &[u8]) -> Option<u64> {
-        let state = self.state();
-        state.included.iter().find(|(tx, _)| transaction_hash(tx.clone()) == hash).map(|(_, height)| *height)
+    fn reorg(&self, depth: usize) {
+        let mut state = self.state();
+        let keep = state.blocks.len() - depth;
+        state.blocks.truncate(keep);
     }
 }
 
 impl ChainView for FakeChain {
-    fn has_transaction(&self, hash: Vec<u8>) -> Result<bool, StepError> {
-        Ok(self.included_height(&hash).is_some())
+    fn receipt(&self, hash: Vec<u8>) -> Result<Option<Receipt>, StepError> {
+        let state = self.state();
+        Ok(state.blocks.iter().enumerate().find(|(_, (_, txs))| txs.contains(&hash)).map(|(at, (block, _))| {
+            Receipt { status: ReceiptStatus::Success, block_hash: block.clone(), block_height: at as u64 + 1 }
+        }))
     }
 
-    fn confirmations(&self, hash: Vec<u8>) -> Result<u64, StepError> {
-        let height = self.state().height;
-        Ok(self.included_height(&hash).map_or(0, |at| height - at + 1))
+    fn pending(&self, _hash: Vec<u8>) -> Result<bool, StepError> {
+        Ok(false)
+    }
+
+    fn identity_used_by(&self, _identity: Identity) -> Result<Option<Vec<u8>>, StepError> {
+        Ok(None)
+    }
+
+    fn effect_applied(&self, _intent: PaymentIntent, hash: Vec<u8>) -> Result<bool, StepError> {
+        Ok(self.receipt(hash)?.is_some())
+    }
+
+    fn tip_height(&self) -> Result<u64, StepError> {
+        Ok(self.state().blocks.len() as u64)
     }
 }
 
-/// A test signer whose every signature differs, so a second signing would
-/// show as a second payment.
-#[derive(Default)]
-struct Signer {
-    calls: u32,
+fn signed(n: u32) -> Vec<u8> {
+    format!("synthetic test vanish attempt {n}").into_bytes()
 }
 
-impl Signer {
-    fn sign(&mut self, id: &str) -> Vec<u8> {
-        self.calls += 1;
-        format!("synthetic test-chain send {id} attempt {}", self.calls).into_bytes()
-    }
-}
-
-/// Where a run is killed: right after a step is saved, or right after the
-/// broadcast, before its reply is handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kill {
-    At(Step),
-    AfterBroadcast,
-}
-
-const KILL_POINTS: [Kill; 7] = [
-    Kill::At(Step::Prepared),
-    Kill::At(Step::BackedUp),
-    Kill::At(Step::Signed),
-    Kill::At(Step::Sent),
-    Kill::AfterBroadcast,
-    Kill::At(Step::Seen),
-    Kill::At(Step::Settled),
-];
-
-#[derive(Debug, PartialEq, Eq)]
-struct Killed;
-
-/// Moves a payment on until it is settled and removed, as the app does:
-/// ask `recover`, do what it says, repeat. Stops early at `kill`.
-fn drive(seq: &StepSequence, chain: &FakeChain, signer: &mut Signer, kill: Option<Kill>) -> Result<(), Killed> {
-    let id = seq.record().id;
-    for _ in 0..100 {
+/// Drives the payment to its end as the app does; returns the final step.
+fn drive(seq: &PaymentSequence, chain: &FakeChain) -> Step {
+    let mut n = 0;
+    for _ in 0..50 {
         match seq.recover(chain.view()).unwrap() {
-            Recovery::Done => {
-                seq.finish().unwrap();
-                return Ok(());
+            Recovery::BackUp => seq.mark_backed_up().unwrap(),
+            Recovery::Sign | Recovery::Rebuild => {
+                n += 1;
+                seq.add_attempt(signed(n), None).unwrap();
             }
-            Recovery::Resume { step } => {
-                match step {
-                    Step::Prepared => panic!("nothing resumes at prepared"),
-                    Step::BackedUp => seq.mark_backed_up().unwrap(),
-                    Step::Signed => {
-                        seq.mark_signed(signer.sign(&id)).unwrap();
-                    }
-                    Step::Sent => seq.mark_sent().unwrap(),
-                    Step::Seen => seq.mark_seen(chain.view()).unwrap(),
-                    Step::Settled => seq.mark_settled(chain.view()).unwrap(),
-                }
-                if kill == Some(Kill::At(step)) {
-                    return Err(Killed);
-                }
-            }
-            Recovery::ResendSame { bytes } => {
-                assert_eq!(Some(&bytes), seq.record().signed_transaction.as_ref(), "only the stored bytes are sent");
-                if seq.step() == Step::Signed {
-                    seq.mark_sent().unwrap();
-                    if kill == Some(Kill::At(Step::Sent)) {
-                        return Err(Killed);
-                    }
-                }
-                chain.broadcast(bytes);
-                if kill == Some(Kill::AfterBroadcast) {
-                    return Err(Killed);
-                }
-            }
+            Recovery::Send { .. } => chain.broadcast(seq.mark_sent().unwrap()),
             Recovery::Wait => chain.mine(),
+            Recovery::Done { step } => return step,
         }
     }
-    panic!("the payment did not settle");
+    panic!("the payment never finished");
 }
 
-/// Starts the payment and drives it to `kill`.
-fn start_and_kill(store: &MemoryStore, chain: &FakeChain, signer: &mut Signer, kill: Kill) {
-    let seq = StepSequence::start(Box::new(store.clone()), ID.to_owned()).unwrap();
-    if kill == Kill::At(Step::Prepared) {
-        return;
-    }
-    assert_eq!(drive(&seq, chain, signer, Some(kill)), Err(Killed));
-    // `seq` is dropped here: the kill.
-}
-
-/// What the next launch does: open every unfinished payment and drive it.
-fn relaunch(store: &MemoryStore, chain: &FakeChain, signer: &mut Signer, kill: Option<Kill>) -> Result<(), Killed> {
-    let ids = store.list().unwrap();
-    assert_eq!(ids, vec![ID.to_owned()], "the killed payment is found");
-    let seq = StepSequence::open(Box::new(store.clone()), ID.to_owned()).unwrap();
-    drive(&seq, chain, signer, kill)
-}
-
-/// The payment is on the chain once, broadcast once, signed once, settled,
-/// every step saved once in order, and its record removed.
-fn assert_paid_once(
-    store: &MemoryStore,
-    chain: &FakeChain,
-    signer: &Signer,
-    hash_at_kill: Option<Vec<u8>>,
-    kill: Kill,
-) {
-    let payments = chain.payments(ID);
-    assert_eq!(payments.len(), 1, "{kill:?}: the payment is on the chain exactly once");
-    let hash = &payments[0];
-    assert_eq!(chain.broadcasts(hash), 1, "{kill:?}: broadcast exactly once");
-    assert_eq!(chain.total_broadcasts(), 1, "{kill:?}: nothing else was broadcast");
-    assert_eq!(signer.calls, 1, "{kill:?}: signed exactly once");
-    if let Some(at_kill) = hash_at_kill {
-        assert_eq!(&at_kill, hash, "{kill:?}: the transaction hash never changed");
-    }
-    assert!(chain.confirmations(hash.clone()).unwrap() >= SETTLE_CONFIRMATIONS, "{kill:?}: settled");
-    assert_eq!(store.saved_steps(ID), Step::ALL.to_vec(), "{kill:?}: every step saved once, in order");
-    assert!(store.list().unwrap().is_empty(), "{kill:?}: the settled record is removed");
+/// A record killed right after its first attempt was saved.
+fn signed_record() -> (MemoryStore, Arc<PaymentSequence>) {
+    let store = MemoryStore::default();
+    let seq = PaymentSequence::start(Box::new(store.clone()), ID.to_owned(), intent()).unwrap();
+    seq.mark_backed_up().unwrap();
+    seq.add_attempt(signed(1), Some(40)).unwrap();
+    (store, seq)
 }
 
 #[test]
-fn an_unkilled_payment_settles_once() {
-    let (store, chain, mut signer) = (MemoryStore::default(), FakeChain::default(), Signer::default());
-    let seq = StepSequence::start(Box::new(store.clone()), ID.to_owned()).unwrap();
-    drive(&seq, &chain, &mut signer, None).unwrap();
-    let payments = chain.payments(ID);
-    assert_eq!(payments.len(), 1);
-    assert_eq!(chain.broadcasts(&payments[0]), 1);
-    assert_eq!(store.saved_steps(ID), Step::ALL.to_vec());
-    assert!(store.list().unwrap().is_empty());
-}
+fn a_settled_record_is_kept_with_its_block_hash() {
+    let (store, chain) = (MemoryStore::default(), FakeChain::default());
+    let seq = PaymentSequence::start(Box::new(store.clone()), ID.to_owned(), intent()).unwrap();
+    assert_eq!(drive(&seq, &chain), Step::Settled);
 
-#[test]
-fn every_kill_point_recovers_paid_exactly_once() {
-    for kill in KILL_POINTS {
-        let (store, chain, mut signer) = (MemoryStore::default(), FakeChain::default(), Signer::default());
-        start_and_kill(&store, &chain, &mut signer, kill);
-
-        let at_kill = store.stored(ID).expect("the record survives the kill");
-        let expected_step = match kill {
-            Kill::At(step) => step,
-            Kill::AfterBroadcast => Step::Sent,
-        };
-        assert_eq!(at_kill.step, expected_step, "{kill:?}");
-        assert_eq!(at_kill.transaction_hash.is_some(), expected_step >= Step::Signed, "{kill:?}");
-        let broadcasts_at_kill = chain.total_broadcasts();
-
-        relaunch(&store, &chain, &mut signer, None).unwrap();
-        assert_paid_once(&store, &chain, &signer, at_kill.transaction_hash, kill);
-        if matches!(kill, Kill::AfterBroadcast | Kill::At(Step::Seen) | Kill::At(Step::Settled)) {
-            assert_eq!(broadcasts_at_kill, 1, "{kill:?}: the broadcast happened before the kill");
-        }
-    }
-}
-
-#[test]
-fn killed_at_every_point_in_turn_still_pays_once() {
-    let (store, chain, mut signer) = (MemoryStore::default(), FakeChain::default(), Signer::default());
-    start_and_kill(&store, &chain, &mut signer, Kill::At(Step::Prepared));
-    let mut first_hash = None;
-    for kill in &KILL_POINTS[1..] {
-        assert_eq!(relaunch(&store, &chain, &mut signer, Some(*kill)), Err(Killed), "{kill:?}");
-        let hash = store.stored(ID).unwrap().transaction_hash;
-        if first_hash.is_none() {
-            first_hash = hash.clone();
-        }
-        if hash.is_some() {
-            assert_eq!(hash, first_hash, "{kill:?}: the hash never changes");
-        }
-    }
-    relaunch(&store, &chain, &mut signer, None).unwrap();
-    assert_paid_once(&store, &chain, &signer, first_hash, Kill::At(Step::Settled));
-}
-
-#[test]
-fn a_transaction_on_the_chain_is_never_resent() {
-    let (store, chain, mut signer) = (MemoryStore::default(), FakeChain::default(), Signer::default());
-    start_and_kill(&store, &chain, &mut signer, Kill::AfterBroadcast);
-    let record = store.stored(ID).unwrap();
-    assert_eq!(record.step, Step::Sent);
-    let hash = record.transaction_hash.clone().unwrap();
-    assert_eq!(chain.broadcasts(&hash), 1);
-
-    // The chain has it: go on to seen, send nothing.
-    assert_eq!(recover(record.clone(), chain.view()).unwrap(), Recovery::Resume { step: Step::Seen });
-    let seq = StepSequence::open(Box::new(store.clone()), ID.to_owned()).unwrap();
-    assert_eq!(seq.recover(chain.view()).unwrap(), Recovery::Resume { step: Step::Seen });
-
-    // Had it not reached the chain, the same bytes would go again.
-    let empty = FakeChain::default();
+    assert_eq!(store.list().unwrap(), vec![ID.to_owned()], "the settled record is kept");
+    let record = store.stored();
+    assert_eq!(record.step, Step::Settled);
+    let inclusion = record.inclusion.expect("with where it landed");
+    assert_eq!(inclusion.transaction_hash, transaction_hash(signed(1)));
+    assert_eq!(inclusion.block_hash, chain.state().blocks[0].0);
+    assert_eq!(inclusion.block_height, 1);
+    assert_eq!(chain.state().blocks.len() as u64, SETTLE_CONFIRMATIONS);
     assert_eq!(
-        recover(record.clone(), empty.view()).unwrap(),
-        Recovery::ResendSame { bytes: record.signed_transaction.clone().unwrap() }
+        store.state().saves,
+        vec![Step::Prepared, Step::BackedUp, Step::Signed, Step::Sent, Step::Included, Step::Settled]
     );
+    // Reopened later, it is still settled and nothing is sent.
+    let reopened = store.open().unwrap();
+    assert_eq!(reopened.recover(chain.view()).unwrap(), Recovery::Done { step: Step::Settled });
+    assert_eq!(chain.state().broadcasts, 1);
+    assert!(store.state().payloads.contains_key(&(ID.to_owned(), transaction_hash(signed(1)))));
+}
 
-    seq.mark_seen(chain.view()).unwrap();
+#[test]
+fn a_record_moves_back_only_when_the_chain_takes_its_block_away() {
+    let (store, chain) = (MemoryStore::default(), FakeChain::default());
+    let seq = PaymentSequence::start(Box::new(store.clone()), ID.to_owned(), intent()).unwrap();
+    assert_eq!(drive(&seq, &chain), Step::Settled);
+    let settled = seq.record();
+
+    // Nothing the app calls moves a settled record.
+    assert_eq!(seq.mark_backed_up(), Err(StepError::OutOfOrder { from: Step::Settled, to: Step::BackedUp }));
+    assert_eq!(seq.add_attempt(signed(9), None), Err(StepError::OutOfOrder { from: Step::Settled, to: Step::Signed }));
+    assert_eq!(seq.mark_sent(), Err(StepError::OutOfOrder { from: Step::Settled, to: Step::Sent }));
+    // New blocks on top do not move it either.
     chain.mine();
-    assert_eq!(seq.recover(chain.view()).unwrap(), Recovery::Wait);
-    chain.mine();
-    assert_eq!(seq.recover(chain.view()).unwrap(), Recovery::Resume { step: Step::Settled });
-    assert_eq!(chain.broadcasts(&hash), 1);
+    assert_eq!(seq.recover(chain.view()).unwrap(), Recovery::Done { step: Step::Settled });
+    assert_eq!(seq.record(), settled);
+    assert_eq!(store.stored(), settled);
+
+    // The chain drops the block: back to sent, saved, same attempt.
+    chain.reorg(4);
+    let hash = transaction_hash(signed(1));
+    assert_eq!(seq.recover(chain.view()).unwrap(), Recovery::Send { transaction_hash: hash.clone() });
+    assert_eq!(store.stored().step, Step::Sent);
+    assert_eq!(store.stored().inclusion, None);
+    assert_eq!(store.stored().attempts, settled.attempts);
+
+    // Settles again, in the new block.
+    assert_eq!(drive(&seq, &chain), Step::Settled);
+    let inclusion = store.stored().inclusion.unwrap();
+    assert_eq!(inclusion.transaction_hash, hash);
+    assert_ne!(inclusion.block_hash, settled.inclusion.unwrap().block_hash);
+}
+
+#[test]
+fn steps_are_otherwise_saved_in_order() {
+    let store = MemoryStore::default();
+    let seq = PaymentSequence::start(Box::new(store.clone()), ID.to_owned(), intent()).unwrap();
+    assert_eq!(seq.mark_sent(), Err(StepError::OutOfOrder { from: Step::Prepared, to: Step::Sent }));
+    assert_eq!(seq.add_attempt(signed(1), None), Err(StepError::OutOfOrder { from: Step::Prepared, to: Step::Signed }));
+    seq.mark_backed_up().unwrap();
+    assert_eq!(seq.mark_backed_up(), Err(StepError::OutOfOrder { from: Step::BackedUp, to: Step::BackedUp }));
+    assert_eq!(seq.mark_sent(), Err(StepError::OutOfOrder { from: Step::BackedUp, to: Step::Sent }));
+    assert_eq!(store.state().saves, vec![Step::Prepared, Step::BackedUp]);
+    assert!(store.state().payloads.is_empty(), "a refused attempt stores nothing");
+    // The payment cannot be started again under its id.
+    assert!(matches!(
+        PaymentSequence::start(Box::new(store.clone()), ID.to_owned(), intent()),
+        Err(StepError::AlreadyStarted { .. })
+    ));
+}
+
+#[test]
+fn new_attempts_keep_the_identity_and_are_bounded() {
+    let (store, seq) = signed_record();
+    let first = transaction_hash(signed(1));
+    assert_eq!(seq.add_attempt(signed(1), None), Err(StepError::AttemptExists));
+    assert_eq!(seq.add_attempt(Vec::new(), None), Err(StepError::EmptyTransaction));
+    let sent = seq.mark_sent().unwrap();
+    assert_eq!(sent, signed(1));
+    assert_eq!(seq.step(), Step::Sent);
+
+    // A rebuild from sent: signed again, the newest is what goes next.
+    let second = seq.add_attempt(signed(2), Some(80)).unwrap();
+    let record = store.stored();
+    assert_eq!(record.step, Step::Signed);
+    assert_eq!(record.intent, intent(), "the identity never changes");
+    assert_eq!(
+        record.attempts,
+        vec![
+            Attempt { transaction_hash: first, valid_until: Some(40) },
+            Attempt { transaction_hash: second.clone(), valid_until: Some(80) },
+        ]
+    );
+    assert_eq!(seq.mark_sent().unwrap(), signed(2));
+
+    for n in 3..=MAX_ATTEMPTS {
+        seq.add_attempt(signed(n), None).unwrap();
+    }
+    assert_eq!(seq.add_attempt(signed(MAX_ATTEMPTS + 1), None), Err(StepError::TooManyAttempts { max: MAX_ATTEMPTS }));
+    assert_eq!(store.stored().attempts.len(), MAX_ATTEMPTS as usize);
+}
+
+#[test]
+fn the_identity_must_fit_the_payment_kind() {
+    let store = MemoryStore::default();
+    let marker = Identity::RevealMarker { marker: b"test-marker".to_vec() };
+    let nonce = Identity::AccountNonce { account: b"test-account".to_vec(), nonce: 0 };
+    let refused = [
+        (PaymentKind::Send, marker.clone()),
+        (PaymentKind::Vanish, marker.clone()),
+        (PaymentKind::Summon, nonce.clone()),
+        (PaymentKind::Claim, nonce.clone()),
+        (PaymentKind::Claim, Identity::RevealMarker { marker: Vec::new() }),
+        (PaymentKind::Send, Identity::AccountNonce { account: Vec::new(), nonce: 1 }),
+    ];
+    for (kind, identity) in refused {
+        let intent = PaymentIntent { kind, identity, details: Vec::new() };
+        let started = PaymentSequence::start(Box::new(store.clone()), ID.to_owned(), intent);
+        assert!(matches!(started, Err(StepError::IdentityMismatch { kind: k }) if k == kind));
+    }
+    assert!(store.list().unwrap().is_empty());
+    for (kind, identity) in [(PaymentKind::Summon, marker), (PaymentKind::Send, nonce)] {
+        let id = format!("test-{kind}");
+        let intent = PaymentIntent { kind, identity, details: Vec::new() };
+        PaymentSequence::start(Box::new(store.clone()), id, intent).unwrap();
+    }
+}
+
+#[test]
+fn a_record_round_trips_through_its_stored_form() {
+    let (store, chain) = (MemoryStore::default(), FakeChain::default());
+    let seq = PaymentSequence::start(Box::new(store.clone()), ID.to_owned(), intent()).unwrap();
+    drive(&seq, &chain);
+    let record = seq.record();
+    assert_eq!(decode_payment_record(encode_payment_record(record.clone())).unwrap(), record);
+    assert_eq!(record.version, RECORD_VERSION);
+    let (_, sequence) = signed_record();
+    let record = sequence.record();
+    assert_eq!(decode_payment_record(encode_payment_record(record.clone())).unwrap(), record);
+    assert!(
+        !encode_payment_record(record).windows(signed(1).len()).any(|w| w == signed(1)),
+        "the record never holds the signed bytes"
+    );
 }
 
 #[test]
 fn a_tampered_or_unreadable_record_is_refused_and_nothing_is_sent() {
-    let (store, chain, mut signer) = (MemoryStore::default(), FakeChain::default(), Signer::default());
-    start_and_kill(&store, &chain, &mut signer, Kill::At(Step::Signed));
-    let good = store.stored(ID).unwrap();
-    let open = || StepSequence::open(Box::new(store.clone()), ID.to_owned()).err();
+    let (store, seq) = signed_record();
+    let chain = FakeChain::default();
+    let good = seq.record();
+    drop(seq);
 
-    let tampered = |record: StepRecord| {
-        store.put_raw(ID, encode_step_record(record.clone()));
-        let refused = open();
+    let tampered = |record: PaymentRecord| {
+        store.put_raw(encode_payment_record(record));
+        let refused = store.open().err();
         assert!(matches!(refused, Some(StepError::Tampered { .. })), "{refused:?}");
-        let refused = recover(record, chain.view());
-        assert!(matches!(refused, Err(StepError::Tampered { .. })), "{refused:?}");
     };
-    // A later step, other bytes, another hash, bytes dropped: the checksum fails.
-    tampered(StepRecord { step: Step::Settled, ..good.clone() });
-    tampered(StepRecord { signed_transaction: Some(b"synthetic other send".to_vec()), ..good.clone() });
-    tampered(StepRecord { transaction_hash: Some(vec![0; 32]), ..good.clone() });
-    tampered(StepRecord { signed_transaction: None, transaction_hash: None, ..good.clone() });
-    tampered(StepRecord { checksum: vec![0; 32], ..good.clone() });
-    // A record with no checksum does not even decode once stored.
-    let refused = recover(StepRecord { checksum: Vec::new(), ..good.clone() }, chain.view());
-    assert!(matches!(refused, Err(StepError::Tampered { .. })), "{refused:?}");
+    // Other fields under the old checksum.
+    tampered(PaymentRecord { step: Step::Settled, ..good.clone() });
+    tampered(PaymentRecord { attempts: Vec::new(), ..good.clone() });
+    tampered(PaymentRecord { checksum: vec![0; 32], ..good.clone() });
+    let mut other_nonce = good.clone();
+    other_nonce.intent.identity = Identity::AccountNonce { account: b"test-account-1".to_vec(), nonce: 4 };
+    tampered(other_nonce);
+
+    // Records that do not hang together.
+    let shapes = [
+        PaymentRecord { step: Step::Included, ..good.clone() },
+        PaymentRecord {
+            step: Step::Conflicted,
+            inclusion: Some(Inclusion {
+                transaction_hash: good.attempts[0].transaction_hash.clone(),
+                block_hash: vec![1],
+                block_height: 1,
+            }),
+            ..good.clone()
+        },
+        PaymentRecord {
+            attempts: vec![good.attempts[0].clone(), good.attempts[0].clone()],
+            ..good.clone()
+        },
+    ];
+    for shape in shapes {
+        tampered(shape);
+    }
 
     // Another version.
-    store.put_raw(ID, encode_step_record(StepRecord { version: RECORD_VERSION + 1, ..good.clone() }));
-    assert!(matches!(open(), Some(StepError::UnsupportedVersion { version, .. }) if version == RECORD_VERSION + 1));
+    store.put_raw(encode_payment_record(PaymentRecord { version: RECORD_VERSION + 1, ..good.clone() }));
+    assert!(matches!(store.open().err(), Some(StepError::UnsupportedVersion { version, .. }) if version == RECORD_VERSION + 1));
 
     // Bytes that are no record, or cut short.
-    let bytes = encode_step_record(good.clone());
+    let bytes = encode_payment_record(good.clone());
     for broken in [vec![1, 2, 3], bytes[..bytes.len() - 1].to_vec(), Vec::new()] {
-        store.put_raw(ID, broken);
-        assert!(matches!(open(), Some(StepError::Unreadable { ref id, .. }) if id == ID));
+        store.put_raw(broken);
+        assert!(matches!(store.open().err(), Some(StepError::Unreadable { ref id, .. }) if id == ID));
     }
     // A flipped bit anywhere is refused one way or the other.
     for at in 0..bytes.len() {
         let mut flipped = bytes.clone();
         flipped[at] ^= 0x01;
-        store.put_raw(ID, flipped);
-        assert!(open().is_some(), "a flipped bit at {at} was accepted");
+        store.put_raw(flipped);
+        assert!(store.open().is_err(), "a flipped bit at {at} was accepted");
     }
     // A record saved under another id.
-    store.put_raw(ID, encode_step_record(StepRecord { id: "test-payment-2".to_owned(), ..good.clone() }));
-    assert!(matches!(open(), Some(StepError::Tampered { .. })));
+    store.put_raw(encode_payment_record(PaymentRecord { id: "test-payment-2".to_owned(), ..good.clone() }));
+    assert!(matches!(store.open().err(), Some(StepError::Tampered { .. })));
+    assert_eq!(chain.state().broadcasts, 0, "nothing was sent for a refused record");
 
-    assert_eq!(chain.total_broadcasts(), 0, "nothing was sent for a refused record");
-
-    // The good record still recovers, paid once.
-    store.put_raw(ID, encode_step_record(good.clone()));
-    relaunch(&store, &chain, &mut signer, None).unwrap();
-    assert_paid_once(&store, &chain, &signer, good.transaction_hash, Kill::At(Step::Signed));
+    // The good record still recovers.
+    store.put_raw(encode_payment_record(good));
+    assert_eq!(drive(&store.open().unwrap(), &chain), Step::Settled);
+    assert_eq!(chain.state().broadcasts, 1);
 }
 
 #[test]
-fn a_record_never_moves_backwards_or_takes_new_bytes() {
-    let (store, chain, mut signer) = (MemoryStore::default(), FakeChain::default(), Signer::default());
-    start_and_kill(&store, &chain, &mut signer, Kill::At(Step::Sent));
-    let seq = StepSequence::open(Box::new(store.clone()), ID.to_owned()).unwrap();
-    let before = seq.record();
-    let saves = store.saved_steps(ID).len();
-
-    assert_eq!(seq.mark_backed_up(), Err(StepError::OutOfOrder { from: Step::Sent, to: Step::BackedUp }));
-    assert_eq!(
-        seq.mark_signed(b"synthetic second send".to_vec()),
-        Err(StepError::OutOfOrder { from: Step::Sent, to: Step::Signed })
-    );
-    assert_eq!(seq.mark_sent(), Err(StepError::OutOfOrder { from: Step::Sent, to: Step::Sent }));
-    assert_eq!(
-        seq.mark_settled(chain.view()),
-        Err(StepError::OutOfOrder { from: Step::Sent, to: Step::Settled })
-    );
-    // Not on the chain yet: not seen.
-    assert_eq!(seq.mark_seen(chain.view()), Err(StepError::NotOnChain));
-    assert_eq!(seq.finish(), Err(StepError::NotFinished { step: Step::Sent }));
-    // The payment cannot be started again under its id.
-    assert!(matches!(
-        StepSequence::start(Box::new(store.clone()), ID.to_owned()),
-        Err(StepError::AlreadyStarted { .. })
-    ));
-
-    assert_eq!(seq.record(), before, "a refused step changes nothing");
-    assert_eq!(store.stored(ID).unwrap(), before);
-    assert_eq!(store.saved_steps(ID).len(), saves, "nothing was saved");
-
-    // Seen too early for settled.
-    chain.broadcast(before.signed_transaction.clone().unwrap());
-    seq.mark_seen(chain.view()).unwrap();
-    assert_eq!(
-        seq.mark_settled(chain.view()),
-        Err(StepError::NotSettled { confirmations: 1, needed: SETTLE_CONFIRMATIONS })
-    );
-    assert_eq!(seq.step(), Step::Seen);
+fn a_damaged_or_missing_payload_is_refused_and_nothing_is_sent() {
+    let (store, seq) = signed_record();
+    let key = (ID.to_owned(), transaction_hash(signed(1)));
+    store.state().payloads.insert(key.clone(), b"synthetic other bytes".to_vec());
+    assert!(matches!(seq.mark_sent(), Err(StepError::Tampered { .. })));
+    store.state().payloads.remove(&key);
+    assert_eq!(seq.mark_sent(), Err(StepError::PayloadMissing { id: ID.to_owned() }));
+    assert_eq!(seq.step(), Step::Signed, "not saved as sent");
+    assert_eq!(store.stored().step, Step::Signed);
 }
 
 #[test]
 fn a_failed_save_changes_nothing() {
-    let (store, chain, mut signer) = (MemoryStore::default(), FakeChain::default(), Signer::default());
-    start_and_kill(&store, &chain, &mut signer, Kill::At(Step::BackedUp));
-    let seq = StepSequence::open(Box::new(store.clone()), ID.to_owned()).unwrap();
+    let store = MemoryStore::default();
+    let seq = PaymentSequence::start(Box::new(store.clone()), ID.to_owned(), intent()).unwrap();
+    seq.mark_backed_up().unwrap();
     store.state().fail_saves = true;
-    assert!(matches!(seq.mark_signed(signer.sign(ID)), Err(StepError::Store { .. })));
+    assert!(matches!(seq.add_attempt(signed(1), None), Err(StepError::Store { .. })));
     assert_eq!(seq.step(), Step::BackedUp);
-    assert_eq!(store.stored(ID).unwrap().step, Step::BackedUp);
-    assert!(matches!(seq.mark_signed(Vec::new()), Err(StepError::EmptyTransaction)));
+    assert_eq!(store.stored().step, Step::BackedUp);
     store.state().fail_saves = false;
-    let hash = seq.mark_signed(signer.sign(ID)).unwrap();
-    assert_eq!(Some(hash), store.stored(ID).unwrap().transaction_hash);
+    let hash = seq.add_attempt(signed(1), None).unwrap();
+    assert_eq!(store.stored().attempts[0].transaction_hash, hash);
+
+    store.state().fail_saves = true;
+    assert!(matches!(seq.mark_sent(), Err(StepError::Store { .. })));
+    assert_eq!(seq.step(), Step::Signed);
 }
 
 #[test]
