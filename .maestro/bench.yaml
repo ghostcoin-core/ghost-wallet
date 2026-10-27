@@ -1,0 +1,32 @@
+# Runs one native benchmark on the bench screen and waits for it to pass.
+#
+#   maestro test -e BENCH=summon .maestro/bench.yaml
+#
+# scripts/sim-test.sh runs it once per benchmark on a simulator.
+appId: com.ghostcoin.wallet
+env:
+  BENCH: dummy
+---
+- launchApp:
+    stopApp: true
+- openLink: ghostwallet://bench
+# iOS asks before a link opens the app; the alert does not always show.
+- extendedWaitUntil:
+    visible: Open
+    timeout: 5000
+    optional: true
+- tapOn:
+    text: Open
+    optional: true
+- extendedWaitUntil:
+    visible: Run
+    timeout: 30000
+- tapOn:
+    id: bench-name-${BENCH}
+- tapOn: Run
+# The result's first line is "<name>: <status>"; proving can take minutes.
+- extendedWaitUntil:
+    visible:
+      id: bench-result
+      text: '${BENCH}: ok[\s\S]*'
+    timeout: 600000

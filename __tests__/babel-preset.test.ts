@@ -35,7 +35,7 @@ describe('babel presets', () => {
     expect(Object.keys(directDependencies())).toContain(name);
   });
 
-  it('pins babel-preset-expo to the Expo SDK 54 line', () => {
-    expect(directDependencies()['babel-preset-expo']).toMatch(/^~54\./);
+  it('pins babel-preset-expo to the Expo SDK 58 line', () => {
+    expect(directDependencies()['babel-preset-expo']).toMatch(/^~58\./);
   });
 });

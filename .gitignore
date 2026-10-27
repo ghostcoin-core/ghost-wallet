@@ -45,6 +45,9 @@ local.properties
 # Rust
 target/
 
+# Simulator test screenshots (scripts/sim-test.sh)
+sim-results/
+
 # macOS and editors
 .DS_Store
 .idea/

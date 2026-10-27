@@ -1,9 +1,7 @@
 import Foundation
 import Security
 
-#if canImport(ghost_wallet_core)
-  import ghost_wallet_core
-
+#if GHOST_CORE_BINDINGS
   /// The step records of the kill-recovery prototype, in the Keychain: one
   /// generic password item per payment id, readable only while the phone is
   /// unlocked and only on this device (no iCloud Keychain, not in backups that
