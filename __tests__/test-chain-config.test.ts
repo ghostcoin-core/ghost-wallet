@@ -196,7 +196,16 @@ describe('scripts/test-chain.sh', () => {
     expect(script).toMatch(/\[ -f "\$marker" \] && return/);
   });
 
-  it('prints block 0 from the node', () => {
-    expect(script).toContain('debug_getRawHeader \'["0x0"]\'');
+  it('serves only eth, net and web3 over the LAN HTTP endpoint', () => {
+    const apis = script.match(/--http\.api (\S+)/g) ?? [];
+    expect(apis).toEqual(['--http.api eth,net,web3']);
+    expect(script).not.toMatch(/--http\.api[^\n]*(debug|admin|personal|miner)/);
+    expect(script).not.toMatch(/result debug_|rpc debug_/);
+  });
+
+  it('prints block 0 through the local IPC socket', () => {
+    expect(script).toContain('IPC="$DATA/geth.ipc"');
+    expect(script).toContain('--ipcpath "$IPC"');
+    expect(script).toContain(`"$GETH" attach --exec 'debug.getRawHeader("0x0")' "$IPC"`);
   });
 });
