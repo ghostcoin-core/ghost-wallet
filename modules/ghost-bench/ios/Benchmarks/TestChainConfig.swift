@@ -27,7 +27,9 @@ enum TestChainConfig {
 
   /// Test-only overrides, read from UserDefaults on the phone or simulator
   /// and never from the build. scripts/sim-test.sh writes them for the local
-  /// test chain of scripts/test-chain.sh; with none set, the compiled values
+  /// test chain of scripts/test-chain.sh, and scripts/phone-launch.sh passes
+  /// them at launch (they land in UserDefaults' argument domain for that
+  /// launch); with none set, the compiled values
   /// below are used.
   enum OverrideKey {
     /// Block time in seconds (integer).
@@ -38,6 +40,42 @@ enum TestChainConfig {
     static let genesisRlpHex = "benchTestChain.genesisRlpHex"
     /// The accounts the restore benchmark must find (integer).
     static let restoreAccountsExpected = "benchTestChain.restoreAccountsExpected"
+    /// A pinned checkpoint as the start, as JSON text with the fields
+    /// rlpHex, height, totalWorkHex, genesisTimestamp and keyBlocks (a list
+    /// of {height, hashHex}), as `scripts/test-chain.sh checkpoint` prints
+    /// it. When set, it is the start instead of the genesis.
+    static let checkpoint = "benchTestChain.checkpoint"
+    /// The test wallet's birthday for the restore benchmark (integer): the
+    /// scan starts at that block.
+    static let restoreBirthday = "benchTestChain.restoreBirthday"
+    /// How long the header-sync benchmark waits for the app to be
+    /// backgrounded, in seconds (integer).
+    static let backgroundWaitSeconds = "benchTestChain.backgroundWaitSeconds"
+  }
+
+  /// Why an override could not be used.
+  enum OverrideError: LocalizedError {
+    case badCheckpoint(String)
+
+    var errorDescription: String? {
+      switch self {
+      case .badCheckpoint(let reason):
+        return "The test-only override \(OverrideKey.checkpoint) is not a checkpoint: \(reason)."
+      }
+    }
+  }
+
+  /// The JSON of the checkpoint override.
+  private struct CheckpointJson: Decodable {
+    struct KeyBlock: Decodable {
+      let height: UInt64
+      let hashHex: String
+    }
+    let rlpHex: String
+    let height: UInt64
+    let totalWorkHex: String
+    let genesisTimestamp: UInt64
+    let keyBlocks: [KeyBlock]
   }
 
   /// The compiled-in values, used when no override is set.
@@ -56,14 +94,45 @@ enum TestChainConfig {
     /// PLACEHOLDER: set it to the number of accounts used when the test
     /// wallet was set up.
     static let restoreAccountsExpected = 0
+
+    /// How long the header-sync benchmark waits for the app to be
+    /// backgrounded and brought back before it resumes anyway.
+    static let backgroundWaitSeconds: Double = 180
   }
 
-  /// The pinned start: the genesis override if set, else the compiled one.
+  /// The pinned start: the checkpoint override if set, else the genesis
+  /// override if set, else the compiled one. A checkpoint override that does
+  /// not decode fails the run rather than falling back.
   static var start: Start {
-    if let rlpHex = overrideString(OverrideKey.genesisRlpHex) {
-      return .genesis(rlpHex: rlpHex)
+    get throws {
+      if let json = overrideString(OverrideKey.checkpoint) {
+        return try checkpoint(fromJson: json)
+      }
+      if UserDefaults.standard.object(forKey: OverrideKey.checkpoint) != nil {
+        throw OverrideError.badCheckpoint("it is not text")
+      }
+      if let rlpHex = overrideString(OverrideKey.genesisRlpHex) {
+        return .genesis(rlpHex: rlpHex)
+      }
+      return Compiled.start
     }
-    return Compiled.start
+  }
+
+  /// The checkpoint start of the JSON text of the checkpoint override.
+  static func checkpoint(fromJson json: String) throws -> Start {
+    let pin: CheckpointJson
+    do {
+      pin = try JSONDecoder().decode(CheckpointJson.self, from: Data(json.utf8))
+    } catch {
+      throw OverrideError.badCheckpoint("it is not JSON with the five checkpoint fields")
+    }
+    guard !pin.rlpHex.isEmpty, pin.height > 0 else {
+      throw OverrideError.badCheckpoint("it has no header or is at height 0")
+    }
+    return .checkpoint(
+      rlpHex: pin.rlpHex, height: pin.height, totalWorkHex: pin.totalWorkHex,
+      genesisTimestamp: pin.genesisTimestamp,
+      keyBlocks: pin.keyBlocks.map { (height: $0.height, hashHex: $0.hashHex) })
   }
 
   /// The chain constants of spec 06, section 4.2 (difficulty 1).
@@ -86,7 +155,10 @@ enum TestChainConfig {
 
   /// How long the benchmark waits for the app to be backgrounded and brought
   /// back before it resumes anyway.
-  static let backgroundWaitSeconds: Double = 180
+  static var backgroundWaitSeconds: Double {
+    overrideCount(OverrideKey.backgroundWaitSeconds).flatMap { $0 > 0 ? Double($0) : nil }
+      ?? Compiled.backgroundWaitSeconds
+  }
 
   /// The timeout of one request to the node.
   static let requestTimeoutSeconds: Double = 60
@@ -96,6 +168,13 @@ enum TestChainConfig {
   static var restoreAccountsExpected: Int {
     overrideCount(OverrideKey.restoreAccountsExpected).flatMap { Int(exactly: $0) }
       ?? Compiled.restoreAccountsExpected
+  }
+
+  /// The test wallet's birthday for the restore benchmark, if set: no
+  /// compiled value, so with no override the scan starts at the first block
+  /// after the pinned start.
+  static var restoreBirthday: UInt64? {
+    overrideCount(OverrideKey.restoreBirthday)
   }
 
   /// A non-negative integer override, written as a number or as decimal text.

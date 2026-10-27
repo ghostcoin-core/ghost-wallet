@@ -17,6 +17,13 @@
 //! up to the tip has been fed, [`RestoreScan::result`] is
 //! [`RestoreResult::Incomplete`] and shows no balance at all, never a zero.
 //!
+//! A scan may start at the wallet's birthday, the height of the first block
+//! that can hold its activity: blocks below it are not fed (and are refused
+//! if they are), and the complete result says where the scan started
+//! (`scanned_from`). Activity only below the birthday is not found. From the
+//! birthday on, every block up to the tip is still fed in order, with the
+//! same checks.
+//!
 //! # What is not proved
 //!
 //! Ghost's client library checks a block's receipts against its header
@@ -101,6 +108,10 @@ pub enum RestoreResult {
         accounts: Vec<RestoredAccount>,
         /// What the balances rest on.
         note: String,
+        /// The height of the first block fed: the wallet's birthday, or the
+        /// first block after the header sync's pinned start if that is
+        /// later. Activity below it is not in the result.
+        scanned_from: u64,
     },
 }
 
@@ -115,6 +126,8 @@ pub enum RestoreScanError {
     HeightPassedOver { expected: u64, got: u64 },
     /// A block was fed below the next height: it was fed already.
     RepeatedHeight { expected: u64, got: u64 },
+    /// A block below the wallet's birthday was fed: the scan starts there.
+    BelowBirthday { birthday: u64, got: u64 },
     /// A block was fed above the tip, or before a tip was set.
     AboveTip { height: u64, tip: Option<u64> },
     /// The tip is below the blocks already fed.
@@ -135,6 +148,9 @@ impl fmt::Display for RestoreScanError {
             }
             Self::RepeatedHeight { expected, got } => {
                 write!(f, "block {got} was fed already; block {expected} is next")
+            }
+            Self::BelowBirthday { birthday, got } => {
+                write!(f, "block {got} is below the wallet's birthday, block {birthday}")
             }
             Self::AboveTip { height, tip: Some(tip) } => write!(f, "block {height} is above the tip {tip}"),
             Self::AboveTip { height, tip: None } => write!(f, "block {height} was fed before the tip was set"),
@@ -173,6 +189,10 @@ struct State {
     /// The last reported balance of every address any fed block touched,
     /// ours or not: an account derived later may have been touched earlier.
     touched: HashMap<[u8; 20], u128>,
+    /// The wallet's birthday, if one was given.
+    birthday: Option<u64>,
+    /// The height of the first block to feed.
+    scanned_from: u64,
     next_height: u64,
     /// The hash of the last fed header.
     last_hash: Option<[u8; 32]>,
@@ -188,15 +208,20 @@ pub struct RestoreScan {
 #[uniffi::export]
 impl RestoreScan {
     /// Starts a scan of the wallet of `words` at block `first_height`, the
-    /// first block after the header sync's pinned start.
+    /// first block after the header sync's pinned start, or at `birthday`,
+    /// the wallet's birthday, if that is later. Blocks below the birthday
+    /// are refused.
     #[uniffi::constructor]
-    pub fn new(words: String, first_height: u64) -> Result<Arc<Self>, RestoreScanError> {
+    pub fn new(words: String, first_height: u64, birthday: Option<u64>) -> Result<Arc<Self>, RestoreScanError> {
         let seed = WalletSeed::from_words(&words)?;
+        let scanned_from = birthday.map_or(first_height, |birthday| birthday.max(first_height));
         let mut state = State {
             seed,
             accounts: Vec::new(),
             touched: HashMap::new(),
-            next_height: first_height,
+            birthday,
+            scanned_from,
+            next_height: scanned_from,
             last_hash: None,
             tip: None,
         };
@@ -249,6 +274,9 @@ impl RestoreScan {
     ) -> Result<(), RestoreScanError> {
         let mut state = self.state();
         let expected = state.next_height;
+        if let Some(birthday) = state.birthday.filter(|&birthday| height < birthday) {
+            return Err(RestoreScanError::BelowBirthday { birthday, got: height });
+        }
         if height > expected {
             return Err(RestoreScanError::HeightPassedOver { expected, got: height });
         }
@@ -313,7 +341,7 @@ impl RestoreScan {
                 }
             })
             .collect();
-        RestoreResult::Complete { accounts, note: UNVERIFIED_NOTE.to_owned() }
+        RestoreResult::Complete { accounts, note: UNVERIFIED_NOTE.to_owned(), scanned_from: state.scanned_from }
     }
 }
 

@@ -18,6 +18,19 @@
 # test chain of scripts/test-chain.sh: when BENCHES names one, the chain is
 # started, mined past the second RandomX key, and its node URL and test-only
 # chain overrides are written into the simulator's UserDefaults.
+#
+# By default each node benchmark starts from a pinned checkpoint, as the app
+# will, so a run takes minutes: header-sync from 1,000 blocks below the tip,
+# worst-case from height 8000 (below the second key's first use at 8449, so
+# its sync still crosses the key change), and restore from just below a
+# wallet birthday, after the test accounts are funded again above it. Every
+# header after a checkpoint is checked in full. The background wait is 10
+# seconds.
+#
+#   FULL=1 BENCHES="header-sync restore worst-case" bash scripts/sim-test.sh
+#
+# FULL=1 runs the node benchmarks from genesis with no birthday and the
+# compiled 180-second background wait, for a final confirmation.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -31,6 +44,7 @@ fail() {
 
 SIM="${GHOST_WALLET_SIM:-iPhone Duo}"
 BENCHES="${BENCHES:-dummy summon kill-recovery}"
+FULL="${FULL:-0}"
 APP_ID=com.ghostcoin.wallet
 
 # The benchmarks that need a Ghost node, and what the local test chain needs
@@ -41,6 +55,19 @@ TEST_CHAIN_HEIGHT=8600
 # The Maestro wait for a result: 10 minutes, or 90 for a node benchmark.
 BENCH_TIMEOUT_MS=600000
 NODE_BENCH_TIMEOUT_MS=5400000
+# The checkpoint starts (unless FULL=1): header-sync checks this many headers
+# up to the tip; worst-case starts below 8449, the second key's first use;
+# restore's birthday is this many blocks below the late funding, and its
+# checkpoint the block below the birthday.
+HEADER_SYNC_WINDOW=1000
+WORST_CASE_CHECKPOINT=8000
+RESTORE_BIRTHDAY_LEAD=100
+BACKGROUND_WAIT_SECONDS=10
+
+case "$FULL" in
+  0 | 1) ;;
+  *) fail "FULL must be 0 or 1" ;;
+esac
 
 is_node_bench() {
   case " $NODE_BENCHES " in
@@ -155,12 +182,55 @@ if [ "$needs_chain" = true ]; then
   sim_defaults() {
     xcrun simctl spawn "$udid" defaults write "$APP_ID" "$@"
   }
+  sim_defaults_delete() {
+    xcrun simctl spawn "$udid" defaults delete "$APP_ID" "$1" >/dev/null 2>&1 || true
+  }
   sim_defaults benchNodeUrl -string "http://127.0.0.1:$TEST_CHAIN_PORT"
   sim_defaults benchTestChain.blockTime -int 1
   sim_defaults benchTestChain.futureDrift -int 3600
   sim_defaults benchTestChain.genesisRlpHex -string "$genesis_rlp"
   sim_defaults benchTestChain.restoreAccountsExpected -int 3
+
+  if [ "$FULL" = 1 ]; then
+    echo "==> FULL=1: the node benchmarks start from genesis"
+    sim_defaults_delete benchTestChain.backgroundWaitSeconds
+  else
+    sim_defaults benchTestChain.backgroundWaitSeconds -int "$BACKGROUND_WAIT_SECONDS"
+    case " $BENCHES " in
+      *" restore "*)
+        echo "==> funding the test accounts again for the restore birthday"
+        late_block="$(bash scripts/test-chain.sh fund-late "$TEST_CHAIN_HEIGHT")"
+        [[ "$late_block" =~ ^[0-9]+$ ]] || fail "test-chain.sh fund-late printed no block"
+        restore_birthday=$((late_block - RESTORE_BIRTHDAY_LEAD))
+        ;;
+    esac
+  fi
 fi
+
+# The start of one node benchmark: a checkpoint (and, for restore, the
+# wallet's birthday), or genesis with FULL=1. The checkpoint is made from the
+# node's chain right before the benchmark runs.
+set_bench_start() {
+  local bench="$1" checkpoint_height="" checkpoint tip
+  sim_defaults_delete benchTestChain.checkpoint
+  sim_defaults_delete benchTestChain.restoreBirthday
+  [ "$FULL" = 1 ] && return
+  case "$bench" in
+    header-sync)
+      tip="$(bash scripts/test-chain.sh height)"
+      checkpoint_height=$((tip - HEADER_SYNC_WINDOW))
+      ;;
+    worst-case) checkpoint_height="$WORST_CASE_CHECKPOINT" ;;
+    restore)
+      checkpoint_height=$((restore_birthday - 1))
+      sim_defaults benchTestChain.restoreBirthday -int "$restore_birthday"
+      ;;
+  esac
+  checkpoint="$(bash scripts/test-chain.sh checkpoint "$checkpoint_height")"
+  [ -n "$checkpoint" ] || fail "test-chain.sh printed no checkpoint at $checkpoint_height"
+  sim_defaults benchTestChain.checkpoint -string "$checkpoint"
+  echo "    $bench starts from the checkpoint at height $checkpoint_height"
+}
 
 mkdir -p sim-results
 failed=()
@@ -169,6 +239,7 @@ for bench in $BENCHES; do
   timeout_ms="$BENCH_TIMEOUT_MS"
   if is_node_bench "$bench"; then
     timeout_ms="$NODE_BENCH_TIMEOUT_MS"
+    set_bench_start "$bench"
   fi
   # The flow waits for a result that starts with "$bench: ok".
   if maestro --device "$udid" test -e BENCH="$bench" -e TIMEOUT="$timeout_ms" .maestro/bench.yaml; then

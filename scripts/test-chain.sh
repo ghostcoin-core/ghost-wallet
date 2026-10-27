@@ -7,6 +7,21 @@
 #   bash scripts/test-chain.sh wait <height>   # block until the chain reaches <height>
 #   bash scripts/test-chain.sh stop            # stop the node
 #   bash scripts/test-chain.sh genesis         # print the block 0 RLP as hex
+#   bash scripts/test-chain.sh height          # print the node's tip height
+#   bash scripts/test-chain.sh checkpoint <h>  # print the checkpoint JSON for block <h>
+#   bash scripts/test-chain.sh fund-late <h>   # at height <h>, fund the test accounts again
+#
+# `checkpoint` prints the JSON the benchmarks take in the test-only override
+# benchTestChain.checkpoint: the header RLP of block <h> (the 19 fields in the
+# order of HeaderSyncBenchmark.swift), the total work up to and including it
+# (every header's difficulty summed from block 0), the genesis timestamp, and
+# the key blocks at or below <h> that the headers from <h>+1 to the tip use
+# (Ghost's seed_height, EPOCH_BLOCKS 8192 and EPOCH_LAG 256). Key blocks above
+# <h> are not pinned: the header sync checks them itself. It needs Node.
+#
+# `fund-late` sends 1 GHOST to accounts 0, 3 and 7 again, every time it runs,
+# once the chain reaches <h>, and prints the lowest block holding them, so a
+# restore from a later birthday has activity to find.
 #
 # Runs on macOS only (Go 1.26+, git, make, curl and rustup installed; the Rust
 # toolchain is the one pinned in ghost-node's rust-toolchain.toml). The node
@@ -54,7 +69,8 @@ say() {
 }
 
 usage() {
-  echo "usage: bash scripts/test-chain.sh start | wait <height> | stop | genesis" >&2
+  echo "usage: bash scripts/test-chain.sh start | wait <height> | stop | genesis | height" \
+    "| checkpoint <height> | fund-late <height>" >&2
   exit 2
 }
 
@@ -218,13 +234,11 @@ start_node() {
   echo $! >"$PID_FILE"
 }
 
-# Sends 1 GHOST from the miner to each test account, once per chain.
-fund_accounts() {
-  local miner="$1" marker="$DATA/test-wallet-funded"
-  [ -f "$marker" ] && return
-  say "waiting for the miner's first rewards"
-  wait_height 5
-  local account tx hashes=()
+# Sends 1 GHOST from the miner to each test account and waits until every
+# transfer is in a block. Prints the lowest of those blocks' heights.
+send_to_test_accounts() {
+  local miner="$1" account tx response hashes=() lowest="" block
+  local pattern='"blockNumber":"(0x[0-9a-fA-F]+)"'
   for account in "${FUND_ACCOUNTS[@]}"; do
     tx="$(result eth_sendTransaction \
       "[{\"from\":\"$miner\",\"to\":\"$account\",\"value\":\"$ONE_GHOST\"}]")" ||
@@ -233,11 +247,27 @@ fund_accounts() {
     hashes+=("$tx")
   done
   for tx in "${hashes[@]}"; do
-    until rpc eth_getTransactionReceipt "[\"$tx\"]" 2>/dev/null | grep -q '"blockNumber"'; do
+    while true; do
+      response="$(rpc eth_getTransactionReceipt "[\"$tx\"]" 2>/dev/null)" || response=""
+      [[ "$response" =~ $pattern ]] && break
       running || fail "the node exited; see $LOG"
       sleep 1
     done
+    block=$((${BASH_REMATCH[1]}))
+    if [ -z "$lowest" ] || [ "$block" -lt "$lowest" ]; then
+      lowest="$block"
+    fi
   done
+  echo "$lowest"
+}
+
+# Sends 1 GHOST from the miner to each test account, once per chain.
+fund_accounts() {
+  local miner="$1" marker="$DATA/test-wallet-funded"
+  [ -f "$marker" ] && return
+  say "waiting for the miner's first rewards"
+  wait_height 5
+  send_to_test_accounts "$miner" >/dev/null
   touch "$marker"
   say "test wallet funded (accounts 0, 3 and 7)"
 }
@@ -309,6 +339,209 @@ cmd_genesis() {
   echo "$rlp"
 }
 
+cmd_height() {
+  running || fail "the node is not running; run: bash scripts/test-chain.sh start"
+  height || fail "the node did not report its height"
+}
+
+cmd_checkpoint() {
+  [ "$#" -eq 1 ] && [[ "$1" =~ ^[0-9]+$ ]] || usage
+  running || fail "the node is not running; run: bash scripts/test-chain.sh start"
+  command -v node >/dev/null 2>&1 || fail "node is not installed"
+  local tip
+  tip="$(height)" || fail "the node did not report its height"
+  [ "$1" -ge 1 ] && [ "$1" -lt "$tip" ] || fail "the checkpoint must be between 1 and the tip ($tip), exclusive"
+  node -e "$(checkpoint_js)" checkpoint-main "$RPC" "$1" "$tip"
+}
+
+cmd_fund_late() {
+  [ "$#" -eq 1 ] && [[ "$1" =~ ^[0-9]+$ ]] || usage
+  running || fail "the node is not running; run: bash scripts/test-chain.sh start"
+  local miner lowest
+  miner="$(miner_address)"
+  [ -n "$miner" ] || fail "no miner account in $DATA"
+  wait_height "$1"
+  lowest="$(send_to_test_accounts "$miner")"
+  say "test wallet funded again from block $lowest (accounts 0, 3 and 7)"
+  echo "$lowest"
+}
+
+# The checkpoint builder of `checkpoint`, in Node. __tests__/checkpoint.test.ts
+# loads this same text and tests its encoding and key-block selection.
+checkpoint_js() {
+  cat <<'JS'
+'use strict';
+
+// Ghost's key block schedule (client/src/seal.rs).
+const EPOCH_BLOCKS = 8192;
+const EPOCH_LAG = 256;
+
+// The 19 header fields in the order of HeaderSyncBenchmark.swift (spec 05,
+// section 10): the node's JSON name, its kind and its size (bytes for fixed
+// and bytes, bits for int).
+const HEADER_FIELDS = [
+  ['parentHash', 'fixed', 32],
+  ['sha3Uncles', 'fixed', 32],
+  ['miner', 'fixed', 20],
+  ['stateRoot', 'fixed', 32],
+  ['transactionsRoot', 'fixed', 32],
+  ['receiptsRoot', 'fixed', 32],
+  ['logsBloom', 'fixed', 256],
+  ['difficulty', 'int', 256],
+  ['number', 'int', 64],
+  ['gasLimit', 'int', 64],
+  ['gasUsed', 'int', 64],
+  ['timestamp', 'int', 64],
+  ['extraData', 'bytes', 32],
+  ['mixHash', 'fixed', 32],
+  ['nonce', 'fixed', 8],
+  ['baseFeePerGas', 'int', 256],
+  ['coinTreeRoot', 'fixed', 32],
+  ['dataTreeRoot', 'fixed', 32],
+  ['dataMarkerRoot', 'fixed', 32],
+];
+
+// The height of the key block a header at `height` uses: Ghost's seed_height.
+function seedHeight(height) {
+  if (height <= EPOCH_BLOCKS + EPOCH_LAG) return 0;
+  return Math.floor((height - EPOCH_LAG - 1) / EPOCH_BLOCKS) * EPOCH_BLOCKS;
+}
+
+// The key blocks the headers from height + 1 to tip use that are at or below
+// the checkpoint, in height order. A higher one is checked by the sync itself
+// and cannot be pinned.
+function keyBlockHeights(height, tip) {
+  const heights = new Set();
+  for (let next = height + 1; next <= tip; next++) {
+    const seed = seedHeight(next);
+    if (seed <= height) heights.add(seed);
+  }
+  return [...heights].sort((a, b) => a - b);
+}
+
+// Bytes of hex, with or without 0x; a quantity may have an odd digit count.
+function hexBytes(text, quantity, name) {
+  if (typeof text !== 'string') throw new Error(`the header has no ${name}`);
+  let digits = text.replace(/^0x/i, '');
+  if (!/^[0-9a-fA-F]*$/.test(digits)) throw new Error(`its ${name} is not hex`);
+  if (digits.length % 2 === 1) {
+    if (!quantity) throw new Error(`its ${name} is not whole bytes`);
+    digits = '0' + digits;
+  }
+  const bytes = [];
+  for (let i = 0; i < digits.length; i += 2) bytes.push(parseInt(digits.slice(i, i + 2), 16));
+  return bytes;
+}
+
+function toHex(bytes) {
+  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function lengthPrefix(length, base) {
+  if (length < 56) return [base + length];
+  const digits = [];
+  for (let rest = length; rest > 0; rest = Math.floor(rest / 256)) digits.unshift(rest % 256);
+  return [base + 55 + digits.length, ...digits];
+}
+
+// The header's RLP as hex (no 0x): the 19 fields, as HeaderRlp.encode does.
+function encodeHeader(block) {
+  const payload = [];
+  for (const [name, kind, size] of HEADER_FIELDS) {
+    let value = hexBytes(block[name], kind === 'int', name);
+    if (kind === 'fixed' && value.length !== size) throw new Error(`its ${name} is not ${size} bytes`);
+    if (kind === 'bytes' && value.length > size) throw new Error(`its ${name} is longer than ${size} bytes`);
+    if (kind === 'int') {
+      const first = value.findIndex((b) => b !== 0);
+      value = first < 0 ? [] : value.slice(first);
+      if (value.length * 8 > size) throw new Error(`its ${name} is out of range`);
+    }
+    if (value.length === 1 && value[0] < 0x80) payload.push(value[0]);
+    else payload.push(...lengthPrefix(value.length, 0x80), ...value);
+  }
+  return toHex([...lengthPrefix(payload.length, 0xc0), ...payload]);
+}
+
+function hash32(block, name) {
+  const bytes = hexBytes(block[name], false, name);
+  if (bytes.length !== 32) throw new Error(`its ${name} is not 32 bytes`);
+  return toHex(bytes);
+}
+
+// The checkpoint at `height` for a chain whose tip is `tip`. `getBlocks(from,
+// through)` returns the node's blocks (eth_getBlockByNumber JSON) in height
+// order. Every block from 0 to `height` is read: each must carry its height
+// and link to the one before it, and its difficulty is summed.
+async function buildCheckpoint(height, tip, getBlocks) {
+  if (!Number.isSafeInteger(height) || !Number.isSafeInteger(tip) || height < 1 || height >= tip) {
+    throw new Error('the checkpoint must be between 1 and the tip, exclusive');
+  }
+  const blocks = await getBlocks(0, height);
+  if (blocks.length !== height + 1) throw new Error('the node did not return every block');
+  let totalWork = 0n;
+  blocks.forEach((block, index) => {
+    if (!block) throw new Error(`the node has no block ${index}`);
+    if (BigInt(block.number) !== BigInt(index)) throw new Error(`block ${index} carries another height`);
+    if (index > 0 && hash32(block, 'parentHash') !== hash32(blocks[index - 1], 'hash')) {
+      throw new Error(`block ${index} does not link to block ${index - 1}`);
+    }
+    totalWork += BigInt(block.difficulty);
+  });
+  if (totalWork >= 1n << 256n) throw new Error('the total work does not fit in 256 bits');
+  return {
+    rlpHex: encodeHeader(blocks[height]),
+    height,
+    totalWorkHex: totalWork.toString(16).padStart(64, '0'),
+    genesisTimestamp: Number(BigInt(blocks[0].timestamp)),
+    keyBlocks: keyBlockHeights(height, tip).map((key) => ({ height: key, hashHex: hash32(blocks[key], 'hash') })),
+  };
+}
+
+// Blocks `from` through `through` from a node, in JSON-RPC batches.
+async function nodeBlocks(url, from, through) {
+  const blocks = [];
+  for (let start = from; start <= through; start += 500) {
+    const last = Math.min(through, start + 499);
+    const calls = [];
+    for (let number = start; number <= last; number++) {
+      calls.push({ jsonrpc: '2.0', id: number - start, method: 'eth_getBlockByNumber', params: ['0x' + number.toString(16), false] });
+    }
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(calls),
+    });
+    if (!response.ok) throw new Error(`the node answered HTTP ${response.status}`);
+    const answers = await response.json();
+    if (!Array.isArray(answers)) throw new Error('the node did not answer a JSON-RPC batch');
+    const byId = new Map(answers.map((answer) => [answer.id, answer]));
+    for (let id = 0; id < calls.length; id++) {
+      const answer = byId.get(id);
+      if (!answer || answer.error || !answer.result) throw new Error(`the node has no block ${start + id}`);
+      blocks.push(answer.result);
+    }
+  }
+  return blocks;
+}
+
+if (typeof exports === 'object' && exports !== null) {
+  Object.assign(exports, { EPOCH_BLOCKS, EPOCH_LAG, HEADER_FIELDS, seedHeight, keyBlockHeights, encodeHeader, buildCheckpoint });
+}
+
+const mainAt = process.argv.indexOf('checkpoint-main');
+if (mainAt >= 0) {
+  const [url, height, tip] = process.argv.slice(mainAt + 1);
+  buildCheckpoint(Number(height), Number(tip), (from, through) => nodeBlocks(url, from, through)).then(
+    (checkpoint) => process.stdout.write(JSON.stringify(checkpoint) + '\n'),
+    (error) => {
+      process.stderr.write(`test-chain: checkpoint failed: ${error.message}\n`);
+      process.exit(1);
+    },
+  );
+}
+JS
+}
+
 [ "$#" -ge 1 ] || usage
 command="$1"
 shift
@@ -317,5 +550,8 @@ case "$command" in
   wait) cmd_wait "$@" ;;
   stop) cmd_stop ;;
   genesis) cmd_genesis ;;
+  height) cmd_height ;;
+  checkpoint) cmd_checkpoint "$@" ;;
+  fund-late) cmd_fund_late "$@" ;;
   *) usage ;;
 esac
