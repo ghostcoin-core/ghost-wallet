@@ -1,35 +1,18 @@
-//! The restore scan of `restore_scan`, from Ghost's counting-bytes test seed,
-//! over a synthetic chain of 30 blocks built here. Every header is first
-//! accepted by one `HeaderSync` (as in `tests/header_sync.rs`, at difficulty
-//! 1 so every seal passes at nonce 0); only those headers are fed, and the
-//! sync gives the scan its tip.
+//! The calls of the restore of `restore_scan`, from Ghost's counting-bytes
+//! test seed, with a fake lookup that holds a fixed state per address.
 //!
-//! Activity on accounts 0, 3 and 7 is found with the right indexes, addresses
-//! and balances; the result is `Incomplete` at every height before the tip;
-//! more than 20 unused accounts end the scan; a passed-over or repeated height, a
-//! header off the checked chain and malformed words are refused, the words
-//! never echoed; two scans of the same words agree.
-//!
-//! A scan from the wallet's birthday finds the activity from the birthday
-//! on, does not report activity only below it, says it started at the
-//! birthday and refuses a block below it.
+//! Derived accounts hold public data only; the gap ends the run at exactly 20
+//! unused accounts; a search further goes past it and any account can be
+//! looked up by index; a malformed tip, malformed words and a malformed state
+//! are refused, the words never echoed; a failed lookup changes nothing and
+//! can be retried; two restores of the same words agree.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use ghost_client::account::WalletSeed;
-use ghost_client::seal::header_fields;
-use ghost_wallet_core::{
-    GAP_LIMIT, HeaderChainConstants, HeaderSync, RestoreResult, RestoreScan, RestoreScanError, RestoredAccount,
-    TouchedAddress,
-};
-
-/// Ghost's internal network test constants.
-const TEST_CHAIN: HeaderChainConstants =
-    HeaderChainConstants { block_time: 30, half_life: 3600, start_difficulty: 1, min_difficulty: 1, future_drift: 30 };
-const GENESIS_TIME: u64 = 0x6abd_a280;
-const LATER: u64 = GENESIS_TIME + 1_000_000_000;
-/// Blocks after genesis; the scan starts at block 1.
-const TIP: u64 = 30;
+use ghost_wallet_core::{AccountLookup, AccountState, GAP_LIMIT, RestoreError, RestoreLookup, RestoreResult};
 
 /// Ghost's counting-bytes test seed: the bytes 0 to 31.
 const COUNTING: [u8; 32] = {
@@ -42,8 +25,8 @@ const COUNTING: [u8; 32] = {
     bytes
 };
 
-/// An address of nobody in this wallet.
-const STRANGER: [u8; 20] = [0xab; 20];
+const TIP: u64 = 77;
+const TIP_HASH: [u8; 32] = [0x7e; 32];
 
 fn counting_words() -> String {
     WalletSeed::from_bytes(COUNTING).to_words().as_str().to_owned()
@@ -60,336 +43,195 @@ fn hex(address: &[u8; 20]) -> String {
     })
 }
 
-/// A test-side RLP encoder, written apart from the client's decoder.
-fn int(value: u64) -> Vec<u8> {
-    let bytes = value.to_be_bytes();
-    let first = bytes.iter().position(|&b| b != 0).unwrap_or(8);
-    bytes[first..].to_vec()
+/// A fixed state per address; every other address is unused. While `down`
+/// is set, every lookup fails.
+#[derive(Clone, Default)]
+struct FakeLookup {
+    states: HashMap<[u8; 20], AccountState>,
+    down: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
 }
 
-fn rlp_length(len: usize, base: u8) -> Vec<u8> {
-    if len < 56 {
-        return vec![base + len as u8];
-    }
-    let digits = int(len as u64);
-    let mut out = vec![base + 55 + digits.len() as u8];
-    out.extend(digits);
-    out
-}
-
-fn rlp_list(fields: &[Vec<u8>]) -> Vec<u8> {
-    let mut payload = Vec::new();
-    for field in fields {
-        if field.len() == 1 && field[0] < 0x80 {
-            payload.push(field[0]);
-        } else {
-            payload.extend(rlp_length(field.len(), 0x80));
-            payload.extend(field);
+impl AccountLookup for FakeLookup {
+    fn account_state(&self, address: Vec<u8>, block_hash: Vec<u8>) -> Result<AccountState, RestoreError> {
+        assert_eq!(block_hash, TIP_HASH.to_vec(), "every lookup is at the tip's hash");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.down.load(Ordering::SeqCst) {
+            return Err(RestoreError::Lookup { reason: "the fake node is down".to_owned() });
         }
+        let address: [u8; 20] = address.try_into().unwrap();
+        Ok(self.states.get(&address).cloned().unwrap_or(AccountState { balance: vec![], nonce: 0 }))
     }
-    let mut out = rlp_length(payload.len(), 0xc0);
-    out.extend(payload);
-    out
 }
 
-/// The 19-field header at `number` on top of `parent`, at difficulty 1,
-/// 30 seconds per block. `marker` changes the data marker root, to make a
-/// header off the chain.
-fn header(parent: [u8; 32], number: u64, marker: u8) -> Vec<u8> {
-    rlp_list(&[
-        parent.to_vec(),
-        vec![0x1d; 32],
-        vec![0; 20],
-        vec![0x11; 32],
-        vec![0x22; 32],
-        vec![0x33; 32],
-        vec![0; 256],
-        int(1),
-        int(number),
-        int(30_000_000),
-        int(0),
-        int(GENESIS_TIME + 30 * number),
-        vec![],
-        vec![0; 32],
-        vec![0; 8],
-        int(1_000_000_000),
-        vec![0x44; 32],
-        vec![0x55; 32],
-        vec![marker; 32],
-    ])
-}
-
-fn hash(rlp: &[u8]) -> [u8; 32] {
-    header_fields(rlp).unwrap().hash
-}
-
-struct Chain {
-    sync: Arc<HeaderSync>,
-    /// The headers of blocks 1 to `TIP`, each accepted by `sync`.
-    headers: Vec<Vec<u8>>,
-}
-
-/// One checked chain for every test: building its RandomX cache takes
-/// 256 MiB, so it is built once.
-fn chain() -> &'static Chain {
-    static CHAIN: OnceLock<Chain> = OnceLock::new();
-    CHAIN.get_or_init(|| {
-        let genesis = header([0; 32], 0, 0x66);
-        let sync = HeaderSync::from_genesis(genesis.clone(), TEST_CHAIN).unwrap();
-        let mut headers: Vec<Vec<u8>> = Vec::new();
-        for number in 1..=TIP {
-            let parent = hash(headers.last().unwrap_or(&genesis));
-            headers.push(header(parent, number, 0x66));
-        }
-        let progress = sync.add_headers(headers.clone(), LATER);
-        assert_eq!(progress.accepted, TIP);
-        assert_eq!(progress.refused_index, None);
-        assert_eq!(sync.best_height(), TIP);
-        Chain { sync, headers }
-    })
-}
-
-/// A checked header, by height.
-fn checked(height: u64) -> Vec<u8> {
-    let chain = chain();
-    assert!((1..=chain.sync.best_height()).contains(&height), "only headers the sync accepted are fed");
-    chain.headers[height as usize - 1].clone()
-}
-
-fn touch(address: [u8; 20], balance: u128) -> TouchedAddress {
-    let bytes = balance.to_be_bytes();
-    let first = bytes.iter().position(|&b| b != 0).unwrap_or(16);
-    TouchedAddress { address: address.to_vec(), balance: bytes[first..].to_vec() }
-}
-
-/// The activity of the 30 blocks: (height, account index or `None` for a
-/// stranger, balance after).
-type Activity = [(u64, Option<u32>, u128)];
-
-/// Accounts 0, 3 and 7 used early, midway and late; account 0 twice.
-const SPREAD: &Activity = &[
-    (2, Some(0), 5_000),
-    (4, None, 77),
-    (11, Some(3), 1_000_000_000_000_000_000),
-    (19, Some(0), 3_500),
-    (19, None, 12),
-    (28, Some(7), 1),
-];
-
-fn touched_at(activity: &Activity, height: u64) -> Vec<TouchedAddress> {
-    activity
+/// A fake lookup with these accounts holding (balance, nonce).
+fn lookup(used: &[(u32, u128, u64)]) -> FakeLookup {
+    let states = used
         .iter()
-        .filter(|(at, _, _)| *at == height)
-        .map(|&(_, index, balance)| touch(index.map_or(STRANGER, address), balance))
-        .collect()
+        .map(|&(index, balance, nonce)| {
+            (address(index), AccountState { balance: balance.to_be_bytes().to_vec(), nonce })
+        })
+        .collect();
+    FakeLookup { states, ..FakeLookup::default() }
 }
 
-fn new_scan() -> Arc<RestoreScan> {
-    RestoreScan::new(counting_words(), 1, None).unwrap()
+fn new_restore(lookup: FakeLookup) -> Arc<RestoreLookup> {
+    RestoreLookup::new(counting_words(), Box::new(lookup), TIP, TIP_HASH.to_vec()).unwrap()
 }
 
-/// A scan from the wallet's birthday, with the header sync's start below it.
-fn scan_from_birthday(birthday: u64) -> Arc<RestoreScan> {
-    RestoreScan::new(counting_words(), 1, Some(birthday)).unwrap()
+fn run(restore: &RestoreLookup) -> RestoreResult {
+    while restore.look_up_next().unwrap().is_some() {}
+    restore.result()
 }
 
-/// Feeds every block from 1 to the tip, then returns the result.
-fn scan_all(activity: &Activity) -> RestoreResult {
-    let scan = new_scan();
-    scan.set_tip(chain().sync.clone()).unwrap();
-    for height in 1..=TIP {
-        scan.feed_block(height, checked(height), touched_at(activity, height)).unwrap();
-    }
-    scan.result()
-}
-
-/// Feeds every block from the birthday to the tip, checking the result is
-/// incomplete before each, then returns the result.
-fn scan_all_from_birthday(activity: &Activity, birthday: u64) -> RestoreResult {
-    let scan = scan_from_birthday(birthday);
-    scan.set_tip(chain().sync.clone()).unwrap();
-    for height in birthday..=TIP {
-        assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: height, tip: Some(TIP) });
-        scan.feed_block(height, checked(height), touched_at(activity, height)).unwrap();
-    }
-    scan.result()
-}
-
-fn complete(result: RestoreResult) -> Vec<RestoredAccount> {
-    complete_from(result).0
-}
-
-/// The accounts of a complete result and the height it scanned from.
-fn complete_from(result: RestoreResult) -> (Vec<RestoredAccount>, u64) {
-    match result {
-        RestoreResult::Complete { accounts, note, scanned_from } => {
-            assert!(note.contains("unverified"));
-            (accounts, scanned_from)
-        }
-        other => panic!("the scan is not complete: {other:?}"),
-    }
-}
-
-fn used(accounts: &[RestoredAccount]) -> Vec<(u32, String, String)> {
-    accounts.iter().filter(|a| a.used).map(|a| (a.index, a.address.clone(), a.balance.clone())).collect()
-}
-
-#[test]
-fn activity_on_accounts_0_3_and_7_is_found() {
-    let accounts = complete(scan_all(SPREAD));
-    assert_eq!(
-        used(&accounts),
-        vec![
-            (0, hex(&address(0)), "3500".to_owned()),
-            (3, hex(&address(3)), "1000000000000000000".to_owned()),
-            (7, hex(&address(7)), "1".to_owned()),
-        ]
-    );
-    // Every account up to the gap limit past account 7, in index order.
-    assert_eq!(accounts.len(), 8 + GAP_LIMIT as usize);
-    for (i, account) in accounts.iter().enumerate() {
-        assert_eq!(account.index, i as u32);
-        assert_eq!(account.address, hex(&address(i as u32)));
-        assert!(account.unverified, "no balance is proved yet");
-        if !account.used {
-            assert_eq!(account.balance, "0");
-        }
-    }
-    // The stranger's address is not one of the wallet's.
-    assert!(accounts.iter().all(|a| a.address != hex(&STRANGER)));
+fn used_indexes(result: &RestoreResult) -> Vec<u32> {
+    result.accounts.iter().filter(|a| a.used).map(|a| a.index).collect()
 }
 
 #[test]
 fn derived_accounts_hold_public_data_only() {
-    let scan = new_scan();
-    let derived = scan.accounts();
-    assert_eq!(derived.len(), GAP_LIMIT as usize);
+    let restore = new_restore(FakeLookup::default());
     let seed = WalletSeed::from_bytes(COUNTING);
-    for account in &derived {
-        let key = seed.rescue_account(account.index);
+    for index in [0, 1, 19, 20, 500] {
+        let account = restore.derive_account(index);
+        let key = seed.rescue_account(index);
+        assert_eq!(account.index, index);
         assert_eq!(account.address, hex(key.address()));
         assert_eq!(account.rescue_public_key, key.public_key().to_vec());
     }
-    assert_eq!(derived[0].address, "0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd");
+    assert_eq!(restore.derive_account(0).address, "0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd");
+    // Deriving looks nothing up.
+    assert!(restore.result().accounts.is_empty());
 }
 
 #[test]
-fn incomplete_at_every_height_before_the_tip() {
-    let scan = new_scan();
-    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: 1, tip: None });
-    // Without a tip, nothing can be fed.
-    assert_eq!(
-        scan.feed_block(1, checked(1), vec![]),
-        Err(RestoreScanError::AboveTip { height: 1, tip: None })
-    );
-    scan.set_tip(chain().sync.clone()).unwrap();
-    for height in 1..=TIP {
-        assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: height, tip: Some(TIP) });
-        scan.feed_block(height, checked(height), touched_at(SPREAD, height)).unwrap();
+fn nothing_is_shown_before_the_first_lookup() {
+    let restore = new_restore(lookup(&[(0, 5, 0)]));
+    let result = restore.result();
+    assert!(result.accounts.is_empty());
+    assert!(!result.complete);
+    assert_eq!(result.next_index, 0);
+    assert_eq!((result.tip_height, result.tip_hash), (TIP, TIP_HASH.to_vec()));
+}
+
+#[test]
+fn twenty_unused_accounts_end_the_run() {
+    // 0 to 18 unused, 19 used: found, and the run goes to 39.
+    let result = run(&new_restore(lookup(&[(19, 1, 0)])));
+    assert_eq!(used_indexes(&result), vec![19]);
+    assert_eq!(result.accounts.len(), 20 + GAP_LIMIT as usize);
+    assert!(result.complete);
+
+    // 0 to 19 unused, 20 used: not found.
+    let result = run(&new_restore(lookup(&[(20, 1, 0)])));
+    assert!(used_indexes(&result).is_empty());
+    assert_eq!(result.accounts.len(), GAP_LIMIT as usize);
+    assert!(result.accounts.iter().all(|a| a.balance == "0" && a.nonce == 0));
+    assert!(result.complete);
+}
+
+#[test]
+fn an_account_is_used_by_its_nonce_or_its_balance() {
+    let result = run(&new_restore(lookup(&[(0, 0, 3), (1, 8, 0), (2, 0, 0)])));
+    assert_eq!(used_indexes(&result), vec![0, 1]);
+    let account = |index: usize| (result.accounts[index].balance.clone(), result.accounts[index].nonce);
+    assert_eq!(account(0), ("0".to_owned(), 3));
+    assert_eq!(account(1), ("8".to_owned(), 0));
+    assert_eq!(account(2), ("0".to_owned(), 0));
+    assert_eq!(result.accounts.len(), 2 + GAP_LIMIT as usize);
+}
+
+#[test]
+fn search_further_goes_past_the_gap() {
+    let fake = lookup(&[(3, 10, 1), (30, 20, 0), (60, 30, 0)]);
+    let calls = fake.calls.clone();
+    let restore = new_restore(fake);
+    let result = run(&restore);
+    assert_eq!(used_indexes(&result), vec![3]);
+    assert_eq!(result.accounts.len(), 4 + GAP_LIMIT as usize);
+    assert!(result.complete);
+    assert_eq!(restore.look_up_next(), Ok(None), "a complete run looks nothing more up");
+    assert_eq!(calls.load(Ordering::SeqCst), 24);
+
+    // 20 further: 24 to 43 holds 30, which takes the run to 50.
+    restore.search_further();
+    assert!(!restore.result().complete);
+    let result = run(&restore);
+    assert_eq!(used_indexes(&result), vec![3, 30]);
+    assert_eq!(result.accounts.len(), 31 + GAP_LIMIT as usize);
+    assert_eq!(calls.load(Ordering::SeqCst), 51, "no account is looked up twice");
+
+    // 60 is 29 past 30: one more search further reaches it.
+    restore.search_further();
+    let result = run(&restore);
+    assert_eq!(used_indexes(&result), vec![3, 30, 60]);
+    assert_eq!(result.accounts.len(), 61 + GAP_LIMIT as usize);
+    for (i, account) in result.accounts.iter().enumerate() {
+        assert_eq!(account.index, i as u32);
+        assert_eq!(account.address, hex(&address(i as u32)));
     }
-    assert_eq!(used(&complete(scan.result())).len(), 3);
-    // Nothing above the tip.
-    assert_eq!(
-        scan.feed_block(TIP + 1, checked(TIP), vec![]),
-        Err(RestoreScanError::AboveTip { height: TIP + 1, tip: Some(TIP) })
-    );
 }
 
 #[test]
-fn more_than_20_unused_accounts_end_the_scan() {
-    // 7, then 21 unused (8 to 28), then 29: 29 is not found.
-    let far = &[(3, Some(7), 10), (9, Some(29), 20)];
-    let accounts = complete(scan_all(far));
-    assert_eq!(used(&accounts), vec![(7, hex(&address(7)), "10".to_owned())]);
-    assert_eq!(accounts.len(), 8 + GAP_LIMIT as usize);
+fn any_account_can_be_looked_up_by_index() {
+    let fake = lookup(&[(45, 12, 2)]);
+    let calls = fake.calls.clone();
+    let restore = new_restore(fake);
+    let result = run(&restore);
+    assert!(used_indexes(&result).is_empty());
 
-    // 7, then 19 unused (8 to 26), then 27: found, and the list extends past
-    // it, so 45 (17 unused after 27) is found too.
-    let near = &[(3, Some(7), 10), (9, Some(27), 20), (25, Some(45), 30)];
-    let accounts = complete(scan_all(near));
-    assert_eq!(
-        used(&accounts),
-        vec![
-            (7, hex(&address(7)), "10".to_owned()),
-            (27, hex(&address(27)), "20".to_owned()),
-            (45, hex(&address(45)), "30".to_owned()),
-        ]
-    );
-    assert_eq!(accounts.len(), 46 + GAP_LIMIT as usize);
-
-    // An account touched before an earlier one brought it into the gap is
-    // still found.
-    let backwards = &[(2, Some(27), 20), (20, Some(7), 10)];
-    let accounts = complete(scan_all(backwards));
-    assert_eq!(
-        used(&accounts),
-        vec![(7, hex(&address(7)), "10".to_owned()), (27, hex(&address(27)), "20".to_owned())]
-    );
+    let account = restore.look_up_account(45).unwrap();
+    assert_eq!((account.index, account.address.clone()), (45, hex(&address(45))));
+    assert_eq!((account.balance.as_str(), account.nonce, account.used), ("12", 2, true));
+    // A used account takes the run to 20 past it; 45 is not looked up again.
+    let result = restore.result();
+    assert!(!result.complete);
+    let before = calls.load(Ordering::SeqCst);
+    let result = run(&restore);
+    assert_eq!(used_indexes(&result), vec![45]);
+    assert_eq!(result.accounts.len(), 46 + GAP_LIMIT as usize);
+    assert_eq!(calls.load(Ordering::SeqCst) - before, 46 + GAP_LIMIT as usize - 20 - 1);
 }
 
 #[test]
-fn passed_over_or_repeated_height_is_refused() {
-    let scan = new_scan();
-    scan.set_tip(chain().sync.clone()).unwrap();
-    scan.feed_block(1, checked(1), vec![]).unwrap();
-    assert_eq!(
-        scan.feed_block(3, checked(3), vec![]),
-        Err(RestoreScanError::HeightPassedOver { expected: 2, got: 3 })
-    );
-    assert_eq!(
-        scan.feed_block(1, checked(1), vec![]),
-        Err(RestoreScanError::RepeatedHeight { expected: 2, got: 1 })
-    );
-    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: 2, tip: Some(TIP) });
-    // The refusals changed nothing: the scan goes on from block 2.
-    for height in 2..=TIP {
-        scan.feed_block(height, checked(height), touched_at(SPREAD, height)).unwrap();
+fn a_failed_lookup_changes_nothing_and_can_be_retried() {
+    let fake = lookup(&[(0, 5, 0), (2, 6, 0)]);
+    let down = fake.down.clone();
+    let restore = new_restore(fake);
+    assert_eq!(restore.look_up_next().unwrap().map(|a| a.index), Some(0));
+    down.store(true, Ordering::SeqCst);
+    assert_eq!(restore.look_up_next(), Err(RestoreError::Lookup { reason: "the fake node is down".to_owned() }));
+    assert_eq!(restore.look_up_account(2), Err(RestoreError::Lookup { reason: "the fake node is down".to_owned() }));
+    let result = restore.result();
+    assert_eq!(result.accounts.len(), 1);
+    assert_eq!(result.next_index, 1);
+    down.store(false, Ordering::SeqCst);
+    assert_eq!(restore.look_up_next().unwrap().map(|a| a.index), Some(1));
+    assert_eq!(used_indexes(&run(&restore)), vec![0, 2]);
+}
+
+#[test]
+fn a_malformed_state_is_refused() {
+    let mut fake = FakeLookup::default();
+    fake.states.insert(address(0), AccountState { balance: vec![1; 33], nonce: 0 });
+    fake.states.insert(address(1), AccountState { balance: vec![1; 17], nonce: 0 });
+    let mut wide = vec![0; 16];
+    wide.extend([0xff; 16]);
+    fake.states.insert(address(2), AccountState { balance: wide, nonce: 0 });
+    let restore = new_restore(fake);
+    assert!(matches!(restore.look_up_next(), Err(RestoreError::BadState { index: 0, .. })));
+    assert!(matches!(restore.look_up_account(1), Err(RestoreError::BadState { index: 1, .. })));
+    assert!(restore.result().accounts.is_empty());
+    // 32 bytes with leading zeros fit.
+    assert_eq!(restore.look_up_account(2).unwrap().balance, u128::MAX.to_string());
+}
+
+#[test]
+fn a_tip_hash_that_is_not_32_bytes_is_refused() {
+    for hash in [vec![], vec![0x7e; 31], vec![0x7e; 33]] {
+        let error = RestoreLookup::new(counting_words(), Box::new(FakeLookup::default()), TIP, hash).err();
+        assert!(matches!(error, Some(RestoreError::BadTip { .. })));
     }
-    assert_eq!(used(&complete(scan.result())).len(), 3);
-}
-
-#[test]
-fn header_off_the_checked_chain_is_refused() {
-    let scan = new_scan();
-    scan.set_tip(chain().sync.clone()).unwrap();
-    // The header of another block at height 1.
-    let off = header(hash(&header([0; 32], 0, 0x66)), 1, 0x99);
-    assert!(matches!(scan.feed_block(1, off, vec![]), Ok(())));
-    // Block 2 of the checked chain does not link to it.
-    assert!(matches!(
-        scan.feed_block(2, checked(2), vec![]),
-        Err(RestoreScanError::NotTheCheckedChain { height: 2, .. })
-    ));
-
-    let scan = new_scan();
-    scan.set_tip(chain().sync.clone()).unwrap();
-    for height in 1..TIP {
-        scan.feed_block(height, checked(height), vec![]).unwrap();
-    }
-    // A header that links but is not the checked tip.
-    let fake_tip = header(hash(&checked(TIP - 1)), TIP, 0x99);
-    assert!(matches!(
-        scan.feed_block(TIP, fake_tip, vec![]),
-        Err(RestoreScanError::NotTheCheckedChain { height: TIP, .. })
-    ));
-    // A header with the wrong height, and bytes that are no header.
-    assert!(matches!(
-        scan.feed_block(TIP, checked(TIP - 1), vec![]),
-        Err(RestoreScanError::NotTheCheckedChain { height: TIP, .. })
-    ));
-    assert!(matches!(
-        scan.feed_block(TIP, vec![0xc0], vec![]),
-        Err(RestoreScanError::NotTheCheckedChain { height: TIP, .. })
-    ));
-    // A malformed address.
-    let short = TouchedAddress { address: vec![1; 19], balance: vec![1] };
-    assert!(matches!(
-        scan.feed_block(TIP, checked(TIP), vec![short]),
-        Err(RestoreScanError::BadTouched { height: TIP, .. })
-    ));
-    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: TIP, tip: Some(TIP) });
-    scan.feed_block(TIP, checked(TIP), vec![]).unwrap();
-    assert!(used(&complete(scan.result())).is_empty());
 }
 
 #[test]
@@ -406,8 +248,10 @@ fn short_or_invalid_words_are_refused_without_echoing_them() {
     let swapped = swapped.join(" ");
 
     for bad in [short, unknown, swapped, String::new()] {
-        let error = RestoreScan::new(bad.clone(), 1, None).err().expect("the words are refused");
-        let RestoreScanError::Words { reason } = &error else { panic!("not a words error: {error:?}") };
+        let error = RestoreLookup::new(bad.clone(), Box::new(FakeLookup::default()), TIP, TIP_HASH.to_vec())
+            .err()
+            .expect("the words are refused");
+        let RestoreError::Words { reason } = &error else { panic!("not a words error: {error:?}") };
         assert!(!reason.is_empty());
         let shown = format!("{error} {error:?}");
         for word in bad.split(' ').filter(|w| w.len() > 2) {
@@ -417,102 +261,11 @@ fn short_or_invalid_words_are_refused_without_echoing_them() {
 }
 
 #[test]
-fn two_scans_of_the_same_words_agree() {
-    let first = scan_all(SPREAD);
-    let second = scan_all(SPREAD);
+fn two_restores_of_the_same_words_agree() {
+    let used = &[(0, 5, 1), (3, 1_000_000_000_000_000_000, 0), (7, 1, 0)];
+    let first = run(&new_restore(lookup(used)));
+    let second = run(&new_restore(lookup(used)));
     assert_eq!(first, second);
-    assert_ne!(first, scan_all(&[(2, Some(1), 5)]));
-}
-
-#[test]
-fn a_scan_without_a_birthday_reports_its_first_block() {
-    let (accounts, scanned_from) = complete_from(scan_all(SPREAD));
-    assert_eq!(scanned_from, 1);
-    assert_eq!(used(&accounts).len(), 3);
-}
-
-#[test]
-fn activity_after_the_birthday_is_found() {
-    // Account 0 used before the birthday (15) and again after it; 3 and 7
-    // used after it only.
-    let late = &[(2, Some(0), 5_000), (15, Some(3), 700), (21, Some(0), 4_000), (21, None, 3), (30, Some(7), 9)];
-    let (accounts, scanned_from) = complete_from(scan_all_from_birthday(late, 15));
-    assert_eq!(scanned_from, 15);
-    assert_eq!(
-        used(&accounts),
-        vec![
-            (0, hex(&address(0)), "4000".to_owned()),
-            (3, hex(&address(3)), "700".to_owned()),
-            (7, hex(&address(7)), "9".to_owned()),
-        ]
-    );
-    assert_eq!(accounts.len(), 8 + GAP_LIMIT as usize);
-}
-
-#[test]
-fn activity_only_before_the_birthday_is_not_reported() {
-    // Accounts 0, 3 and 7 are used only below the birthday (20).
-    let early = &[(2, Some(0), 5_000), (11, Some(3), 1), (19, Some(7), 2)];
-    let (accounts, scanned_from) = complete_from(scan_all_from_birthday(early, 20));
-    assert_eq!(scanned_from, 20, "the result says the scan started at the birthday");
-    assert!(used(&accounts).is_empty());
-    assert_eq!(accounts.len(), GAP_LIMIT as usize);
-    assert!(accounts.iter().all(|a| a.balance == "0"));
-    // The same activity is found by a scan from block 1.
-    assert_eq!(used(&complete(scan_all(early))).len(), 3);
-}
-
-#[test]
-fn a_block_below_the_birthday_is_refused() {
-    let scan = scan_from_birthday(10);
-    scan.set_tip(chain().sync.clone()).unwrap();
-    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: 10, tip: Some(TIP) });
-    for below in [1, 9] {
-        assert_eq!(
-            scan.feed_block(below, checked(below), touched_at(SPREAD, below)),
-            Err(RestoreScanError::BelowBirthday { birthday: 10, got: below })
-        );
-    }
-    // The birthday's block is next: nothing above it may come first.
-    assert_eq!(
-        scan.feed_block(11, checked(11), vec![]),
-        Err(RestoreScanError::HeightPassedOver { expected: 10, got: 11 })
-    );
-    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: 10, tip: Some(TIP) });
-    scan.feed_block(10, checked(10), vec![]).unwrap();
-    // From the birthday on, repeated and passed-over heights are still refused.
-    assert_eq!(
-        scan.feed_block(10, checked(10), vec![]),
-        Err(RestoreScanError::RepeatedHeight { expected: 11, got: 10 })
-    );
-    assert_eq!(
-        scan.feed_block(12, checked(12), vec![]),
-        Err(RestoreScanError::HeightPassedOver { expected: 11, got: 12 })
-    );
-    assert_eq!(
-        scan.feed_block(9, checked(9), vec![]),
-        Err(RestoreScanError::BelowBirthday { birthday: 10, got: 9 })
-    );
-    // And a header that does not link to the one fed before it.
-    let off = header(hash(&checked(10)), 11, 0x99);
-    scan.feed_block(11, off, vec![]).unwrap();
-    assert!(matches!(
-        scan.feed_block(12, checked(12), vec![]),
-        Err(RestoreScanError::NotTheCheckedChain { height: 12, .. })
-    ));
-    let error = RestoreScanError::BelowBirthday { birthday: 10, got: 9 };
-    assert_eq!(error.to_string(), "block 9 is below the wallet's birthday, block 10");
-}
-
-#[test]
-fn a_birthday_below_the_pinned_start_scans_from_the_start() {
-    let scan = RestoreScan::new(counting_words(), 5, Some(2)).unwrap();
-    scan.set_tip(chain().sync.clone()).unwrap();
-    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: 5, tip: Some(TIP) });
-    for height in 5..=TIP {
-        scan.feed_block(height, checked(height), touched_at(SPREAD, height)).unwrap();
-    }
-    let (accounts, scanned_from) = complete_from(scan.result());
-    assert_eq!(scanned_from, 5);
-    assert_eq!(used(&accounts).len(), 3);
+    assert_eq!(used_indexes(&first), vec![0, 3, 7]);
+    assert_ne!(first, run(&new_restore(lookup(&[(1, 5, 0)]))));
 }

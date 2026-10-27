@@ -45,9 +45,6 @@ enum TestChainConfig {
     /// of {height, hashHex}), as `scripts/test-chain.sh checkpoint` prints
     /// it. When set, it is the start instead of the genesis.
     static let checkpoint = "benchTestChain.checkpoint"
-    /// The test wallet's birthday for the restore benchmark (integer): the
-    /// scan starts at that block.
-    static let restoreBirthday = "benchTestChain.restoreBirthday"
     /// How long the header-sync benchmark waits for the app to be
     /// backgrounded, in seconds (integer).
     static let backgroundWaitSeconds = "benchTestChain.backgroundWaitSeconds"
@@ -168,13 +165,6 @@ enum TestChainConfig {
   static var restoreAccountsExpected: Int {
     overrideCount(OverrideKey.restoreAccountsExpected).flatMap { Int(exactly: $0) }
       ?? Compiled.restoreAccountsExpected
-  }
-
-  /// The test wallet's birthday for the restore benchmark, if set: no
-  /// compiled value, so with no override the scan starts at the first block
-  /// after the pinned start.
-  static var restoreBirthday: UInt64? {
-    overrideCount(OverrideKey.restoreBirthday)
   }
 
   /// A non-negative integer override, written as a number or as decimal text.

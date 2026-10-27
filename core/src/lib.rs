@@ -15,7 +15,8 @@ pub mod summon;
 
 pub use header_sync::{HeaderChainConstants, HeaderProgress, HeaderSync, HeaderSyncError, PinnedKeyBlock};
 pub use restore_scan::{
-    DerivedAccount, GAP_LIMIT, RestoreResult, RestoreScan, RestoreScanError, RestoredAccount, TouchedAddress,
+    AccountLookup, AccountState, DerivedAccount, GAP_LIMIT, RestoreError, RestoreLookup, RestoreResult,
+    RestoredAccount, UNVERIFIED_NOTE,
 };
 pub use step_sequence::{
     Attempt, ChainView, Identity, Inclusion, MAX_ATTEMPTS, PaymentIntent, PaymentKind, PaymentRecord, PaymentSequence,

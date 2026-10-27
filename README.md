@@ -147,10 +147,9 @@ UserDefaults for `com.ghostcoin.wallet`:
 | `benchTestChain.restoreAccountsExpected` | `3` |
 | `benchTestChain.backgroundWaitSeconds` | `10` (not set with `FULL=1`) |
 | `benchTestChain.checkpoint` | per benchmark, below (not set with `FULL=1`) |
-| `benchTestChain.restoreBirthday` | restore only, below (not set with `FULL=1`) |
 
 The compiled values in `TestChainConfig.swift` (block time 30, future drift
-30, genesis start, 180-second background wait, no birthday) are unchanged,
+30, genesis start, 180-second background wait) are unchanged,
 and are used whenever an override is not set. Each node benchmark gets 90
 minutes.
 
@@ -165,10 +164,15 @@ script makes from the node's chain just before it runs:
 - **worst-case** from height 8000, below the second key's first use at 8449:
   its sync still crosses the key change and holds both RandomX caches while it
   proves, and it fails as before if it never holds 2;
-- **restore** from just below the wallet birthday: the script funds the test
-  accounts again (`fund-late`), sets the birthday 100 blocks below those
-  transfers and the checkpoint one block below the birthday. The scan feeds no
-  block below the birthday and reports where it started (`scannedFrom`).
+- **restore** from 1,000 blocks below the tip too, far above the blocks that
+  funded the test accounts. The checkpoint only anchors the header check: the
+  restore derives the accounts from the words and asks the node for each
+  one's balance and nonce at the checked tip's block hash, reporting each
+  balance as it arrives, until 20 unused accounts follow the last used one.
+  It downloads no block or receipt, so accounts funded before the checkpoint,
+  paid by a contract or paid a mining reward are all found. It records
+  `timeToFirstBalanceSeconds`, `restoreSeconds`, `accountsFound`,
+  `accountsExpected` and `scanComplete`.
 
 The header after a checkpoint must link to the checkpoint's hash, or the run
 fails; every header after it gets the full proof-of-work and difficulty check.
@@ -180,7 +184,7 @@ BENCHES="dummy summon kill-recovery header-sync restore worst-case" bash scripts
 ```
 
 Use `FULL=1` for a final confirmation before relying on a result: it runs the
-node benchmarks from genesis with no birthday and the 180-second background
+node benchmarks from genesis with the 180-second background
 wait, exactly as before checkpoints (30 to 50 minutes each):
 
 ```sh
