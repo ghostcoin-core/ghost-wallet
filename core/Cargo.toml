@@ -14,8 +14,20 @@ crate-type = ["lib", "staticlib"]
 [dependencies]
 # Ghost's own client library, pinned to a commit. All derivation happens there.
 ghost-client = { git = "https://github.com/ghostcoin-core/ghost", rev = "385b4dcb5904c175ec1a5d8793c3406162a10ae4" }
+# Ghost's reveal prover and verifier, from the same commit as ghost-client.
+ghost-proofs = { git = "https://github.com/ghostcoin-core/ghost", rev = "385b4dcb5904c175ec1a5d8793c3406162a10ae4" }
+# The fixed generator of the Summon benchmark's test chain (a seeded StdRng,
+# as Ghost's own client tests use). Same version as ghost-client's tests.
+rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
 # Must stay on the minor version that uniffi-bindgen-react-native supports.
 uniffi = "=0.31"
+
+[dev-dependencies]
+rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
+
+# Proving is far too slow unoptimised; the tests build it optimised.
+[profile.test]
+opt-level = 3
 
 # Keep this crate out of any parent workspace.
 [workspace]

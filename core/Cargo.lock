@@ -351,6 +351,8 @@ name = "ghost-wallet-core"
 version = "0.1.0"
 dependencies = [
  "ghost-client",
+ "ghost-proofs",
+ "rand",
  "uniffi",
 ]
 
