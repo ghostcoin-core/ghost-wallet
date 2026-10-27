@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Ghost Wallet",
+    "slug": "ghost-wallet",
+    "scheme": "ghostwallet",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0A0A12",
+    "platforms": ["ios"],
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "com.ghostcoin.wallet",
+      "appleTeamId": "U388328MWX",
+      "supportsTablet": false
+    },
+    "plugins": ["expo-router"],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
