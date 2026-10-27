@@ -18,8 +18,9 @@ pub use restore_scan::{
     DerivedAccount, GAP_LIMIT, RestoreResult, RestoreScan, RestoreScanError, RestoredAccount, TouchedAddress,
 };
 pub use step_sequence::{
-    ChainView, RECORD_VERSION, Recovery, SETTLE_CONFIRMATIONS, Step, StepError, StepRecord, StepSequence, StepStore,
-    decode_step_record, encode_step_record, recover, settle_confirmations, transaction_hash,
+    Attempt, ChainView, Identity, Inclusion, MAX_ATTEMPTS, PaymentIntent, PaymentKind, PaymentRecord, PaymentSequence,
+    PaymentStore, RECORD_VERSION, Receipt, ReceiptStatus, Recovery, SETTLE_CONFIRMATIONS, Step, StepError,
+    decode_payment_record, encode_payment_record, settle_confirmations, transaction_hash,
 };
 pub use summon::{SummonError, SummonReport, prove_test_summon};
 
