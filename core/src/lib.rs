@@ -8,6 +8,10 @@ use core::fmt;
 
 use ghost_client::account::{SeedError, WalletSeed};
 
+pub mod summon;
+
+pub use summon::{SummonError, SummonReport, prove_test_summon};
+
 uniffi::setup_scaffolding!();
 
 /// Why a set of words could not be turned into an account.

@@ -8,7 +8,8 @@ typealias BenchmarkFunction = (BenchContext) throws -> Void
 /// function under Benchmarks/ and add one entry here.
 enum BenchmarkRegistry {
   static let benchmarks: [String: BenchmarkFunction] = [
-    DummyBenchmark.name: DummyBenchmark.run
+    DummyBenchmark.name: DummyBenchmark.run,
+    SummonBenchmark.name: SummonBenchmark.run,
   ]
 
   static var names: [String] { benchmarks.keys.sorted() }
