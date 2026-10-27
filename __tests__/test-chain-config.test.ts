@@ -141,14 +141,32 @@ describe('the node benchmarks', () => {
     expect(check).toMatch(/guard parent == sync\.bestHash\(\) else \{\s*throw HeaderSyncBenchmarkError\.notLinkedToCheckpoint/);
   });
 
-  it('restore looks up each account at the checked tip, with no start height', () => {
+  // The restore's run function, without the header check and lookup classes.
+  const restoreRun = restore.slice(
+    restore.indexOf('static func run(_ context: BenchContext)'),
+    restore.indexOf('final class BackgroundHeaderCheck'),
+  );
+  const headerCheck = restore.slice(
+    restore.indexOf('final class BackgroundHeaderCheck'),
+    restore.indexOf('final class NodeAccountLookup'),
+  );
+
+  it("restore looks up each account at the node's tip at once, with no start height", () => {
     expect(restore).not.toMatch(/[bB]irthday|scannedFrom|firstHeight|feedBlock|eth_getBlockByNumber|eth_getTransactionReceipt/);
-    expect(restore).toContain('let tipHeight = sync.bestHeight()');
-    expect(restore).toContain('let tipHash = sync.bestHash()');
-    expect(restore).toMatch(
-      /RestoreLookup\(\s*words: testWords, lookup: NodeAccountLookup\(url: url\), tipHeight: tipHeight,\s*tipHash: tipHash\)/,
+    // The tip is the node's, taken before any header is checked.
+    expect(restoreRun).toContain('let tip = try node.latestBlock()');
+    expect(restoreRun).not.toMatch(/makeSync|syncThrough|startRun|bestHeight|bestHash|blockNumber/);
+    expect(restoreRun).toMatch(
+      /RestoreLookup\(\s*words: testWords, lookup: NodeAccountLookup\(url: url\), tipHeight: tip\.height,\s*tipHash: tip\.hash\)/,
     );
-    expect(restore).toContain('while let account = try restore.lookUpNext()');
+    const tip = restoreRun.indexOf('let tip = try node.latestBlock()');
+    const start = restoreRun.indexOf('headerCheck.start(height: tip.height, hash: tip.hash)');
+    expect(start).toBeGreaterThan(tip);
+    expect(start).toBeLessThan(restoreRun.indexOf('try RestoreLookup('));
+    expect(restoreRun).toMatch(/while let account = next \{[\s\S]*next = try lookup\.lookUpNext\(\)/);
+    const latest = headerSync.slice(headerSync.indexOf('func latestBlock()'));
+    expect(latest).toContain('"method": "eth_getBlockByNumber", "params": ["latest", false]');
+    expect(latest).toMatch(/hash\.count == 32/);
     const lookup = restore.slice(restore.indexOf('final class NodeAccountLookup: AccountLookup'));
     expect(lookup).toContain('func accountState(address: Data, blockHash: Data) throws -> AccountState');
     expect(lookup).toContain('"blockHash": "0x" + Hex.encode(blockHash), "requireCanonical": true');
@@ -157,13 +175,64 @@ describe('the node benchmarks', () => {
   });
 
   it('restore records the time to the first balance and its usual notes', () => {
-    const firstBalance = restore.indexOf('"timeToFirstBalanceSeconds"');
-    expect(firstBalance).toBeGreaterThan(restore.indexOf('while let account = try restore.lookUpNext()'));
-    expect(restore).toMatch(/if lookedUp == 0 \{\s*context\.note\(\s*"timeToFirstBalanceSeconds"/);
+    const firstBalance = restoreRun.indexOf('"timeToFirstBalanceSeconds"');
+    expect(firstBalance).toBeGreaterThan(restoreRun.indexOf('while let account = next {'));
+    expect(restoreRun).toMatch(
+      /if lookedUp == 0 \{\s*let seconds = HeaderSyncBenchmark\.uptime\(\) - restoreStart\s*timeToFirstBalanceSeconds = seconds\s*context\.note\("timeToFirstBalanceSeconds"/,
+    );
     for (const note of ['restoreSeconds', 'accountsFound', 'accountsExpected', 'scanComplete']) {
-      expect(restore).toContain(`context.note("${note}"`);
+      expect(restoreRun).toContain(`context.note("${note}"`);
     }
-    expect(restore).toMatch(/guard used\.count == expected|if used\.count != expected \{\s*throw/);
+    expect(restoreRun).toMatch(/if used\.count != expected \{\s*throw/);
+  });
+
+  it('restore fails when the first balance takes more than 10 s', () => {
+    expect(restore).toContain('static let firstBalanceLimitSeconds: Double = 10\n');
+    expect(restoreRun).toMatch(/guard let firstBalance = timeToFirstBalanceSeconds else \{\s*throw/);
+    expect(restoreRun).toMatch(
+      /if firstBalance > firstBalanceLimitSeconds \{\s*throw RestoreBenchmarkError\.firstBalanceSlow/,
+    );
+  });
+
+  it('restore shows first balance, lookup and header check as separate stages', () => {
+    // "first balance" runs inside "lookup", both from the start of the run.
+    const lookupStage = restoreRun.indexOf('try context.stage("lookup")');
+    const firstStage = restoreRun.indexOf('try context.stage("first balance")');
+    expect(lookupStage).toBeGreaterThanOrEqual(0);
+    expect(firstStage).toBeGreaterThan(lookupStage);
+    expect(firstStage).toBeLessThan(restoreRun.indexOf('let tip = try node.latestBlock()'));
+    expect(restoreRun.indexOf('let restoreStart')).toBeLessThan(lookupStage);
+    expect(restoreRun).not.toMatch(/context\.stage\("(sync|derive|header check)"\)/);
+    expect(headerCheck).toContain('try context.stage("header check")');
+  });
+
+  it('restore runs the header check on its own thread, in its own budgeted run, up to the lookup block', () => {
+    expect(headerCheck).toMatch(/DispatchQueue\.global\(qos: \.\w+\)\.async \{/);
+    expect(headerCheck).toMatch(
+      /sync\.startRun\(\s*budget: HeaderSyncBenchmark\.runBudget, conditions: HeaderSyncBenchmark\.conditions\(\)\)/,
+    );
+    expect(headerCheck).toMatch(/HeaderSyncBenchmark\.syncThrough\(\s*height, sync: sync, run: run/);
+    expect(headerCheck).toContain('return sync.bestHeight() == height && sync.bestHash() == hash');
+    // The lookup never waits for it: the only waits come after every balance.
+    const waits = [...restoreRun.matchAll(/headerCheck\.wait\(\)/g)].map((m) => m.index!);
+    expect(waits).toHaveLength(2);
+    const lastBalance = restoreRun.indexOf('next = try lookup.lookUpNext()');
+    for (const at of waits) expect(at).toBeGreaterThan(lastBalance);
+    // A failed lookup stops the header run before waiting for it.
+    expect(restoreRun).toMatch(/\} catch \{[\s\S]*headerCheck\.cancel\(\)\s*_ = headerCheck\.wait\(\)\s*throw error/);
+  });
+
+  it('restore notes lookupBlockVerified and fails unless it is yes', () => {
+    const pending = restoreRun.indexOf('context.note("lookupBlockVerified", "pending")');
+    expect(pending).toBeGreaterThanOrEqual(0);
+    expect(pending).toBeLessThan(restoreRun.indexOf('let restoreStart'));
+    expect(restoreRun).toContain('case .success(true)?: context.note("lookupBlockVerified", "yes")');
+    expect(restoreRun).toContain('case .success(false)?: context.note("lookupBlockVerified", "no")');
+    const verdict = restoreRun.slice(restoreRun.lastIndexOf('switch verified {'));
+    expect(verdict).toMatch(/case \.success\(true\)\?: break\n/);
+    expect(verdict).toMatch(/case \.success\(false\)\?:\s*throw RestoreBenchmarkError\.lookupBlockNotOnCheckedChain/);
+    expect(verdict).toMatch(/case \.failure\(let error\)\?:\s*throw RestoreBenchmarkError\.headerCheckFailed/);
+    expect(verdict).toMatch(/case nil:\s*throw RestoreBenchmarkError\.headerCheckFailed/);
   });
 
   it('worst-case still fails unless it holds 2 caches', () => {
