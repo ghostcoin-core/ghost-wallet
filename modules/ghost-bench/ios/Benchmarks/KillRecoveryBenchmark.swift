@@ -1,10 +1,6 @@
 import Darwin
 import Foundation
 
-#if canImport(ghost_wallet_core)
-  import ghost_wallet_core
-#endif
-
 enum KillRecoveryBenchmarkError: LocalizedError {
   case bindingsMissing
   case unknownKillPoint(String)
@@ -102,7 +98,7 @@ enum KillRecoveryBenchmark {
   }
 
   static func run(_ context: BenchContext) throws {
-    #if canImport(ghost_wallet_core)
+    #if GHOST_CORE_BINDINGS
       context.note("chain", chainNote)
       context.note("store", "Keychain, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, not synchronizable")
       let chain = FakeTestChain()
@@ -177,7 +173,7 @@ enum KillRecoveryBenchmark {
   /// Called by the module as the app launches: recovers any payment a kill
   /// left unfinished, and keeps the outcome for the next run's notes.
   static func recoverAtLaunch() {
-    #if canImport(ghost_wallet_core)
+    #if GHOST_CORE_BINDINGS
       _ = recoverUnfinished(store: KeychainStepStore(), chain: FakeTestChain(), launchStart: processStartDate())
     #endif
   }
@@ -192,7 +188,7 @@ enum KillRecoveryBenchmark {
     return Date(timeIntervalSince1970: Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000)
   }
 
-  #if canImport(ghost_wallet_core)
+  #if GHOST_CORE_BINDINGS
     /// Opens every unfinished record and drives it to settled. A record that
     /// cannot be opened or recovered is an outcome to show; it is kept as it
     /// is and nothing is sent for it. Returns how many were found.
@@ -361,7 +357,7 @@ enum KillRecoveryBenchmark {
   #endif
 }
 
-#if canImport(ghost_wallet_core)
+#if GHOST_CORE_BINDINGS
   /// A stand-in for the test chain, kept in a file so it survives the kill:
   /// a broadcast transaction goes into the next block (once), every
   /// broadcast is counted, and `mine` adds an empty block.

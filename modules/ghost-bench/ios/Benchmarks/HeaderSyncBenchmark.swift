@@ -1,10 +1,6 @@
 import Foundation
 import UIKit
 
-#if canImport(ghost_wallet_core)
-  import ghost_wallet_core
-#endif
-
 enum HeaderSyncBenchmarkError: LocalizedError {
   case bindingsMissing
   case noNodeUrl
@@ -64,7 +60,7 @@ enum HeaderSyncBenchmark {
   static let name = "header-sync"
 
   static func run(_ context: BenchContext) throws {
-    #if canImport(ghost_wallet_core)
+    #if GHOST_CORE_BINDINGS
       context.note(
         "headerSource", "eth_getBlockByNumber in JSON-RPC batches; the node has no header-range call")
       context.note("randomx", "interpreted, light caches, no JIT")
@@ -122,7 +118,7 @@ enum HeaderSyncBenchmark {
     var maxCacheCount: UInt64 = 0
   }
 
-  #if canImport(ghost_wallet_core)
+  #if GHOST_CORE_BINDINGS
     static func constants() -> HeaderChainConstants {
       HeaderChainConstants(
         blockTime: TestChainConfig.blockTime,

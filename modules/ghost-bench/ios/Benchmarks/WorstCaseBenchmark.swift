@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(ghost_wallet_core)
-  import ghost_wallet_core
-#endif
-
 enum WorstCaseBenchmarkError: LocalizedError {
   case bindingsMissing
   case noNodeUrl
@@ -48,7 +44,7 @@ enum WorstCaseBenchmark {
   static let wantedCaches: UInt64 = 2
 
   static func run(_ context: BenchContext) throws {
-    #if canImport(ghost_wallet_core)
+    #if GHOST_CORE_BINDINGS
       context.note("randomx", "interpreted, light caches, no JIT")
       guard
         let text = UserDefaults.standard.string(forKey: TestChainConfig.nodeUrlKey), !text.isEmpty

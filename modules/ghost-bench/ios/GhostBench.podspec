@@ -12,9 +12,18 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
 
-  s.pod_target_xcconfig = {
+  # The Swift bindings of the native core (ghost_wallet_core.swift and
+  # ghost_wallet_coreFFI.h) are written into Generated/ by the install scripts
+  # and compiled as part of this pod, so the benchmarks call them without an
+  # import. GhostCore already links the core's XCFramework; it is not vendored
+  # here again. DEFINES_MODULE makes the FFI header visible to Swift.
+  bindings = File.exist?(File.join(__dir__, 'Generated', 'ghost_wallet_core.swift'))
+
+  xcconfig = {
     'DEFINES_MODULE' => 'YES',
   }
+  xcconfig['SWIFT_ACTIVE_COMPILATION_CONDITIONS'] = '$(inherited) GHOST_CORE_BINDINGS' if bindings
+  s.pod_target_xcconfig = xcconfig
 
-  s.source_files = '**/*.swift'
+  s.source_files = '**/*.{swift,h}'
 end

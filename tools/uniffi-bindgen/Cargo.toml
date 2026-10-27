@@ -1,0 +1,18 @@
+[package]
+name = "uniffi-bindgen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "UniFFI's binding generator, used to write the Swift bindings of the native core."
+publish = false
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+# Must match the uniffi version of core/Cargo.toml.
+uniffi = { version = "=0.31", features = ["cli"] }
+
+# Keep this crate out of any parent workspace.
+[workspace]

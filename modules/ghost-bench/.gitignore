@@ -1,3 +1,6 @@
 # The root .gitignore drops every ios/ folder (prebuild output). This module's
 # native sources live in ios/ and are committed.
 !ios/
+
+# Swift bindings of the native core, written by the install scripts.
+ios/Generated/

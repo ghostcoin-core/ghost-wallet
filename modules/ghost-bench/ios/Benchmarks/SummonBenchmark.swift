@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(ghost_wallet_core)
-  import ghost_wallet_core
-#endif
-
 enum SummonBenchmarkError: LocalizedError {
   case bindingsMissing
   case notVerified(Int)
@@ -29,7 +25,7 @@ enum SummonBenchmark {
   static let runs = 5
 
   static func run(_ context: BenchContext) throws {
-    #if canImport(ghost_wallet_core)
+    #if GHOST_CORE_BINDINGS
       var verifiedCount = 0
       context.note("runs", String(runs))
       context.note("verifiedCount", "0")

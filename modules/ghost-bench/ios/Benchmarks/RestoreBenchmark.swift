@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(ghost_wallet_core)
-  import ghost_wallet_core
-#endif
-
 enum RestoreBenchmarkError: LocalizedError {
   case bindingsMissing
   case noNodeUrl
@@ -75,7 +71,7 @@ enum RestoreBenchmark {
   static let revealRecipientOffset = 196
 
   static func run(_ context: BenchContext) throws {
-    #if canImport(ghost_wallet_core)
+    #if GHOST_CORE_BINDINGS
       context.note("headerCheck", "on")
       context.note("storedState", "none")
       guard
@@ -156,7 +152,7 @@ enum RestoreBenchmark {
   }
 }
 
-#if canImport(ghost_wallet_core)
+#if GHOST_CORE_BINDINGS
   /// One downloaded block: its header's RLP and the addresses it touched,
   /// each with its balance after the block.
   struct RestoreBlock {
