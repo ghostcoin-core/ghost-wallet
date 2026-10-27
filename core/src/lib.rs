@@ -9,9 +9,13 @@ use core::fmt;
 use ghost_client::account::{SeedError, WalletSeed};
 
 pub mod header_sync;
+pub mod restore_scan;
 pub mod summon;
 
 pub use header_sync::{HeaderChainConstants, HeaderProgress, HeaderSync, HeaderSyncError, PinnedKeyBlock};
+pub use restore_scan::{
+    DerivedAccount, GAP_LIMIT, RestoreResult, RestoreScan, RestoreScanError, RestoredAccount, TouchedAddress,
+};
 pub use summon::{SummonError, SummonReport, prove_test_summon};
 
 uniffi::setup_scaffolding!();
@@ -54,7 +58,7 @@ pub fn account_zero_address(words: String) -> Result<String, WordsError> {
     Ok(to_hex_address(account.address()))
 }
 
-fn to_hex_address(address: &[u8; 20]) -> String {
+pub(crate) fn to_hex_address(address: &[u8; 20]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(2 + 2 * address.len());
     out.push_str("0x");

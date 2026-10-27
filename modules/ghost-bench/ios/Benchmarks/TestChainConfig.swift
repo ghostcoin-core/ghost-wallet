@@ -51,4 +51,9 @@ enum TestChainConfig {
 
   /// The timeout of one request to the node.
   static let requestTimeoutSeconds: Double = 60
+
+  /// How many accounts of the test words the restore benchmark must find:
+  /// the accounts given activity on the test chain by hand. PLACEHOLDER:
+  /// set it to the number of accounts used when the test wallet was set up.
+  static let restoreAccountsExpected = 0
 }
