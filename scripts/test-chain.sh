@@ -20,8 +20,8 @@
 # <h> are not pinned: the header sync checks them itself. It needs Node.
 #
 # `fund-late` sends 1 GHOST to accounts 0, 3 and 7 again, every time it runs,
-# once the chain reaches <h>, and prints the lowest block holding them, so a
-# restore from a later birthday has activity to find.
+# once the chain reaches <h>, and prints the lowest block holding them: recent
+# activity on the test accounts, on top of the first funding near block 0.
 #
 # Runs on macOS only (Go 1.26+, git, make, curl and rustup installed; the Rust
 # toolchain is the one pinned in ghost-node's rust-toolchain.toml). The node

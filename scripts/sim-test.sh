@@ -22,14 +22,15 @@
 # By default each node benchmark starts from a pinned checkpoint, as the app
 # will, so a run takes minutes: header-sync from 1,000 blocks below the tip,
 # worst-case from height 8000 (below the second key's first use at 8449, so
-# its sync still crosses the key change), and restore from just below a
-# wallet birthday, after the test accounts are funded again above it. Every
-# header after a checkpoint is checked in full. The background wait is 10
-# seconds.
+# its sync still crosses the key change), and restore, like header-sync,
+# from 1,000 blocks below the tip, far above the blocks that funded the test
+# accounts: the restore looks up each account's current state at the checked
+# tip, so the checkpoint only anchors the header check. Every header after a
+# checkpoint is checked in full. The background wait is 10 seconds.
 #
 #   FULL=1 BENCHES="header-sync restore worst-case" bash scripts/sim-test.sh
 #
-# FULL=1 runs the node benchmarks from genesis with no birthday and the
+# FULL=1 runs the node benchmarks from genesis with the
 # compiled 180-second background wait, for a final confirmation.
 set -euo pipefail
 
@@ -56,12 +57,10 @@ TEST_CHAIN_HEIGHT=8600
 BENCH_TIMEOUT_MS=600000
 NODE_BENCH_TIMEOUT_MS=5400000
 # The checkpoint starts (unless FULL=1): header-sync checks this many headers
-# up to the tip; worst-case starts below 8449, the second key's first use;
-# restore's birthday is this many blocks below the late funding, and its
-# checkpoint the block below the birthday.
+# up to the tip, and so does restore; worst-case starts below 8449, the second
+# key's first use.
 HEADER_SYNC_WINDOW=1000
 WORST_CASE_CHECKPOINT=8000
-RESTORE_BIRTHDAY_LEAD=100
 BACKGROUND_WAIT_SECONDS=10
 
 case "$FULL" in
@@ -196,35 +195,23 @@ if [ "$needs_chain" = true ]; then
     sim_defaults_delete benchTestChain.backgroundWaitSeconds
   else
     sim_defaults benchTestChain.backgroundWaitSeconds -int "$BACKGROUND_WAIT_SECONDS"
-    case " $BENCHES " in
-      *" restore "*)
-        echo "==> funding the test accounts again for the restore birthday"
-        late_block="$(bash scripts/test-chain.sh fund-late "$TEST_CHAIN_HEIGHT")"
-        [[ "$late_block" =~ ^[0-9]+$ ]] || fail "test-chain.sh fund-late printed no block"
-        restore_birthday=$((late_block - RESTORE_BIRTHDAY_LEAD))
-        ;;
-    esac
   fi
 fi
 
-# The start of one node benchmark: a checkpoint (and, for restore, the
-# wallet's birthday), or genesis with FULL=1. The checkpoint is made from the
-# node's chain right before the benchmark runs.
+# The start of one node benchmark's header check: a checkpoint, or genesis
+# with FULL=1. The checkpoint is made from the node's chain right before the
+# benchmark runs. Restore does not start at it: it looks every account up at
+# the checked tip, so the accounts funded far below the checkpoint are found.
 set_bench_start() {
   local bench="$1" checkpoint_height="" checkpoint tip
   sim_defaults_delete benchTestChain.checkpoint
-  sim_defaults_delete benchTestChain.restoreBirthday
   [ "$FULL" = 1 ] && return
   case "$bench" in
-    header-sync)
+    header-sync | restore)
       tip="$(bash scripts/test-chain.sh height)"
       checkpoint_height=$((tip - HEADER_SYNC_WINDOW))
       ;;
     worst-case) checkpoint_height="$WORST_CASE_CHECKPOINT" ;;
-    restore)
-      checkpoint_height=$((restore_birthday - 1))
-      sim_defaults benchTestChain.restoreBirthday -int "$restore_birthday"
-      ;;
   esac
   checkpoint="$(bash scripts/test-chain.sh checkpoint "$checkpoint_height")"
   [ -n "$checkpoint" ] || fail "test-chain.sh printed no checkpoint at $checkpoint_height"

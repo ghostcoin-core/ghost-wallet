@@ -9,10 +9,10 @@
 # worst-case. For the node benchmarks (header-sync, restore, worst-case) the
 # local test chain of scripts/test-chain.sh must be running: the phone reaches
 # it on this Mac's LAN address (GHOST_WALLET_LAN_IP, else en0's or en1's) on
-# port 8547, and each starts from a checkpoint as in scripts/sim-test.sh:
-# header-sync 1,000 blocks below the tip, worst-case at height 8000 and restore
-# just below a wallet birthday, after the test accounts are funded again above
-# it.
+# port 8547, and each checks headers from a checkpoint as in
+# scripts/sim-test.sh: header-sync and restore 1,000 blocks below the tip,
+# worst-case at height 8000. Restore looks up each account's current state at
+# the checked tip, so the checkpoint is not where it starts looking.
 #
 # The test-only overrides of TestChainConfig.swift are passed as launch
 # arguments ("-key value"), which iOS puts in UserDefaults' argument domain
@@ -51,7 +51,6 @@ TEST_CHAIN_PORT=8547
 # As in scripts/sim-test.sh.
 HEADER_SYNC_WINDOW=1000
 WORST_CASE_CHECKPOINT=8000
-RESTORE_BIRTHDAY_LEAD=100
 # Past height 8449, the second RandomX key, for worst-case.
 TEST_CHAIN_HEIGHT=8600
 
@@ -70,19 +69,11 @@ case "$BENCH" in
     [ -n "$genesis_rlp" ] || fail "the test chain returned no block 0"
 
     case "$BENCH" in
-      header-sync)
+      header-sync | restore)
         tip="$(bash scripts/test-chain.sh height)"
         checkpoint_height=$((tip - HEADER_SYNC_WINDOW))
         ;;
       worst-case) checkpoint_height="$WORST_CASE_CHECKPOINT" ;;
-      restore)
-        echo "==> funding the test accounts again for the restore birthday"
-        late_block="$(bash scripts/test-chain.sh fund-late "$TEST_CHAIN_HEIGHT")"
-        [[ "$late_block" =~ ^[0-9]+$ ]] || fail "test-chain.sh fund-late printed no block"
-        restore_birthday=$((late_block - RESTORE_BIRTHDAY_LEAD))
-        checkpoint_height=$((restore_birthday - 1))
-        args+=(-benchTestChain.restoreBirthday "$restore_birthday")
-        ;;
     esac
     checkpoint="$(bash scripts/test-chain.sh checkpoint "$checkpoint_height")"
     [ -n "$checkpoint" ] || fail "test-chain.sh printed no checkpoint at $checkpoint_height"

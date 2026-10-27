@@ -17,7 +17,6 @@ const OVERRIDES = {
   genesisRlpHex: 'benchTestChain.genesisRlpHex',
   restoreAccountsExpected: 'benchTestChain.restoreAccountsExpected',
   checkpoint: 'benchTestChain.checkpoint',
-  restoreBirthday: 'benchTestChain.restoreBirthday',
   backgroundWaitSeconds: 'benchTestChain.backgroundWaitSeconds',
 };
 
@@ -62,7 +61,8 @@ describe('TestChainConfig.swift', () => {
     expect(source).toContain('static let halfLife: UInt64 = 3600');
   });
 
-  it('declares exactly the seven override keys', () => {
+  it('declares exactly the six override keys, with no restore start among them', () => {
+    expect(source).not.toMatch(/[bB]irthday/);
     const keys = enumBody(source, 'OverrideKey');
     const declared = [...keys.matchAll(/static let (\w+) = "([^"]+)"/g)].map(([, name, key]) => [
       name,
@@ -87,7 +87,6 @@ describe('TestChainConfig.swift', () => {
     expect(getterBody(source, 'backgroundWaitSeconds')).toMatch(
       /overrideCount\(OverrideKey\.backgroundWaitSeconds\)[\s\S]*\?\? Compiled\.backgroundWaitSeconds/,
     );
-    expect(getterBody(source, 'restoreBirthday')).toContain('overrideCount(OverrideKey.restoreBirthday)');
     const start = getterBody(source, 'start');
     expect(start).toContain('overrideString(OverrideKey.genesisRlpHex)');
     expect(start).toContain('return Compiled.start');
@@ -142,11 +141,29 @@ describe('the node benchmarks', () => {
     expect(check).toMatch(/guard parent == sync\.bestHash\(\) else \{\s*throw HeaderSyncBenchmarkError\.notLinkedToCheckpoint/);
   });
 
-  it('restore scans from the birthday override', () => {
-    expect(restore).toContain('let birthday = TestChainConfig.restoreBirthday');
-    expect(restore).toContain('RestoreScan(words: testWords, firstHeight: firstHeight, birthday: birthday)');
-    expect(restore).toContain('var next = scanFrom');
-    expect(restore).toContain('case .complete(let accounts, let note, let scannedFrom)');
+  it('restore looks up each account at the checked tip, with no start height', () => {
+    expect(restore).not.toMatch(/[bB]irthday|scannedFrom|firstHeight|feedBlock|eth_getBlockByNumber|eth_getTransactionReceipt/);
+    expect(restore).toContain('let tipHeight = sync.bestHeight()');
+    expect(restore).toContain('let tipHash = sync.bestHash()');
+    expect(restore).toMatch(
+      /RestoreLookup\(\s*words: testWords, lookup: NodeAccountLookup\(url: url\), tipHeight: tipHeight,\s*tipHash: tipHash\)/,
+    );
+    expect(restore).toContain('while let account = try restore.lookUpNext()');
+    const lookup = restore.slice(restore.indexOf('final class NodeAccountLookup: AccountLookup'));
+    expect(lookup).toContain('func accountState(address: Data, blockHash: Data) throws -> AccountState');
+    expect(lookup).toContain('"blockHash": "0x" + Hex.encode(blockHash), "requireCanonical": true');
+    expect(lookup).toContain('("eth_getBalance", [account, block])');
+    expect(lookup).toContain('("eth_getTransactionCount", [account, block])');
+  });
+
+  it('restore records the time to the first balance and its usual notes', () => {
+    const firstBalance = restore.indexOf('"timeToFirstBalanceSeconds"');
+    expect(firstBalance).toBeGreaterThan(restore.indexOf('while let account = try restore.lookUpNext()'));
+    expect(restore).toMatch(/if lookedUp == 0 \{\s*context\.note\(\s*"timeToFirstBalanceSeconds"/);
+    for (const note of ['restoreSeconds', 'accountsFound', 'accountsExpected', 'scanComplete']) {
+      expect(restore).toContain(`context.note("${note}"`);
+    }
+    expect(restore).toMatch(/guard used\.count == expected|if used\.count != expected \{\s*throw/);
   });
 
   it('worst-case still fails unless it holds 2 caches', () => {
@@ -201,18 +218,15 @@ describe('scripts/sim-test.sh', () => {
     expect(script).toMatch(/worst-case\) checkpoint_height="\$WORST_CASE_CHECKPOINT" ;;/);
   });
 
-  it('starts header-sync 1,000 blocks below the tip', () => {
+  it('checks header-sync and restore headers from 1,000 blocks below the tip', () => {
     expect(script).toMatch(/^HEADER_SYNC_WINDOW=1000$/m);
     expect(script).toMatch(
-      /header-sync\)\s*tip="\$\(bash scripts\/test-chain\.sh height\)"\s*checkpoint_height=\$\(\(tip - HEADER_SYNC_WINDOW\)\)/,
+      /header-sync \| restore\)\s*tip="\$\(bash scripts\/test-chain\.sh height\)"\s*checkpoint_height=\$\(\(tip - HEADER_SYNC_WINDOW\)\)/,
     );
   });
 
-  it('starts restore just below a birthday under the late funding', () => {
-    expect(script).toContain('late_block="$(bash scripts/test-chain.sh fund-late "$TEST_CHAIN_HEIGHT")"');
-    expect(script).toContain('restore_birthday=$((late_block - RESTORE_BIRTHDAY_LEAD))');
-    expect(script).toContain('checkpoint_height=$((restore_birthday - 1))');
-    expect(script).toContain(`sim_defaults ${OVERRIDES.restoreBirthday} -int "$restore_birthday"`);
+  it('gives restore no start height and no late funding', () => {
+    expect(script).not.toMatch(/[bB]irthday|BIRTHDAY|fund-late/);
   });
 
   it('writes each node benchmark its checkpoint right before it runs', () => {
@@ -224,7 +238,7 @@ describe('scripts/sim-test.sh', () => {
     // A benchmark never inherits the previous one's start.
     const setStart = script.slice(script.indexOf('set_bench_start() {'));
     expect(setStart).toMatch(
-      /sim_defaults_delete benchTestChain\.checkpoint\s*sim_defaults_delete benchTestChain\.restoreBirthday\s*\[ "\$FULL" = 1 \] && return/,
+      /sim_defaults_delete benchTestChain\.checkpoint\s*\[ "\$FULL" = 1 \] && return/,
     );
   });
 
@@ -257,7 +271,10 @@ describe('scripts/phone-launch.sh', () => {
     expect(script).toContain(`-${OVERRIDES.blockTime} 1\n`);
     expect(script).toContain(`-${OVERRIDES.futureDrift} 3600\n`);
     expect(script).toContain(`-${OVERRIDES.restoreAccountsExpected} 3\n`);
-    expect(script).toContain(`-${OVERRIDES.restoreBirthday} "$restore_birthday"`);
+    expect(script).not.toMatch(/[bB]irthday|BIRTHDAY|fund-late/);
+    expect(script).toMatch(
+      /header-sync \| restore\)\s*tip="\$\(bash scripts\/test-chain\.sh height\)"\s*checkpoint_height=\$\(\(tip - HEADER_SYNC_WINDOW\)\)/,
+    );
     expect(script).toMatch(/^TEST_CHAIN_PORT=8547$/m);
     expect(script).toMatch(/^WORST_CASE_CHECKPOINT=8000$/m);
     expect(script).toMatch(/^HEADER_SYNC_WINDOW=1000$/m);

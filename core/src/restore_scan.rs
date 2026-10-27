@@ -1,61 +1,75 @@
-//! Restore scan: from the 24 words alone, find every account of a wallet and
-//! its balance by walking the chain block by block, on headers the header
-//! sync has checked.
+//! Restore: from the 24 words alone, find the accounts of a wallet and their
+//! balances by asking for each account's current state at one block.
 //!
 //! The words become a `ghost_client::account::WalletSeed`, held in memory for
-//! the scan only (it is wiped when the scan is dropped) and never stored. The
-//! scan derives the rescue-key accounts (`WalletSeed::rescue_account`) 0 up
-//! to [`GAP_LIMIT`] past the last used one and keeps only their public data:
-//! the index, the address and the public rescue key.
+//! the restore only (it is wiped when the restore is dropped) and never
+//! stored. The restore derives the rescue-key accounts
+//! (`WalletSeed::rescue_account`) 0, 1, 2 and on, and for each one asks the
+//! caller's [`AccountLookup`] for its balance and nonce at the tip's block
+//! hash. Every account is asked about at that one hash, so the balances all
+//! belong to the same chain state.
 //!
-//! The caller feeds the blocks in height order, each with its header (RLP)
-//! and the addresses its transactions touched, with each one's balance after
-//! the block as the node reports it. The tip comes from a [`HeaderSync`]: its
-//! best height and hash. Every fed header must carry its height and link to
-//! the one fed before it, and the header at the tip must be the sync's best
-//! header, so the fed blocks are exactly the checked chain. Until every block
-//! up to the tip has been fed, [`RestoreScan::result`] is
-//! [`RestoreResult::Incomplete`] and shows no balance at all, never a zero.
+//! Each answer is reported as soon as it arrives: [`RestoreLookup::look_up_next`]
+//! looks up one account and returns it, so the first balance shows after one
+//! lookup, not after the whole restore. Nothing walks the chain: the current
+//! state already holds every way an account got its coins, whether it was
+//! funded long ago and never touched again, paid by a contract (an internal
+//! transfer, with no transaction of its own) or paid a mining reward.
 //!
-//! A scan may start at the wallet's birthday, the height of the first block
-//! that can hold its activity: blocks below it are not fed (and are refused
-//! if they are), and the complete result says where the scan started
-//! (`scanned_from`). Activity only below the birthday is not found. From the
-//! birthday on, every block up to the tip is still fed in order, with the
-//! same checks.
+//! An account is used if its nonce or its balance is above zero. The restore
+//! goes on until [`GAP_LIMIT`] unused accounts follow the last used one.
+//! [`RestoreLookup::search_further`] looks [`GAP_LIMIT`] accounts past that,
+//! and [`RestoreLookup::look_up_account`] looks up any one account by index.
+//!
+//! The tip is plain data, a height and a block hash, from wherever the caller
+//! took it (on the phone: the header sync's best header).
 //!
 //! # What is not proved
 //!
-//! Ghost's client library checks a block's receipts against its header
-//! (`check_block_receipts_against_header`), but receipts only hold coin tree
-//! records. It has no check of an account's balance (no state proof) and no
-//! check of which accounts a block's transactions touched (no transactions
-//! root check). So which accounts are used and their balances come from the
-//! node, unproved: every balance of the result is marked `unverified` and the
-//! result says so in its note. Nothing here works around that.
+//! Ghost's client library has no check of an account's balance or nonce (no
+//! state proof), so both are the node's report, unproved: every account of
+//! the result is marked `unverified` and the result says so in its note.
+//! Nothing here works around that.
 //!
 //! No network code lives here, nothing is written anywhere and nothing secret
 //! is logged or formatted: error messages never hold the words.
 
 use core::fmt;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ghost_client::account::{SeedError, WalletSeed};
-use ghost_client::seal::header_fields;
 
-use crate::header_sync::HeaderSync;
 use crate::to_hex_address;
 
-/// How many unused accounts past the last used one are derived and watched.
-/// An account further out than that is not found: the scan ends there.
+/// How many unused accounts past the last used one are looked up. An account
+/// further out than that is not found unless the caller searches further.
 pub const GAP_LIMIT: u32 = 20;
 
-/// The note of a complete result: why its balances are unverified.
-pub const UNVERIFIED_NOTE: &str = "Balances and account use are the node's report, not proved: Ghost's client \
-library has no account state proof and no transactions root check yet. Every balance is marked unverified.";
+/// The note of every result: why its balances are unverified.
+pub const UNVERIFIED_NOTE: &str = "Balances and nonces are the node's report, not proved: Ghost's client library \
+has no account state proof yet. Every account is marked unverified.";
 
-/// One account the scan derived: public data only.
+/// One account's state at a block, as the lookup reports it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AccountState {
+    /// Its balance, in wei, big-endian, at most 32 bytes.
+    pub balance: Vec<u8>,
+    /// Its nonce: how many transactions it has sent.
+    pub nonce: u64,
+}
+
+/// Where the restore gets account states: on the phone, the node's
+/// `eth_getBalance` and `eth_getTransactionCount` at a block hash. Every call
+/// of one restore asks at the same block hash.
+#[uniffi::export(callback_interface)]
+pub trait AccountLookup: Send + Sync {
+    /// The state of the 20-byte `address` at the block with the 32-byte hash
+    /// `block_hash`; [`RestoreError::Lookup`] if it cannot be had.
+    fn account_state(&self, address: Vec<u8>, block_hash: Vec<u8>) -> Result<AccountState, RestoreError>;
+}
+
+/// One account derived from the words: public data only.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct DerivedAccount {
     /// The account index.
@@ -66,309 +80,233 @@ pub struct DerivedAccount {
     pub rescue_public_key: Vec<u8>,
 }
 
-/// An address a block touched, with its balance after the block.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct TouchedAddress {
-    /// The 20-byte address.
-    pub address: Vec<u8>,
-    /// Its balance after the block, in wei, big-endian.
-    pub balance: Vec<u8>,
-}
-
-/// One account of a complete scan.
+/// One account looked up.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RestoredAccount {
     /// The account index.
     pub index: u32,
     /// Its address, `0x` and 40 lowercase hex digits.
     pub address: String,
-    /// Whether any fed block touched it.
-    pub used: bool,
-    /// Its balance after the last block that touched it, in wei, as a
-    /// decimal number; "0" for an account no block touched.
+    /// Its balance at the tip, in wei, as a decimal number.
     pub balance: String,
-    /// The balance is the node's report, not proved (see the note).
+    /// Its nonce at the tip.
+    pub nonce: u64,
+    /// Whether its nonce or its balance is above zero.
+    pub used: bool,
+    /// The balance and nonce are the node's report, not proved (see the note).
     pub unverified: bool,
 }
 
-/// Where a scan stands.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
-pub enum RestoreResult {
-    /// Not every block up to the tip has been fed: no balance is known yet.
-    Incomplete {
-        /// The height of the next block to feed.
-        next_height: u64,
-        /// The tip, once it is set.
-        tip: Option<u64>,
-    },
-    /// Every block up to the tip has been fed.
-    Complete {
-        /// Every derived account, in index order: the used ones and the
-        /// unused ones up to the gap limit past the last used one.
-        accounts: Vec<RestoredAccount>,
-        /// What the balances rest on.
-        note: String,
-        /// The height of the first block fed: the wallet's birthday, or the
-        /// first block after the header sync's pinned start if that is
-        /// later. Activity below it is not in the result.
-        scanned_from: u64,
-    },
+/// Where a restore stands.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RestoreResult {
+    /// Every account looked up so far, in index order.
+    pub accounts: Vec<RestoredAccount>,
+    /// Whether [`GAP_LIMIT`] unused accounts (or more, after a search
+    /// further) follow the last used one: nothing is left to look up.
+    pub complete: bool,
+    /// The index [`RestoreLookup::look_up_next`] looks up next.
+    pub next_index: u64,
+    /// The tip every account was looked up at: its height.
+    pub tip_height: u64,
+    /// And its 32-byte block hash.
+    pub tip_hash: Vec<u8>,
+    /// What the balances rest on.
+    pub note: String,
 }
 
-/// Why a scan could not start or refused a call. The messages never hold the
-/// words.
+/// Why a restore could not start or a lookup failed. The messages never hold
+/// the words.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
-#[uniffi(flat_error)]
-pub enum RestoreScanError {
+pub enum RestoreError {
     /// The words are not a valid wallet seed.
     Words { reason: String },
-    /// A block was fed above the next height: a block would be passed over.
-    HeightPassedOver { expected: u64, got: u64 },
-    /// A block was fed below the next height: it was fed already.
-    RepeatedHeight { expected: u64, got: u64 },
-    /// A block below the wallet's birthday was fed: the scan starts there.
-    BelowBirthday { birthday: u64, got: u64 },
-    /// A block was fed above the tip, or before a tip was set.
-    AboveTip { height: u64, tip: Option<u64> },
-    /// The tip is below the blocks already fed.
-    TipBelowFed { tip: u64, fed: u64 },
-    /// A header does not decode, does not carry its height, does not link to
-    /// the header fed before it or, at the tip, is not the checked tip.
-    NotTheCheckedChain { height: u64, reason: String },
-    /// A touched address or balance is malformed.
-    BadTouched { height: u64, reason: String },
+    /// The tip's block hash is not 32 bytes.
+    BadTip { reason: String },
+    /// The lookup could not give an account's state.
+    Lookup { reason: String },
+    /// The lookup gave a state that is malformed.
+    BadState { index: u32, reason: String },
+    /// No account has this index.
+    NoSuchAccount { index: u64 },
 }
 
-impl fmt::Display for RestoreScanError {
+impl fmt::Display for RestoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Words { reason } => write!(f, "invalid account words: {reason}"),
-            Self::HeightPassedOver { expected, got } => {
-                write!(f, "block {got} was fed where block {expected} is next: a block would be passed over")
-            }
-            Self::RepeatedHeight { expected, got } => {
-                write!(f, "block {got} was fed already; block {expected} is next")
-            }
-            Self::BelowBirthday { birthday, got } => {
-                write!(f, "block {got} is below the wallet's birthday, block {birthday}")
-            }
-            Self::AboveTip { height, tip: Some(tip) } => write!(f, "block {height} is above the tip {tip}"),
-            Self::AboveTip { height, tip: None } => write!(f, "block {height} was fed before the tip was set"),
-            Self::TipBelowFed { tip, fed } => write!(f, "the tip {tip} is below block {fed}, already fed"),
-            Self::NotTheCheckedChain { height, reason } => {
-                write!(f, "block {height} is not on the checked header chain: {reason}")
-            }
-            Self::BadTouched { height, reason } => write!(f, "block {height} has a bad touched address: {reason}"),
+            Self::BadTip { reason } => write!(f, "the tip is not a block: {reason}"),
+            Self::Lookup { reason } => write!(f, "the account lookup failed: {reason}"),
+            Self::BadState { index, reason } => write!(f, "the state of account {index} is malformed: {reason}"),
+            Self::NoSuchAccount { index } => write!(f, "there is no account {index}"),
         }
     }
 }
 
-impl std::error::Error for RestoreScanError {}
+impl std::error::Error for RestoreError {}
 
-impl From<SeedError> for RestoreScanError {
+impl From<SeedError> for RestoreError {
     fn from(error: SeedError) -> Self {
-        RestoreScanError::Words { reason: error.to_string() }
+        RestoreError::Words { reason: error.to_string() }
     }
 }
 
-/// The checked tip: the header sync's best height and hash.
-#[derive(Clone, Copy)]
-struct Tip {
-    height: u64,
-    hash: [u8; 32],
-}
-
-struct Account {
-    address: [u8; 20],
-    rescue_public_key: Vec<u8>,
+impl From<uniffi::UnexpectedUniFFICallbackError> for RestoreError {
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        RestoreError::Lookup { reason: error.reason }
+    }
 }
 
 struct State {
     seed: WalletSeed,
-    accounts: Vec<Account>,
-    /// The last reported balance of every address any fed block touched,
-    /// ours or not: an account derived later may have been touched earlier.
-    touched: HashMap<[u8; 20], u128>,
-    /// The wallet's birthday, if one was given.
-    birthday: Option<u64>,
-    /// The height of the first block to feed.
-    scanned_from: u64,
-    next_height: u64,
-    /// The hash of the last fed header.
-    last_hash: Option<[u8; 32]>,
-    tip: Option<Tip>,
+    /// The address of every account derived so far.
+    addresses: HashMap<u32, [u8; 20]>,
+    /// Every account looked up so far.
+    found: BTreeMap<u32, RestoredAccount>,
+    /// The next index of the run from account 0.
+    next_index: u64,
+    /// The run goes on at least this far: [`GAP_LIMIT`] at the start, more
+    /// after a search further.
+    search_floor: u64,
 }
 
-/// A restore scan from the 24 words, fed block by block.
+/// A restore from the 24 words, by current-state lookup at one tip.
 #[derive(uniffi::Object)]
-pub struct RestoreScan {
+pub struct RestoreLookup {
+    lookup: Box<dyn AccountLookup>,
+    tip_height: u64,
+    tip_hash: [u8; 32],
     state: Mutex<State>,
 }
 
 #[uniffi::export]
-impl RestoreScan {
-    /// Starts a scan of the wallet of `words` at block `first_height`, the
-    /// first block after the header sync's pinned start, or at `birthday`,
-    /// the wallet's birthday, if that is later. Blocks below the birthday
-    /// are refused.
+impl RestoreLookup {
+    /// Starts a restore of the wallet of `words`, looking every account up
+    /// with `lookup` at the block `tip_hash` (32 bytes) at `tip_height`.
     #[uniffi::constructor]
-    pub fn new(words: String, first_height: u64, birthday: Option<u64>) -> Result<Arc<Self>, RestoreScanError> {
+    pub fn new(
+        words: String,
+        lookup: Box<dyn AccountLookup>,
+        tip_height: u64,
+        tip_hash: Vec<u8>,
+    ) -> Result<Arc<Self>, RestoreError> {
+        let tip_hash: [u8; 32] = tip_hash
+            .as_slice()
+            .try_into()
+            .map_err(|_| RestoreError::BadTip { reason: "the block hash is not 32 bytes".to_owned() })?;
         let seed = WalletSeed::from_words(&words)?;
-        let scanned_from = birthday.map_or(first_height, |birthday| birthday.max(first_height));
-        let mut state = State {
+        let state = State {
             seed,
-            accounts: Vec::new(),
-            touched: HashMap::new(),
-            birthday,
-            scanned_from,
-            next_height: scanned_from,
-            last_hash: None,
-            tip: None,
+            addresses: HashMap::new(),
+            found: BTreeMap::new(),
+            next_index: 0,
+            search_floor: u64::from(GAP_LIMIT),
         };
-        state.extend();
-        Ok(Arc::new(Self { state: Mutex::new(state) }))
+        Ok(Arc::new(Self { lookup, tip_height, tip_hash, state: Mutex::new(state) }))
     }
 
-    /// The accounts derived so far, in index order: public data only.
-    pub fn accounts(&self) -> Vec<DerivedAccount> {
+    /// Looks up the next account of the run from account 0 and returns it,
+    /// or `None` once [`GAP_LIMIT`] unused accounts follow the last used one.
+    /// An account already looked up with [`RestoreLookup::look_up_account`]
+    /// is passed over. A failed lookup changes nothing: call again to retry.
+    pub fn look_up_next(&self) -> Result<Option<RestoredAccount>, RestoreError> {
+        let (index, address) = {
+            let mut state = self.state();
+            loop {
+                if state.next_index >= state.search_end() {
+                    return Ok(None);
+                }
+                let Ok(index) = u32::try_from(state.next_index) else { return Ok(None) };
+                if !state.found.contains_key(&index) {
+                    break (index, state.address(index));
+                }
+                state.next_index += 1;
+            }
+        };
+        let account = self.look_up(index, address)?;
+        let mut state = self.state();
+        if state.next_index == u64::from(index) {
+            state.next_index += 1;
+        }
+        Ok(Some(account))
+    }
+
+    /// Looks up account `index`, whatever the gap, and returns it. If it is
+    /// used, the run from account 0 goes on to [`GAP_LIMIT`] past it.
+    pub fn look_up_account(&self, index: u32) -> Result<RestoredAccount, RestoreError> {
+        let address = self.state().address(index);
+        self.look_up(index, address)
+    }
+
+    /// Searches [`GAP_LIMIT`] accounts further than the run would go now:
+    /// once it is complete, past the gap.
+    pub fn search_further(&self) {
+        let mut state = self.state();
+        state.search_floor = state.search_end().max(state.next_index).saturating_add(u64::from(GAP_LIMIT));
+    }
+
+    /// Derives account `index` from the words: public data only. Nothing is
+    /// looked up.
+    pub fn derive_account(&self, index: u32) -> DerivedAccount {
         let state = self.state();
-        state
-            .accounts
-            .iter()
-            .enumerate()
-            .map(|(index, account)| DerivedAccount {
-                index: index as u32,
-                address: to_hex_address(&account.address),
-                rescue_public_key: account.rescue_public_key.clone(),
-            })
-            .collect()
+        let key = state.seed.rescue_account(index);
+        DerivedAccount { index, address: to_hex_address(key.address()), rescue_public_key: key.public_key().to_vec() }
     }
 
-    /// Takes the tip from the header sync: its best height and hash.
-    pub fn set_tip(&self, sync: Arc<HeaderSync>) -> Result<(), RestoreScanError> {
-        let height = sync.best_height();
-        let hash: [u8; 32] = sync.best_hash().try_into().expect("a header hash is 32 bytes");
-        let mut state = self.state();
-        if let Some(fed) = state.next_height.checked_sub(1).filter(|_| state.last_hash.is_some()) {
-            if height < fed {
-                return Err(RestoreScanError::TipBelowFed { tip: height, fed });
-            }
-            if height == fed && state.last_hash != Some(hash) {
-                return Err(RestoreScanError::NotTheCheckedChain {
-                    height,
-                    reason: "the block fed at the tip is not the checked tip".to_owned(),
-                });
-            }
-        }
-        state.tip = Some(Tip { height, hash });
-        Ok(())
-    }
-
-    /// Feeds the block at `height`: its header's RLP and the addresses it
-    /// touched with their balances after it. A refused block changes nothing.
-    pub fn feed_block(
-        &self,
-        height: u64,
-        header: Vec<u8>,
-        touched: Vec<TouchedAddress>,
-    ) -> Result<(), RestoreScanError> {
-        let mut state = self.state();
-        let expected = state.next_height;
-        if let Some(birthday) = state.birthday.filter(|&birthday| height < birthday) {
-            return Err(RestoreScanError::BelowBirthday { birthday, got: height });
-        }
-        if height > expected {
-            return Err(RestoreScanError::HeightPassedOver { expected, got: height });
-        }
-        if height < expected {
-            return Err(RestoreScanError::RepeatedHeight { expected, got: height });
-        }
-        let tip = state.tip;
-        match tip {
-            Some(tip) if height <= tip.height => {}
-            _ => return Err(RestoreScanError::AboveTip { height, tip: tip.map(|t| t.height) }),
-        }
-        let not_checked = |reason: &str| RestoreScanError::NotTheCheckedChain { height, reason: reason.to_owned() };
-        let fields = header_fields(&header).map_err(|_| not_checked("the header does not decode"))?;
-        if fields.number != height {
-            return Err(not_checked("the header carries another height"));
-        }
-        if state.last_hash.is_some_and(|last| last != fields.parent_hash) {
-            return Err(not_checked("the header does not link to the block fed before it"));
-        }
-        if tip.is_some_and(|tip| tip.height == height && tip.hash != fields.hash) {
-            return Err(not_checked("the header at the tip is not the checked tip"));
-        }
-        let mut balances = Vec::with_capacity(touched.len());
-        for entry in &touched {
-            let address: [u8; 20] = entry.address.as_slice().try_into().map_err(|_| {
-                RestoreScanError::BadTouched { height, reason: "an address is not 20 bytes".to_owned() }
-            })?;
-            let balance = balance_from_be(&entry.balance).ok_or_else(|| RestoreScanError::BadTouched {
-                height,
-                reason: "a balance is longer than 32 bytes or does not fit in 128 bits".to_owned(),
-            })?;
-            balances.push((address, balance));
-        }
-
-        state.touched.extend(balances);
-        state.last_hash = Some(fields.hash);
-        state.next_height = height + 1;
-        state.extend();
-        Ok(())
-    }
-
-    /// `Incomplete` until every block up to the tip has been fed, then
-    /// `Complete` with every derived account.
+    /// Every account looked up so far and whether the run is complete.
     pub fn result(&self) -> RestoreResult {
         let state = self.state();
-        let complete = state.tip.is_some_and(|tip| state.next_height > tip.height);
-        if !complete {
-            return RestoreResult::Incomplete { next_height: state.next_height, tip: state.tip.map(|t| t.height) };
+        RestoreResult {
+            accounts: state.found.values().cloned().collect(),
+            complete: state.next_index >= state.search_end(),
+            next_index: state.next_index,
+            tip_height: self.tip_height,
+            tip_hash: self.tip_hash.to_vec(),
+            note: UNVERIFIED_NOTE.to_owned(),
         }
-        let accounts = state
-            .accounts
-            .iter()
-            .enumerate()
-            .map(|(index, account)| {
-                let balance = state.touched.get(&account.address);
-                RestoredAccount {
-                    index: index as u32,
-                    address: to_hex_address(&account.address),
-                    used: balance.is_some(),
-                    balance: balance.copied().unwrap_or(0).to_string(),
-                    unverified: true,
-                }
-            })
-            .collect();
-        RestoreResult::Complete { accounts, note: UNVERIFIED_NOTE.to_owned(), scanned_from: state.scanned_from }
     }
 }
 
-impl RestoreScan {
+impl RestoreLookup {
     fn state(&self) -> MutexGuard<'_, State> {
         // Every call checks everything before it changes the state, so a
         // panic leaves it as it was.
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// Asks the lookup about one account, without holding the state, and
+    /// records the answer.
+    fn look_up(&self, index: u32, address: [u8; 20]) -> Result<RestoredAccount, RestoreError> {
+        let answer = self.lookup.account_state(address.to_vec(), self.tip_hash.to_vec())?;
+        let balance = balance_from_be(&answer.balance).ok_or_else(|| RestoreError::BadState {
+            index,
+            reason: "the balance is longer than 32 bytes or does not fit in 128 bits".to_owned(),
+        })?;
+        let account = RestoredAccount {
+            index,
+            address: to_hex_address(&address),
+            balance: balance.to_string(),
+            nonce: answer.nonce,
+            used: answer.nonce > 0 || balance > 0,
+            unverified: true,
+        };
+        self.state().found.insert(index, account.clone());
+        Ok(account)
+    }
 }
 
 impl State {
-    /// Derives accounts until [`GAP_LIMIT`] unused ones follow the last used
-    /// one. A newly derived account may have been touched already, so this
-    /// repeats until nothing changes.
-    fn extend(&mut self) {
-        loop {
-            let used = self.accounts.iter().rposition(|account| self.touched.contains_key(&account.address));
-            let wanted = used.map_or(0, |last| last + 1) + GAP_LIMIT as usize;
-            if self.accounts.len() >= wanted {
-                return;
-            }
-            while self.accounts.len() < wanted {
-                let key = self.seed.rescue_account(self.accounts.len() as u32);
-                self.accounts.push(Account { address: *key.address(), rescue_public_key: key.public_key().to_vec() });
-            }
-        }
+    /// The address of account `index`, derived once.
+    fn address(&mut self, index: u32) -> [u8; 20] {
+        let seed = &self.seed;
+        *self.addresses.entry(index).or_insert_with(|| *seed.rescue_account(index).address())
+    }
+
+    /// Where the run from account 0 ends: [`GAP_LIMIT`] past the last used
+    /// account, or the search floor if that is further.
+    fn search_end(&self) -> u64 {
+        let used_end = self.found.values().rev().find(|account| account.used).map_or(0, |a| u64::from(a.index) + 1);
+        (used_end + u64::from(GAP_LIMIT)).max(self.search_floor)
     }
 }
 
