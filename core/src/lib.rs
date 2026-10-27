@@ -10,11 +10,16 @@ use ghost_client::account::{SeedError, WalletSeed};
 
 pub mod header_sync;
 pub mod restore_scan;
+pub mod step_sequence;
 pub mod summon;
 
 pub use header_sync::{HeaderChainConstants, HeaderProgress, HeaderSync, HeaderSyncError, PinnedKeyBlock};
 pub use restore_scan::{
     DerivedAccount, GAP_LIMIT, RestoreResult, RestoreScan, RestoreScanError, RestoredAccount, TouchedAddress,
+};
+pub use step_sequence::{
+    ChainView, RECORD_VERSION, Recovery, SETTLE_CONFIRMATIONS, Step, StepError, StepRecord, StepSequence, StepStore,
+    decode_step_record, encode_step_record, recover, settle_confirmations, transaction_hash,
 };
 pub use summon::{SummonError, SummonReport, prove_test_summon};
 

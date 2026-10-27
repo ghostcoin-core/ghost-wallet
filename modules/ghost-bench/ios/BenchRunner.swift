@@ -16,6 +16,17 @@ enum BenchRunnerError: LocalizedError {
 enum BenchRunner {
   private static let lock = NSLock()
   private static var running = false
+  private static var writePartial: (() -> Void)?
+
+  /// Writes the running benchmark's marker now, with its notes so far. A
+  /// benchmark that is about to end the process on purpose calls this, so
+  /// the record of the killed run kept on the next launch has its notes.
+  static func flushPending() {
+    lock.lock()
+    let write = writePartial
+    lock.unlock()
+    write?()
+  }
 
   /// Runs the named benchmark and returns the record it appended. A benchmark
   /// that throws still produces a record, with status "failed".
@@ -73,6 +84,18 @@ enum BenchRunner {
       var partial = base
       BenchRunner.fill(&partial, from: monitor, context: context, seconds: elapsed())
       ResultsStore.writePending(partial)
+    }
+    lock.lock()
+    writePartial = {
+      var partial = base
+      monitor.snapshot { BenchRunner.fill(&partial, from: $0, context: context, seconds: elapsed()) }
+      ResultsStore.writePending(partial)
+    }
+    lock.unlock()
+    defer {
+      lock.lock()
+      writePartial = nil
+      lock.unlock()
     }
 
     do {

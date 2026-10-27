@@ -19,6 +19,9 @@ ghost-proofs = { git = "https://github.com/ghostcoin-core/ghost", rev = "385b4dc
 # The fixed generator of the Summon benchmark's test chain (a seeded StdRng,
 # as Ghost's own client tests use). Same version as ghost-client's tests.
 rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
+# The Keccak-256 hash of the step sequence's transactions and checksums, as
+# ghost-client uses it.
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 # Must stay on the minor version that uniffi-bindgen-react-native supports.
 uniffi = "=0.31"
 

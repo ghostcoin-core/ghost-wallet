@@ -353,6 +353,7 @@ dependencies = [
  "ghost-client",
  "ghost-proofs",
  "rand",
+ "tiny-keccak",
  "uniffi",
 ]
 
