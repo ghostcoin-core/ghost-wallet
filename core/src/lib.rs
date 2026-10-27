@@ -13,7 +13,11 @@ pub mod restore_scan;
 pub mod step_sequence;
 pub mod summon;
 
-pub use header_sync::{HeaderChainConstants, HeaderProgress, HeaderSync, HeaderSyncError, PinnedKeyBlock};
+pub use header_sync::{
+    ChainState, DeviceConditions, HeaderChainConstants, HeaderProgress, HeaderRun, HeaderStore, HeaderSync,
+    HeaderSyncError, PinnedKeyBlock, RECENT_HEADERS, ReorgEvent, RunBudget, RunProgress, RunSpent,
+    SAVED_STATE_VERSION, StopReason, ThermalState,
+};
 pub use restore_scan::{
     AccountLookup, AccountState, DerivedAccount, GAP_LIMIT, RestoreError, RestoreLookup, RestoreResult,
     RestoredAccount, UNVERIFIED_NOTE,

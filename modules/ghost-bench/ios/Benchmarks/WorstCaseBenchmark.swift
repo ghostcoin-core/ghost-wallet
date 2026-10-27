@@ -26,17 +26,23 @@ enum WorstCaseBenchmarkError: LocalizedError {
   }
 }
 
-/// The worst case at once: both 256 MiB RandomX caches held by HeaderSync
-/// and a Summon proof running, as when a claim is checked while headers sync.
+/// A stress benchmark only: both 256 MiB RandomX caches held by HeaderSync
+/// and a Summon proof running at once. The app never does this in its normal
+/// path: it calls HeaderSync.releaseCaches() before a proof starts, so the
+/// caches and the prover are not held together. This measures the headroom
+/// if they ever are; it is not a requirement (note `workerStress`).
 ///
 /// Stage `sync` builds a HeaderSync from the node and the start pinned in
 /// TestChainConfig.swift (as the header-sync benchmark does) and checks
-/// headers until it holds 2 caches. Keeping that HeaderSync alive, stages
-/// `prove-1` to `prove-3` each prove one test Summon back to back, checked
-/// with Ghost's verifier, and the cache count is read after each proof. The
+/// headers in a header run until it holds 2 caches. Keeping that HeaderSync
+/// alive, stages `prove-1` to `prove-3` each prove one test Summon back to
+/// back, checked with Ghost's verifier, and the cache count is read after
+/// each proof. The caches are then released as the normal path does. The
 /// harness records peak memory, memory warnings, kills and heat for the run.
 enum WorstCaseBenchmark {
   static let name = "worst-case"
+
+  static let kind = "stress benchmark only"
 
   static let runs = 3
 
@@ -46,6 +52,8 @@ enum WorstCaseBenchmark {
   static func run(_ context: BenchContext) throws {
     #if GHOST_CORE_BINDINGS
       context.note("randomx", "interpreted, light caches, no JIT")
+      context.note("benchmarkKind", kind)
+      context.note("workerStress", "true")
       guard
         let text = UserDefaults.standard.string(forKey: TestChainConfig.nodeUrlKey), !text.isEmpty
       else {
@@ -62,11 +70,13 @@ enum WorstCaseBenchmark {
         let tip = try node.blockNumber()
         context.note("nodeTipAtStart", String(tip))
         var tally = HeaderSyncBenchmark.Tally()
+        let run = sync.startRun(
+          budget: HeaderSyncBenchmark.runBudget, conditions: HeaderSyncBenchmark.conditions())
         // One batch at a time, stopping as soon as both caches are held.
         while sync.cacheCount() < wantedCaches && sync.bestHeight() < tip {
           let target = min(tip, sync.bestHeight() + UInt64(TestChainConfig.batchSize))
           try HeaderSyncBenchmark.syncThrough(
-            target, sync: sync, node: node, context: context, tally: &tally)
+            target, sync: sync, run: run, node: node, context: context, tally: &tally)
         }
         context.note("syncedHeaders", String(tally.accepted))
       }
@@ -92,8 +102,11 @@ enum WorstCaseBenchmark {
           throw WorstCaseBenchmarkError.notVerified(index)
         }
       }
-      // Keeps HeaderSync, and its caches, alive through the last proof.
+      // Keeps HeaderSync, and its caches, alive through the last proof, then
+      // frees them as the normal path does before a proof.
       withExtendedLifetime(sync) {}
+      context.note("cachesReleased", sync.releaseCaches() ? "true" : "false")
+      context.note("cacheCountAfterRelease", String(sync.cacheCount()))
     #else
       throw WorstCaseBenchmarkError.bindingsMissing
     #endif

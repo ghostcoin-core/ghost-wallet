@@ -13,6 +13,7 @@ enum HeaderSyncBenchmarkError: LocalizedError {
   case refused(height: UInt64, reason: String)
   case stalled(UInt64)
   case notLinkedToCheckpoint(UInt64)
+  case runStopped(height: UInt64, reason: String)
 
   var errorDescription: String? {
     switch self {
@@ -41,6 +42,8 @@ enum HeaderSyncBenchmarkError: LocalizedError {
       return "The node's headers do not extend the checked chain past height \(height)."
     case .notLinkedToCheckpoint(let height):
       return "The node's header at height \(height) does not link to the pinned checkpoint's hash."
+    case .runStopped(let height, let reason):
+      return "The header run stopped before height \(height): \(reason)."
     }
   }
 }
@@ -52,10 +55,14 @@ enum HeaderSyncBenchmarkError: LocalizedError {
 /// light mode, and ASERT difficulty), through the native core's HeaderSync.
 ///
 /// Stage `sync` checks every header up to `resumeHeaders` below the node's
-/// tip. The benchmark then waits for the app to be backgrounded and brought
-/// back (send it to the home screen and reopen it). Stage `resume` fetches
-/// and checks the rest from the best height HeaderSync holds in memory: no
-/// header is checked twice.
+/// tip, in one budgeted header run. The benchmark then releases the RandomX
+/// caches, as the app does before a proof, and waits for the app to be
+/// backgrounded and brought back (send it to the home screen and reopen it).
+/// Stage `resume` starts a second run, which rebuilds the chain from the
+/// state HeaderSync saved, and fetches and checks the rest from its best
+/// height: no header is checked twice. Each run stops on its budget
+/// (`runBudget`), at thermal state serious or above and in Low Power Mode;
+/// note `headerBudgetOk` says whether both runs finished inside their budget.
 ///
 /// The node has no header-range call (Ghost documents only
 /// eth_getBlockByNumber for headers), so a range is one JSON-RPC batch of
@@ -87,13 +94,21 @@ enum HeaderSyncBenchmark {
         let tip = try node.blockNumber()
         context.note("nodeTipAtStart", String(tip))
         let target = tip > TestChainConfig.resumeHeaders ? tip - TestChainConfig.resumeHeaders : 0
-        try syncThrough(target, sync: sync, node: node, context: context, tally: &tally)
+        let run = sync.startRun(budget: runBudget, conditions: conditions())
+        try syncThrough(target, sync: sync, run: run, node: node, context: context, tally: &tally)
       }
       let syncSeconds = uptime() - syncStart
       context.note("syncedHeaders", String(tally.accepted))
       context.note("syncSeconds", String(format: "%.3f", syncSeconds))
       context.note("headersPerSecond", rate(tally.accepted, syncSeconds))
       context.note("checkedHeadersPerSecond", rate(tally.accepted, tally.checkSeconds))
+      context.note("syncCpuSeconds", String(format: "%.3f", tally.cpuSeconds))
+
+      // As before a proof: the caches go, and the next run rebuilds the chain
+      // from the saved state.
+      context.note("cachesReleased", sync.releaseCaches() ? "true" : "false")
+      context.note("cacheCountAfterRelease", String(sync.cacheCount()))
+      sync.allowCaches()
 
       let away = waitForBackgroundRoundTrip()
       context.note("backgrounded", away.backgrounded ? "true" : "false")
@@ -104,10 +119,14 @@ enum HeaderSyncBenchmark {
       try context.stage("resume") {
         let tip = try node.blockNumber()
         context.note("nodeTipAtResume", String(tip))
-        try syncThrough(tip, sync: sync, node: node, context: context, tally: &resumed)
+        let run = sync.startRun(budget: runBudget, conditions: conditions())
+        try syncThrough(tip, sync: sync, run: run, node: node, context: context, tally: &resumed)
       }
+      context.note("headerBudgetOk", "true")
       context.note("resumeHeaders", String(resumed.accepted))
       context.note("resumeSeconds", String(format: "%.3f", uptime() - resumeStart))
+      context.note("resumeCpuSeconds", String(format: "%.3f", resumed.cpuSeconds))
+      context.note("reorgCount", String(tally.reorgs + resumed.reorgs))
       context.note("bestHeight", String(sync.bestHeight()))
       context.note("cacheCount", String(sync.cacheCount()))
       context.note("maxCacheCount", String(max(tally.maxCacheCount, resumed.maxCacheCount)))
@@ -119,10 +138,31 @@ enum HeaderSyncBenchmark {
   struct Tally {
     var accepted: UInt64 = 0
     var checkSeconds: Double = 0
+    var cpuSeconds: Double = 0
     var maxCacheCount: UInt64 = 0
+    var reorgs = 0
   }
 
   #if GHOST_CORE_BINDINGS
+    /// What one header run may spend: the CPU time of its checks, the
+    /// headers and the bytes it looks at.
+    static let runBudget = RunBudget(
+      cpuSeconds: 1800, maxHeaders: 20_000, maxBytes: 32 * 1024 * 1024)
+
+    /// The phone's thermal state and Low Power Mode, read now.
+    static func conditions() -> DeviceConditions {
+      let info = ProcessInfo.processInfo
+      let thermal: ThermalState
+      switch info.thermalState {
+      case .nominal: thermal = .nominal
+      case .fair: thermal = .fair
+      case .serious: thermal = .serious
+      case .critical: thermal = .critical
+      @unknown default: thermal = .critical
+      }
+      return DeviceConditions(thermal: thermal, lowPowerMode: info.isLowPowerModeEnabled)
+    }
+
     static func constants() -> HeaderChainConstants {
       HeaderChainConstants(
         blockTime: TestChainConfig.blockTime,
@@ -187,26 +227,39 @@ enum HeaderSyncBenchmark {
     }
 
     /// Fetches and checks headers from the best height up to `target`, in
-    /// batches. Fails on the first refused header, naming its height.
+    /// batches, through `run`. Fails on the first refused header, naming its
+    /// height, and when the run stops (its budget, heat, Low Power Mode),
+    /// noting why in `headerRunStop`.
     static func syncThrough(
-      _ target: UInt64, sync: HeaderSync, node: TestNodeClient, context: BenchContext,
-      tally: inout Tally
+      _ target: UInt64, sync: HeaderSync, run: HeaderRun, node: TestNodeClient,
+      context: BenchContext, tally: inout Tally
     ) throws {
       var next = sync.bestHeight() + 1
       while next <= target {
         let last = min(target, next + UInt64(TestChainConfig.batchSize) - 1)
         let batch = try node.headers(from: next, through: last)
+        run.setConditions(conditions: conditions())
         let checkStart = uptime()
-        let progress = sync.addHeaders(batch: batch, now: UInt64(Date().timeIntervalSince1970))
+        let progress = run.addHeaders(batch: batch, now: UInt64(Date().timeIntervalSince1970))
         tally.checkSeconds += uptime() - checkStart
+        tally.cpuSeconds = progress.spent.cpuSeconds
         tally.accepted += progress.accepted
+        tally.reorgs += progress.reorgs.count
         let caches = sync.cacheCount()
         tally.maxCacheCount = max(tally.maxCacheCount, caches)
         context.note("bestHeight", String(progress.bestHeight))
         context.note("cacheCount", String(caches))
-        if let index = progress.refusedIndex {
-          throw HeaderSyncBenchmarkError.refused(
-            height: next + index, reason: progress.refusedReason ?? "no reason given")
+        if let stopped = progress.stopped {
+          let at = next + progress.accepted + progress.alreadyHeld
+          context.note("headerRunStop", String(describing: stopped))
+          switch stopped {
+          case .cpuBudget, .headerBudget, .byteBudget: context.note("headerBudgetOk", "false")
+          default: break
+          }
+          if case .invalidChain = stopped, case .invalid(let reason) = sync.state() {
+            throw HeaderSyncBenchmarkError.refused(height: at, reason: reason)
+          }
+          throw HeaderSyncBenchmarkError.runStopped(height: at, reason: String(describing: stopped))
         }
         guard progress.bestHeight >= last else {
           throw HeaderSyncBenchmarkError.stalled(progress.bestHeight)

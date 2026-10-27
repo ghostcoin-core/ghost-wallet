@@ -136,7 +136,14 @@ fn genesis_sync() -> std::sync::Arc<HeaderSync> {
 }
 
 fn all_accepted(count: usize, best_height: u64) -> HeaderProgress {
-    HeaderProgress { accepted: count as u64, already_held: 0, best_height, refused_index: None, refused_reason: None }
+    HeaderProgress {
+        accepted: count as u64,
+        already_held: 0,
+        best_height,
+        refused_index: None,
+        refused_reason: None,
+        reorgs: Vec::new(),
+    }
 }
 
 #[test]
@@ -249,6 +256,7 @@ fn batch_split_in_two_accepts_like_one_batch() {
             best_height: CHAIN_LENGTH as u64,
             refused_index: None,
             refused_reason: None,
+            reorgs: Vec::new(),
         }
     );
 }
