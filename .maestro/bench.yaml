@@ -1,11 +1,12 @@
 # Runs one native benchmark on the bench screen and waits for it to pass.
 #
-#   maestro test -e BENCH=summon .maestro/bench.yaml
+#   maestro test -e BENCH=summon -e TIMEOUT=600000 .maestro/bench.yaml
 #
-# scripts/sim-test.sh runs it once per benchmark on a simulator.
+# BENCH names the benchmark and must be given. TIMEOUT is the wait for its
+# result in milliseconds (10 minutes if not given). scripts/sim-test.sh runs
+# the flow once per benchmark on a simulator, with 90 minutes for the node
+# benchmarks.
 appId: com.ghostcoin.wallet
-env:
-  BENCH: dummy
 ---
 - launchApp:
     stopApp: true
@@ -24,9 +25,10 @@ env:
 - tapOn:
     id: bench-name-${BENCH}
 - tapOn: Run
-# The result's first line is "<name>: <status>"; proving can take minutes.
+# The result's first line is "<name>: <status>"; proving can take minutes and
+# a node benchmark syncs thousands of headers.
 - extendedWaitUntil:
     visible:
       id: bench-result
       text: '${BENCH}: ok[\s\S]*'
-    timeout: 600000
+    timeout: ${TIMEOUT || 600000}

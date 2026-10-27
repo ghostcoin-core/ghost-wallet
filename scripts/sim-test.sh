@@ -7,11 +7,17 @@
 #
 #   bash scripts/sim-test.sh
 #   GHOST_WALLET_SIM="iPhone Duo" BENCHES="dummy summon" bash scripts/sim-test.sh
+#   BENCHES="dummy summon kill-recovery header-sync restore worst-case" bash scripts/sim-test.sh
 #
 # GHOST_WALLET_SIM names the simulator (default "iPhone Duo"); BENCHES lists
 # the benchmarks to run (default "dummy summon kill-recovery"). Each one must
 # finish with a result that starts with "<name>: ok". A screenshot of each
 # result is saved under sim-results/.
+#
+# The node benchmarks (header-sync, restore, worst-case) run against the local
+# test chain of scripts/test-chain.sh: when BENCHES names one, the chain is
+# started, mined past the second RandomX key, and its node URL and test-only
+# chain overrides are written into the simulator's UserDefaults.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,6 +31,30 @@ fail() {
 
 SIM="${GHOST_WALLET_SIM:-iPhone Duo}"
 BENCHES="${BENCHES:-dummy summon kill-recovery}"
+APP_ID=com.ghostcoin.wallet
+
+# The benchmarks that need a Ghost node, and what the local test chain needs
+# for them: past height 8449 (the second RandomX key) for worst-case.
+NODE_BENCHES="header-sync restore worst-case"
+TEST_CHAIN_PORT=8547
+TEST_CHAIN_HEIGHT=8600
+# The Maestro wait for a result: 10 minutes, or 90 for a node benchmark.
+BENCH_TIMEOUT_MS=600000
+NODE_BENCH_TIMEOUT_MS=5400000
+
+is_node_bench() {
+  case " $NODE_BENCHES " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+needs_chain=false
+for bench in $BENCHES; do
+  if is_node_bench "$bench"; then
+    needs_chain=true
+  fi
+done
 
 # Expo's downloaded precompiled module binaries do not match the core they pair
 # with; build every Expo module from source.
@@ -47,6 +77,12 @@ done
 
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$node_major" = "22" ] || echo "sim-test: warning: expected Node 22, found $(node --version)" >&2
+
+if [ "$needs_chain" = true ]; then
+  # Started before the build so the chain mines while the app builds.
+  echo "==> local test chain"
+  bash scripts/test-chain.sh start
+fi
 
 echo "==> finding simulator \"$SIM\""
 # shellcheck disable=SC2016
@@ -106,12 +142,36 @@ xcodebuild \
 echo "==> installing on $SIM"
 xcrun simctl install "$udid" ios/build/Build/Products/Release-iphonesimulator/GhostWallet.app
 
+if [ "$needs_chain" = true ]; then
+  echo "==> waiting for the test chain to reach height $TEST_CHAIN_HEIGHT"
+  bash scripts/test-chain.sh wait "$TEST_CHAIN_HEIGHT"
+  genesis_rlp="$(bash scripts/test-chain.sh genesis)"
+  [ -n "$genesis_rlp" ] || fail "the test chain returned no block 0"
+
+  echo "==> pointing the app on $SIM at the test chain"
+  # Test-only overrides (TestChainConfig.swift): the chain's 1-second blocks,
+  # the miner running up to an hour ahead of the clock, its block 0 as the
+  # start, and the three test accounts funded by test-chain.sh.
+  sim_defaults() {
+    xcrun simctl spawn "$udid" defaults write "$APP_ID" "$@"
+  }
+  sim_defaults benchNodeUrl -string "http://127.0.0.1:$TEST_CHAIN_PORT"
+  sim_defaults benchTestChain.blockTime -int 1
+  sim_defaults benchTestChain.futureDrift -int 3600
+  sim_defaults benchTestChain.genesisRlpHex -string "$genesis_rlp"
+  sim_defaults benchTestChain.restoreAccountsExpected -int 3
+fi
+
 mkdir -p sim-results
 failed=()
 for bench in $BENCHES; do
   echo "==> benchmark $bench"
+  timeout_ms="$BENCH_TIMEOUT_MS"
+  if is_node_bench "$bench"; then
+    timeout_ms="$NODE_BENCH_TIMEOUT_MS"
+  fi
   # The flow waits for a result that starts with "$bench: ok".
-  if maestro --device "$udid" test -e BENCH="$bench" .maestro/bench.yaml; then
+  if maestro --device "$udid" test -e BENCH="$bench" -e TIMEOUT="$timeout_ms" .maestro/bench.yaml; then
     status=ok
   else
     status=failed
