@@ -13,6 +13,7 @@ enum BenchmarkRegistry {
     HeaderSyncBenchmark.name: HeaderSyncBenchmark.run,
     RestoreBenchmark.name: RestoreBenchmark.run,
     KillRecoveryBenchmark.name: KillRecoveryBenchmark.run,
+    WorstCaseBenchmark.name: WorstCaseBenchmark.run,
   ]
 
   static var names: [String] { benchmarks.keys.sorted() }

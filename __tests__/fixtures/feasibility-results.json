@@ -1,0 +1,175 @@
+[
+  {
+    "benchmark": "dummy",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": true, "minAvailableBytes": 0, "peakFootprintBytes": 3221225472, "peakResidentBytes": 3221225472, "warning": true },
+    "notes": {},
+    "stages": [],
+    "startedAt": "2026-10-20T08:00:00Z",
+    "status": "killed",
+    "thermal": { "end": "critical", "start": "nominal", "worst": "critical" },
+    "totalSeconds": 1
+  },
+  {
+    "benchmark": "summon",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": false, "minAvailableBytes": 2147483648, "peakFootprintBytes": 943718400, "peakResidentBytes": 964689920, "warning": false },
+    "notes": {
+      "runs": "5",
+      "verifiedCount": "5",
+      "proofBytes": "1800",
+      "proveMillis-1": "4100",
+      "proveMillis-2": "4200",
+      "proveMillis-3": "4350",
+      "proveMillis-4": "4500",
+      "proveMillis-5": "4800"
+    },
+    "stages": [{ "name": "prove-1", "seconds": 4.1 }],
+    "startedAt": "2026-10-20T09:00:00Z",
+    "status": "ok",
+    "thermal": { "end": "fair", "start": "nominal", "worst": "fair" },
+    "totalSeconds": 22
+  },
+  {
+    "benchmark": "header-sync",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": false, "minAvailableBytes": 2147483648, "peakFootprintBytes": 629145600, "peakResidentBytes": 650117120, "warning": false },
+    "notes": { "syncedHeaders": "4000", "headersPerSecond": "12.5", "maxCacheCount": "2", "resumeSeconds": "9.000" },
+    "stages": [{ "name": "sync", "seconds": 320 }],
+    "startedAt": "2026-10-20T09:10:00Z",
+    "status": "ok",
+    "thermal": { "end": "serious", "start": "nominal", "worst": "serious" },
+    "totalSeconds": 400
+  },
+  {
+    "benchmark": "restore",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": false, "minAvailableBytes": 2147483648, "peakFootprintBytes": 734003200, "peakResidentBytes": 754974720, "warning": false },
+    "notes": { "accountsFound": "2", "accountsExpected": "3", "scanComplete": "true", "restoreSeconds": "61.000" },
+    "stages": [{ "name": "scan", "seconds": 40 }],
+    "startedAt": "2026-10-20T09:20:00Z",
+    "status": "ok",
+    "thermal": { "end": "fair", "start": "nominal", "worst": "fair" },
+    "totalSeconds": 61
+  },
+  {
+    "benchmark": "kill-recovery",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": false, "minAvailableBytes": 2147483648, "peakFootprintBytes": 104857600, "peakResidentBytes": 115343360, "warning": false },
+    "notes": { "killPoint.signed": "FAILED: broadcast 2 times", "killPointsPassed": "0 of 7 kill points recorded" },
+    "stages": [{ "name": "payment", "seconds": 1 }],
+    "startedAt": "2026-10-20T09:30:00Z",
+    "status": "failed",
+    "error": "A kill point did not recover cleanly",
+    "thermal": { "end": "nominal", "start": "nominal", "worst": "nominal" },
+    "totalSeconds": 2
+  },
+  {
+    "benchmark": "kill-recovery",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": false, "minAvailableBytes": 2147483648, "peakFootprintBytes": 104857600, "peakResidentBytes": 115343360, "warning": false },
+    "notes": {
+      "killPoint.none": "ok: paid once, 1 broadcast, same hash",
+      "killPoint.signed": "ok: paid once, 1 broadcast, same hash",
+      "killPoint.sent": "ok: paid once, record already removed",
+      "killPointsPassed": "7 of 7 kill points recorded"
+    },
+    "stages": [{ "name": "payment", "seconds": 1 }],
+    "startedAt": "2026-10-20T09:40:00Z",
+    "status": "ok",
+    "thermal": { "end": "nominal", "start": "nominal", "worst": "nominal" },
+    "totalSeconds": 2
+  },
+  {
+    "benchmark": "kill-recovery",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": true, "minAvailableBytes": 2147483648, "peakFootprintBytes": 104857600, "peakResidentBytes": 115343360, "warning": false },
+    "notes": { "killPointArmed": "seen", "killedAt": "seen", "killedWith": "SIGKILL" },
+    "stages": [],
+    "startedAt": "2026-10-20T09:50:00Z",
+    "status": "killed",
+    "thermal": { "end": "nominal", "start": "nominal", "worst": "nominal" },
+    "totalSeconds": 1
+  },
+  {
+    "benchmark": "worst-case",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": false, "minAvailableBytes": 2147483648, "peakFootprintBytes": 1258291200, "peakResidentBytes": 1279262720, "warning": false },
+    "notes": { "cacheCountBeforeProve": "2", "runs": "3", "verifiedCount": "3", "proveMillis-1": "5000", "proveMillis-2": "5100", "proveMillis-3": "5200" },
+    "stages": [{ "name": "prove-1", "seconds": 5 }],
+    "startedAt": "2026-10-20T10:00:00Z",
+    "status": "ok",
+    "thermal": { "end": "fair", "start": "nominal", "worst": "fair" },
+    "totalSeconds": 300
+  },
+  {
+    "benchmark": "worst-case",
+    "device": { "lowPowerMode": false, "model": "iPhone17,1", "systemName": "iOS", "systemVersion": "18.1.0" },
+    "memory": { "killed": false, "minAvailableBytes": 104857600, "peakFootprintBytes": 1719664640, "peakResidentBytes": 1740636160, "warning": true },
+    "notes": {
+      "cacheCountBeforeProve": "2",
+      "cacheCountAfterProve-1": "2",
+      "cacheCountAfterProve-2": "2",
+      "cacheCountAfterProve-3": "2",
+      "runs": "3",
+      "verifiedCount": "3",
+      "proveMillis-1": "5600",
+      "proveMillis-2": "6100",
+      "proveMillis-3": "7000"
+    },
+    "stages": [{ "name": "prove-1", "seconds": 5.6 }],
+    "startedAt": "2026-10-20T10:30:00Z",
+    "status": "ok",
+    "thermal": { "end": "fair", "start": "nominal", "worst": "fair" },
+    "totalSeconds": 320
+  },
+  {
+    "benchmark": "summon",
+    "device": { "lowPowerMode": false, "model": "iPhone13,2", "systemName": "iOS", "systemVersion": "17.6.1" },
+    "memory": { "killed": true, "minAvailableBytes": 52428800, "peakFootprintBytes": 1887436800, "peakResidentBytes": 1908408320, "warning": true },
+    "notes": { "runs": "5", "verifiedCount": "1", "proveMillis-1": "9800" },
+    "stages": [{ "name": "prove-1", "seconds": 9.8 }],
+    "startedAt": "2026-10-21T09:00:00Z",
+    "status": "killed",
+    "thermal": { "end": "serious", "start": "fair", "worst": "serious" },
+    "totalSeconds": 15
+  },
+  {
+    "benchmark": "header-sync",
+    "device": { "lowPowerMode": false, "model": "iPhone13,2", "systemName": "iOS", "systemVersion": "17.6.1" },
+    "memory": { "killed": false, "minAvailableBytes": 1073741824, "peakFootprintBytes": 650117120, "peakResidentBytes": 671088640, "warning": false },
+    "notes": { "syncedHeaders": "4000", "headersPerSecond": "6.1", "maxCacheCount": "2", "resumeSeconds": "18.000" },
+    "stages": [{ "name": "sync", "seconds": 655 }],
+    "startedAt": "2026-10-21T09:10:00Z",
+    "status": "ok",
+    "thermal": { "end": "fair", "start": "nominal", "worst": "fair" },
+    "totalSeconds": 700
+  },
+  {
+    "benchmark": "kill-recovery",
+    "device": { "lowPowerMode": false, "model": "iPhone13,2", "systemName": "iOS", "systemVersion": "17.6.1" },
+    "memory": { "killed": false, "minAvailableBytes": 1073741824, "peakFootprintBytes": 104857600, "peakResidentBytes": 115343360, "warning": false },
+    "notes": {
+      "killPoint.none": "ok: paid once, 1 broadcast, same hash",
+      "killPoint.prepared": "FAILED: the record is gone and the chain has 0 payments",
+      "killPointsPassed": "6 of 7 kill points recorded"
+    },
+    "stages": [{ "name": "payment", "seconds": 1 }],
+    "startedAt": "2026-10-21T09:30:00Z",
+    "status": "ok",
+    "thermal": { "end": "nominal", "start": "nominal", "worst": "nominal" },
+    "totalSeconds": 2
+  },
+  {
+    "benchmark": "worst-case",
+    "device": { "lowPowerMode": false, "model": "iPhone13,2", "systemName": "iOS", "systemVersion": "17.6.1" },
+    "memory": { "killed": false, "minAvailableBytes": 1073741824, "peakFootprintBytes": 754974720, "peakResidentBytes": 775946240, "warning": false },
+    "notes": { "cacheCountBeforeProve": "1", "bestHeight": "1800" },
+    "stages": [{ "name": "sync", "seconds": 300 }],
+    "startedAt": "2026-10-21T10:00:00Z",
+    "status": "failed",
+    "error": "HeaderSync held 1 RandomX caches, not 2",
+    "thermal": { "end": "fair", "start": "nominal", "worst": "fair" },
+    "totalSeconds": 300
+  }
+]
