@@ -329,6 +329,29 @@ final class TestNodeClient {
     return height
   }
 
+  /// The node's tip as it reports it: the height and block hash of its latest
+  /// block (eth_getBlockByNumber("latest")), in one call so the two belong to
+  /// the same block. Only the node's word: nothing here checks it.
+  func latestBlock() throws -> (height: UInt64, hash: Data) {
+    let body: [String: Any] = [
+      "jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber", "params": ["latest", false],
+    ]
+    guard let answer = try post(body) as? [String: Any] else {
+      throw HeaderSyncBenchmarkError.node("eth_getBlockByNumber did not return an object")
+    }
+    guard let block = try Self.result(of: answer) as? [String: Any] else {
+      throw HeaderSyncBenchmarkError.node("the node has no latest block")
+    }
+    guard let numberText = block["number"] as? String, let height = Hex.quantity(numberText) else {
+      throw HeaderSyncBenchmarkError.node("the latest block has no number")
+    }
+    guard let hashText = block["hash"] as? String, let hash = Hex.decode(hashText), hash.count == 32
+    else {
+      throw HeaderSyncBenchmarkError.node("the latest block has no 32-byte hash")
+    }
+    return (height, hash)
+  }
+
   /// The RLP of the headers at heights `from` through `last`, in height
   /// order: one JSON-RPC batch of eth_getBlockByNumber(height, false).
   func headers(from: UInt64, through last: UInt64) throws -> [Data] {
