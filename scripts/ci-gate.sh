@@ -5,16 +5,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "==> npm ci"
-npm ci --no-audit --no-fund
+echo "==> pnpm install"
+pnpm install --frozen-lockfile
 
 echo "==> typecheck"
-npx tsc --noEmit
+pnpm exec tsc --noEmit
 
 echo "==> lint"
-npx eslint . --max-warnings 0
+pnpm exec eslint . --max-warnings 0
 
 echo "==> unit tests"
-npx jest --ci --passWithNoTests=false
+pnpm exec jest --ci --passWithNoTests=false
 
 echo "==> gate passed"
