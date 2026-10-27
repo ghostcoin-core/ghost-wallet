@@ -1,0 +1,68 @@
+# Runs the same checks as scripts/ci-gate.sh on every push to main and on
+# pull requests. The iOS build needs a Mac and is checked by hand.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js:
+    name: js
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Installs the pnpm version named in package.json's packageManager field.
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        if: hashFiles('tsconfig.json') != ''
+        run: pnpm exec tsc --noEmit
+
+      - name: Lint
+        if: hashFiles('eslint.config.*', '.eslintrc*') != ''
+        run: pnpm exec eslint . --max-warnings 0
+
+      - name: Unit tests
+        run: pnpm exec jest --ci --passWithNoTests=false
+
+  rust:
+    name: rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Rust core tests
+        run: cargo test --manifest-path core/Cargo.toml --locked
