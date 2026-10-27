@@ -20,6 +20,11 @@ fail() {
 DEVICE="${GHOST_WALLET_DEVICE:-}"
 [ -n "$DEVICE" ] || fail "set GHOST_WALLET_DEVICE to the UDID of the connected iPhone"
 
+# Homebrew's node@22 is keg-only, so it is not on PATH by default.
+if ! command -v node >/dev/null 2>&1 && [ -x /opt/homebrew/opt/node@22/bin/node ]; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+
 for tool in git node corepack pod xcodebuild xcrun cargo rustup; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed"
 done
@@ -44,7 +49,18 @@ echo "==> expo prebuild (ios)"
 pnpm exec expo prebuild --platform ios --clean
 
 echo "==> building debug dev-client for device $DEVICE"
-pnpm exec expo run:ios --device "$DEVICE" --configuration Debug --no-bundler
+# Build with xcodebuild and install with devicectl: neither needs the Simulator app.
+xcodebuild \
+  -workspace ios/GhostWallet.xcworkspace \
+  -scheme GhostWallet \
+  -configuration Debug \
+  -destination "id=$DEVICE" \
+  -derivedDataPath ios/build \
+  -allowProvisioningUpdates \
+  build
+
+echo "==> installing on device $DEVICE"
+xcrun devicectl device install app --device "$DEVICE" ios/build/Build/Products/Debug-iphoneos/GhostWallet.app
 
 commit="$(git rev-parse --short HEAD)"
 version="$(node -p 'require("./app.json").expo.version')"

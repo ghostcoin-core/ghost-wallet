@@ -4,6 +4,12 @@
   "private": true,
   "description": "Ghost Wallet's native core (core/), wrapped for React Native by uniffi-bindgen-react-native.",
   "license": "MIT OR Apache-2.0",
+  "author": "GhostcoinHQ <hello@ghostcoin.com>",
+  "homepage": "https://github.com/ghostcoin-core/ghost-wallet",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ghostcoin-core/ghost-wallet.git"
+  },
   "main": "index.ts",
   "react-native": "index.ts",
   "source": "index.ts",
