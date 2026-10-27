@@ -99,6 +99,47 @@ must report `<name>: ok`; a screenshot of each result is saved under
 GHOST_WALLET_SIM="iPhone Duo" BENCHES="dummy summon" bash scripts/sim-test.sh
 ```
 
+### Local test chain for the node benchmarks
+
+The header-sync, restore and worst-case benchmarks need a Ghost node.
+`scripts/test-chain.sh` runs one on the Mac (Go 1.26+ and rustup installed):
+
+```sh
+bash scripts/test-chain.sh start          # build ghost-node, init, mine, fund the test wallet
+bash scripts/test-chain.sh wait 8600      # block until the chain reaches a height
+bash scripts/test-chain.sh genesis        # print the block 0 RLP
+bash scripts/test-chain.sh stop
+```
+
+`start` clones [ghost-node](https://github.com/ghostcoin-core/ghost-node) at a
+pinned commit into `~/.ghost-wallet-testchain`, builds it with `make geth`,
+initialises its internal-net genesis (chain 6777971, difficulty 1, 1-second
+blocks) and mines with the internal net's public test miner key, as an archive
+node answering JSON-RPC on port 8547 on every interface (8545 is left to the
+node forwarded from the VM). The first time, it sends 1 GHOST to accounts 0, 3
+and 7 of the counting-bytes test words. The chain is kept between runs.
+
+When `BENCHES` names a node benchmark, `scripts/sim-test.sh` starts the chain,
+waits for height 8600 (worst-case needs the second RandomX key, at 8449), and
+writes the node URL and these test-only overrides into the simulator's
+UserDefaults for `com.ghostcoin.wallet`:
+
+| Key | Value |
+| --- | --- |
+| `benchNodeUrl` | `http://127.0.0.1:8547` |
+| `benchTestChain.blockTime` | `1` |
+| `benchTestChain.futureDrift` | `3600` (the miner runs up to an hour ahead) |
+| `benchTestChain.genesisRlpHex` | the node's block 0 RLP |
+| `benchTestChain.restoreAccountsExpected` | `3` |
+
+The compiled values in `TestChainConfig.swift` (block time 30, future drift
+30) are unchanged, and are used whenever an override is not set. Each node
+benchmark gets 90 minutes. A full run:
+
+```sh
+BENCHES="dummy summon kill-recovery header-sync restore worst-case" bash scripts/sim-test.sh
+```
+
 ## Licence
 
 The project's own code is licensed under either of
