@@ -2,6 +2,7 @@
   "name": "ghost-wallet",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.32.1",
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start --dev-client",
