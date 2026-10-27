@@ -116,7 +116,8 @@ pinned commit into `~/.ghost-wallet-testchain`, builds it with `make geth`,
 initialises its internal-net genesis (chain 6777971, difficulty 1, 1-second
 blocks) and mines with the internal net's public test miner key, as an archive
 node answering JSON-RPC on port 8547 on every interface (8545 is left to the
-node forwarded from the VM). The first time, it sends 1 GHOST to accounts 0, 3
+node forwarded from the VM). That port serves only the `eth`, `net` and `web3`
+namespaces; `genesis` reads block 0 through the node's local IPC socket. The first time, it sends 1 GHOST to accounts 0, 3
 and 7 of the counting-bytes test words. The chain is kept between runs.
 
 When `BENCHES` names a node benchmark, `scripts/sim-test.sh` starts the chain,

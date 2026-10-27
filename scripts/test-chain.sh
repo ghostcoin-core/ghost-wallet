@@ -11,7 +11,10 @@
 # Runs on macOS only (Go 1.26+, git, make, curl and rustup installed; the Rust
 # toolchain is the one pinned in ghost-node's rust-toolchain.toml). The node
 # answers JSON-RPC on port 8547 on every interface, so a phone on the LAN can
-# reach it; port 8545 is left to the node forwarded from the VM.
+# reach it; port 8545 is left to the node forwarded from the VM. That HTTP
+# endpoint serves only the eth, net and web3 namespaces: the debug namespace
+# (which can write files on this Mac) is reached only through the node's local
+# IPC socket.
 #
 # Everything lives under GHOST_TESTCHAIN_HOME (default ~/.ghost-wallet-testchain):
 # the ghost-node checkout, the chain data, the node's log and its pid. The
@@ -30,6 +33,7 @@ DATA="$HOME_DIR/node"
 PID_FILE="$HOME_DIR/geth.pid"
 LOG="$HOME_DIR/geth.log"
 RPC="http://127.0.0.1:$PORT"
+IPC="$DATA/geth.ipc"
 
 # Accounts 0, 3 and 7 of the app's counting-bytes test words. Each gets
 # 1 GHOST once, so the restore benchmark has three accounts to find.
@@ -197,6 +201,7 @@ start_node() {
     --authrpc.port 0 \
     --nat none \
     --nodiscover \
+    --ipcpath "$IPC" \
     --mine \
     --miner.threads 1 \
     --miner.etherbase "$miner" \
@@ -207,7 +212,7 @@ start_node() {
     --http.addr 0.0.0.0 \
     --http.port "$PORT" \
     --http.vhosts '*' \
-    --http.api eth,net,web3,debug \
+    --http.api eth,net,web3 \
     --verbosity 3 \
     >>"$LOG" 2>&1 &
   echo $! >"$PID_FILE"
@@ -294,9 +299,13 @@ cmd_stop() {
 
 cmd_genesis() {
   running || fail "the node is not running; run: bash scripts/test-chain.sh start"
-  local rlp
-  rlp="$(result debug_getRawHeader '["0x0"]')" || fail "the node did not return block 0"
-  [ -n "$rlp" ] || fail "the node returned an empty block 0"
+  [ -S "$IPC" ] || fail "no IPC socket at $IPC"
+  # Through the local IPC socket: the debug namespace is not served over HTTP.
+  local output rlp pattern='"(0x[0-9a-fA-F]+)"'
+  output="$("$GETH" attach --exec 'debug.getRawHeader("0x0")' "$IPC" 2>&1)" ||
+    fail "the node did not return block 0: $output"
+  [[ "$output" =~ $pattern ]] || fail "the node returned no block 0: $output"
+  rlp="${BASH_REMATCH[1]}"
   echo "$rlp"
 }
 
