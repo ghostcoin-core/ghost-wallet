@@ -9,6 +9,10 @@
 //! more than 20 unused accounts end the scan; a passed-over or repeated height, a
 //! header off the checked chain and malformed words are refused, the words
 //! never echoed; two scans of the same words agree.
+//!
+//! A scan from the wallet's birthday finds the activity from the birthday
+//! on, does not report activity only below it, says it started at the
+//! birthday and refuses a block below it.
 
 use std::sync::{Arc, OnceLock};
 
@@ -181,7 +185,12 @@ fn touched_at(activity: &Activity, height: u64) -> Vec<TouchedAddress> {
 }
 
 fn new_scan() -> Arc<RestoreScan> {
-    RestoreScan::new(counting_words(), 1).unwrap()
+    RestoreScan::new(counting_words(), 1, None).unwrap()
+}
+
+/// A scan from the wallet's birthday, with the header sync's start below it.
+fn scan_from_birthday(birthday: u64) -> Arc<RestoreScan> {
+    RestoreScan::new(counting_words(), 1, Some(birthday)).unwrap()
 }
 
 /// Feeds every block from 1 to the tip, then returns the result.
@@ -194,11 +203,28 @@ fn scan_all(activity: &Activity) -> RestoreResult {
     scan.result()
 }
 
+/// Feeds every block from the birthday to the tip, checking the result is
+/// incomplete before each, then returns the result.
+fn scan_all_from_birthday(activity: &Activity, birthday: u64) -> RestoreResult {
+    let scan = scan_from_birthday(birthday);
+    scan.set_tip(chain().sync.clone()).unwrap();
+    for height in birthday..=TIP {
+        assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: height, tip: Some(TIP) });
+        scan.feed_block(height, checked(height), touched_at(activity, height)).unwrap();
+    }
+    scan.result()
+}
+
 fn complete(result: RestoreResult) -> Vec<RestoredAccount> {
+    complete_from(result).0
+}
+
+/// The accounts of a complete result and the height it scanned from.
+fn complete_from(result: RestoreResult) -> (Vec<RestoredAccount>, u64) {
     match result {
-        RestoreResult::Complete { accounts, note } => {
+        RestoreResult::Complete { accounts, note, scanned_from } => {
             assert!(note.contains("unverified"));
-            accounts
+            (accounts, scanned_from)
         }
         other => panic!("the scan is not complete: {other:?}"),
     }
@@ -380,7 +406,7 @@ fn short_or_invalid_words_are_refused_without_echoing_them() {
     let swapped = swapped.join(" ");
 
     for bad in [short, unknown, swapped, String::new()] {
-        let error = RestoreScan::new(bad.clone(), 1).err().expect("the words are refused");
+        let error = RestoreScan::new(bad.clone(), 1, None).err().expect("the words are refused");
         let RestoreScanError::Words { reason } = &error else { panic!("not a words error: {error:?}") };
         assert!(!reason.is_empty());
         let shown = format!("{error} {error:?}");
@@ -396,4 +422,97 @@ fn two_scans_of_the_same_words_agree() {
     let second = scan_all(SPREAD);
     assert_eq!(first, second);
     assert_ne!(first, scan_all(&[(2, Some(1), 5)]));
+}
+
+#[test]
+fn a_scan_without_a_birthday_reports_its_first_block() {
+    let (accounts, scanned_from) = complete_from(scan_all(SPREAD));
+    assert_eq!(scanned_from, 1);
+    assert_eq!(used(&accounts).len(), 3);
+}
+
+#[test]
+fn activity_after_the_birthday_is_found() {
+    // Account 0 used before the birthday (15) and again after it; 3 and 7
+    // used after it only.
+    let late = &[(2, Some(0), 5_000), (15, Some(3), 700), (21, Some(0), 4_000), (21, None, 3), (30, Some(7), 9)];
+    let (accounts, scanned_from) = complete_from(scan_all_from_birthday(late, 15));
+    assert_eq!(scanned_from, 15);
+    assert_eq!(
+        used(&accounts),
+        vec![
+            (0, hex(&address(0)), "4000".to_owned()),
+            (3, hex(&address(3)), "700".to_owned()),
+            (7, hex(&address(7)), "9".to_owned()),
+        ]
+    );
+    assert_eq!(accounts.len(), 8 + GAP_LIMIT as usize);
+}
+
+#[test]
+fn activity_only_before_the_birthday_is_not_reported() {
+    // Accounts 0, 3 and 7 are used only below the birthday (20).
+    let early = &[(2, Some(0), 5_000), (11, Some(3), 1), (19, Some(7), 2)];
+    let (accounts, scanned_from) = complete_from(scan_all_from_birthday(early, 20));
+    assert_eq!(scanned_from, 20, "the result says the scan started at the birthday");
+    assert!(used(&accounts).is_empty());
+    assert_eq!(accounts.len(), GAP_LIMIT as usize);
+    assert!(accounts.iter().all(|a| a.balance == "0"));
+    // The same activity is found by a scan from block 1.
+    assert_eq!(used(&complete(scan_all(early))).len(), 3);
+}
+
+#[test]
+fn a_block_below_the_birthday_is_refused() {
+    let scan = scan_from_birthday(10);
+    scan.set_tip(chain().sync.clone()).unwrap();
+    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: 10, tip: Some(TIP) });
+    for below in [1, 9] {
+        assert_eq!(
+            scan.feed_block(below, checked(below), touched_at(SPREAD, below)),
+            Err(RestoreScanError::BelowBirthday { birthday: 10, got: below })
+        );
+    }
+    // The birthday's block is next: nothing above it may come first.
+    assert_eq!(
+        scan.feed_block(11, checked(11), vec![]),
+        Err(RestoreScanError::HeightPassedOver { expected: 10, got: 11 })
+    );
+    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: 10, tip: Some(TIP) });
+    scan.feed_block(10, checked(10), vec![]).unwrap();
+    // From the birthday on, repeated and passed-over heights are still refused.
+    assert_eq!(
+        scan.feed_block(10, checked(10), vec![]),
+        Err(RestoreScanError::RepeatedHeight { expected: 11, got: 10 })
+    );
+    assert_eq!(
+        scan.feed_block(12, checked(12), vec![]),
+        Err(RestoreScanError::HeightPassedOver { expected: 11, got: 12 })
+    );
+    assert_eq!(
+        scan.feed_block(9, checked(9), vec![]),
+        Err(RestoreScanError::BelowBirthday { birthday: 10, got: 9 })
+    );
+    // And a header that does not link to the one fed before it.
+    let off = header(hash(&checked(10)), 11, 0x99);
+    scan.feed_block(11, off, vec![]).unwrap();
+    assert!(matches!(
+        scan.feed_block(12, checked(12), vec![]),
+        Err(RestoreScanError::NotTheCheckedChain { height: 12, .. })
+    ));
+    let error = RestoreScanError::BelowBirthday { birthday: 10, got: 9 };
+    assert_eq!(error.to_string(), "block 9 is below the wallet's birthday, block 10");
+}
+
+#[test]
+fn a_birthday_below_the_pinned_start_scans_from_the_start() {
+    let scan = RestoreScan::new(counting_words(), 5, Some(2)).unwrap();
+    scan.set_tip(chain().sync.clone()).unwrap();
+    assert_eq!(scan.result(), RestoreResult::Incomplete { next_height: 5, tip: Some(TIP) });
+    for height in 5..=TIP {
+        scan.feed_block(height, checked(height), touched_at(SPREAD, height)).unwrap();
+    }
+    let (accounts, scanned_from) = complete_from(scan.result());
+    assert_eq!(scanned_from, 5);
+    assert_eq!(used(&accounts).len(), 3);
 }

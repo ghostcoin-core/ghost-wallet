@@ -12,6 +12,7 @@ enum HeaderSyncBenchmarkError: LocalizedError {
   case badHeader(UInt64, String)
   case refused(height: UInt64, reason: String)
   case stalled(UInt64)
+  case notLinkedToCheckpoint(UInt64)
 
   var errorDescription: String? {
     switch self {
@@ -38,12 +39,15 @@ enum HeaderSyncBenchmarkError: LocalizedError {
       return "The header at height \(height) was refused: \(reason)."
     case .stalled(let height):
       return "The node's headers do not extend the checked chain past height \(height)."
+    case .notLinkedToCheckpoint(let height):
+      return "The node's header at height \(height) does not link to the pinned checkpoint's hash."
     }
   }
 }
 
 /// Downloads the test chain's headers from a Ghost test node, starting at the
-/// start pinned in TestChainConfig.swift, and checks each one on the phone
+/// start pinned in TestChainConfig.swift (the genesis, or a checkpoint whose
+/// next header must link to it), and checks each one on the phone
 /// with Ghost's header chain (proof of work with RandomX in its interpreted
 /// light mode, and ASERT difficulty), through the native core's HeaderSync.
 ///
@@ -132,7 +136,7 @@ enum HeaderSyncBenchmark {
     /// the node's block 0 for the person filling in TestChainConfig.swift and
     /// fails: a start the node chose is never trusted.
     static func makeSync(node: TestNodeClient, context: BenchContext) throws -> HeaderSync {
-      switch TestChainConfig.start {
+      switch try TestChainConfig.start {
       case .genesis(let rlpHex):
         if rlpHex.isEmpty {
           if let genesis = try? node.headers(from: 0, through: 0).first {
@@ -157,9 +161,28 @@ enum HeaderSyncBenchmark {
           }
           return PinnedKeyBlock(height: block.height, hash: hash)
         }
-        return try HeaderSync.fromCheckpoint(
+        let sync = try HeaderSync.fromCheckpoint(
           header: header, height: height, totalWork: totalWork,
           genesisTimestamp: genesisTimestamp, keyBlocks: pinnedKeys, constants: constants())
+        context.note("start", "checkpoint")
+        context.note("checkpointHeight", String(height))
+        try checkLinksToCheckpoint(sync: sync, height: height, node: node)
+        return sync
+      }
+    }
+
+    /// The node's header after the checkpoint must name the checkpoint as its
+    /// parent: otherwise the node is on another chain and the run fails
+    /// before checking anything. That header is then fetched again and fully
+    /// checked by HeaderSync like every other one.
+    static func checkLinksToCheckpoint(sync: HeaderSync, height: UInt64, node: TestNodeClient) throws {
+      guard let next = try node.headers(from: height + 1, through: height + 1).first,
+        let parent = HeaderRlp.parentHash(next)
+      else {
+        throw HeaderSyncBenchmarkError.badHeader(height + 1, "it has no parent hash")
+      }
+      guard parent == sync.bestHash() else {
+        throw HeaderSyncBenchmarkError.notLinkedToCheckpoint(height + 1)
       }
     }
 
@@ -395,6 +418,16 @@ enum HeaderRlp {
       payload += string(value)
     }
     return Data(lengthPrefix(payload.count, base: 0xc0) + payload)
+  }
+
+  /// The parent hash of a header's RLP: its first field, 32 bytes. Only a
+  /// reading of the encoding above; the header is not checked here.
+  static func parentHash(_ rlp: Data) -> Data? {
+    let bytes = [UInt8](rlp)
+    guard let first = bytes.first, first >= 0xc0 else { return nil }
+    let start = first <= 0xf7 ? 1 : 1 + Int(first - 0xf7)
+    guard bytes.count >= start + 33, bytes[start] == 0x80 + 32 else { return nil }
+    return Data(bytes[(start + 1)..<(start + 33)])
   }
 
   private static func string(_ bytes: [UInt8]) -> [UInt8] {

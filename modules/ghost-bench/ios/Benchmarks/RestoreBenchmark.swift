@@ -51,6 +51,11 @@ enum RestoreBenchmarkError: LocalizedError {
 /// the block. The scan refuses any header that is not the chain HeaderSync
 /// checked, and reports incomplete until the last block is in.
 ///
+/// With the test-only override benchTestChain.restoreBirthday set, the scan
+/// starts at that block, the wallet's birthday, and feeds nothing below it
+/// (note `scannedFrom`); scripts/sim-test.sh pins the checkpoint start just
+/// below it, so the header check covers every scanned block.
+///
 /// Balances are the node's eth_getBalance answers: Ghost cannot prove an
 /// account balance yet, so the scan marks every one unverified (note
 /// `balanceNote`). Nothing is kept: the scan lives in memory for the run.
@@ -88,9 +93,14 @@ enum RestoreBenchmark {
 
       let sync = try HeaderSyncBenchmark.makeSync(node: headerNode, context: context)
       let firstHeight = sync.bestHeight() + 1
+      // The wallet's birthday: the scan feeds no block below it. The header
+      // check still covers every block from the pinned start.
+      let birthday = TestChainConfig.restoreBirthday
+      context.note("restoreBirthday", birthday.map { String($0) } ?? "none")
+      let scanFrom = max(firstHeight, birthday ?? 0)
 
       let scan = try context.stage("derive") {
-        try RestoreScan(words: testWords, firstHeight: firstHeight)
+        try RestoreScan(words: testWords, firstHeight: firstHeight, birthday: birthday)
       }
       context.note("accountsDerivedAtStart", String(scan.accounts().count))
 
@@ -108,7 +118,7 @@ enum RestoreBenchmark {
 
       var touchedCount = 0
       try context.stage("scan") {
-        var next = firstHeight
+        var next = scanFrom
         while next <= tip {
           let last = min(tip, next + UInt64(TestChainConfig.batchSize) - 1)
           let blocks = try node.blocks(from: next, through: last)
@@ -123,17 +133,18 @@ enum RestoreBenchmark {
           context.note("scannedThrough", String(last))
         }
       }
-      context.note("blocksScanned", String(tip >= firstHeight ? tip - firstHeight + 1 : 0))
+      context.note("blocksScanned", String(tip >= scanFrom ? tip - scanFrom + 1 : 0))
       context.note("touchedAddresses", String(touchedCount))
       context.note("restoreSeconds", String(format: "%.3f", HeaderSyncBenchmark.uptime() - restoreStart))
 
       let expected = TestChainConfig.restoreAccountsExpected
       context.note("accountsExpected", String(expected))
-      guard case .complete(let accounts, let note) = scan.result() else {
+      guard case .complete(let accounts, let note, let scannedFrom) = scan.result() else {
         context.note("scanComplete", "false")
         throw RestoreBenchmarkError.notComplete
       }
       context.note("scanComplete", "true")
+      context.note("scannedFrom", String(scannedFrom))
       context.note("balanceNote", note)
       context.note("balancesVerified", accounts.contains { $0.unverified } ? "false" : "true")
       let used = accounts.filter { $0.used }

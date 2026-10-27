@@ -16,6 +16,9 @@ const OVERRIDES = {
   futureDrift: 'benchTestChain.futureDrift',
   genesisRlpHex: 'benchTestChain.genesisRlpHex',
   restoreAccountsExpected: 'benchTestChain.restoreAccountsExpected',
+  checkpoint: 'benchTestChain.checkpoint',
+  restoreBirthday: 'benchTestChain.restoreBirthday',
+  backgroundWaitSeconds: 'benchTestChain.backgroundWaitSeconds',
 };
 
 // The body of `enum <name> { ... }` in the Swift source.
@@ -34,7 +37,7 @@ function enumBody(source: string, name: string): string {
 
 // The body of the computed property `static var <name>: <type> { ... }`.
 function getterBody(source: string, name: string): string {
-  const match = new RegExp(`static var ${name}: \\w+ \\{`).exec(source);
+  const match = new RegExp(`static var ${name}: \\w+\\?? \\{`).exec(source);
   expect(match).not.toBeNull();
   const open = match!.index + match![0].length - 1;
   let depth = 0;
@@ -54,10 +57,12 @@ describe('TestChainConfig.swift', () => {
     expect(compiled).toMatch(/static let futureDrift: UInt64 = 30\n/);
     expect(compiled).toMatch(/static let restoreAccountsExpected = 0\n/);
     expect(compiled).toContain('static let start: Start = .genesis(rlpHex: "")');
+    expect(compiled).toMatch(/static let backgroundWaitSeconds: Double = 180\n/);
+    expect(compiled).not.toMatch(/checkpoint|[bB]irthday/);
     expect(source).toContain('static let halfLife: UInt64 = 3600');
   });
 
-  it('declares exactly the four override keys', () => {
+  it('declares exactly the seven override keys', () => {
     const keys = enumBody(source, 'OverrideKey');
     const declared = [...keys.matchAll(/static let (\w+) = "([^"]+)"/g)].map(([, name, key]) => [
       name,
@@ -79,9 +84,30 @@ describe('TestChainConfig.swift', () => {
     expect(getterBody(source, 'restoreAccountsExpected')).toMatch(
       /overrideCount\(OverrideKey\.restoreAccountsExpected\)[\s\S]*\?\? Compiled\.restoreAccountsExpected/,
     );
+    expect(getterBody(source, 'backgroundWaitSeconds')).toMatch(
+      /overrideCount\(OverrideKey\.backgroundWaitSeconds\)[\s\S]*\?\? Compiled\.backgroundWaitSeconds/,
+    );
+    expect(getterBody(source, 'restoreBirthday')).toContain('overrideCount(OverrideKey.restoreBirthday)');
     const start = getterBody(source, 'start');
     expect(start).toContain('overrideString(OverrideKey.genesisRlpHex)');
     expect(start).toContain('return Compiled.start');
+  });
+
+  it('takes a checkpoint override before the genesis one and refuses one that does not decode', () => {
+    const start = getterBody(source, 'start');
+    const checkpoint = start.indexOf('overrideString(OverrideKey.checkpoint)');
+    expect(checkpoint).toBeGreaterThanOrEqual(0);
+    expect(checkpoint).toBeLessThan(start.indexOf('OverrideKey.genesisRlpHex'));
+    expect(start).toContain('return try checkpoint(fromJson: json)');
+    expect(start).toMatch(/object\(forKey: OverrideKey\.checkpoint\) != nil \{\s*throw/);
+    const json = source.slice(source.indexOf('struct CheckpointJson'), source.indexOf('enum Compiled'));
+    for (const field of ['rlpHex: String', 'height: UInt64', 'totalWorkHex: String', 'genesisTimestamp: UInt64']) {
+      expect(json).toContain(`let ${field}`);
+    }
+    expect(json).toContain('let keyBlocks: [KeyBlock]');
+    expect(json).toContain('let hashHex: String');
+    const parse = source.slice(source.indexOf('static func checkpoint(fromJson'));
+    expect(parse).toMatch(/catch \{\s*throw OverrideError\.badCheckpoint/);
   });
 
   it('reads every override from UserDefaults only', () => {
@@ -98,6 +124,38 @@ describe('TestChainConfig.swift', () => {
 
   it('has no other settable state', () => {
     expect(source).not.toMatch(/static var \w+: [\w.]+ = /);
+  });
+});
+
+describe('the node benchmarks', () => {
+  const headerSync = read('modules/ghost-bench/ios/Benchmarks/HeaderSyncBenchmark.swift');
+  const restore = read('modules/ghost-bench/ios/Benchmarks/RestoreBenchmark.swift');
+  const worstCase = read('modules/ghost-bench/ios/Benchmarks/WorstCaseBenchmark.swift');
+
+  it('fail when the header after a checkpoint does not link to it', () => {
+    const fromCheckpoint = headerSync.slice(headerSync.indexOf('case .checkpoint(let rlpHex'));
+    expect(fromCheckpoint).toMatch(
+      /HeaderSync\.fromCheckpoint\([\s\S]*try checkLinksToCheckpoint\(sync: sync, height: height, node: node\)\s*return sync/,
+    );
+    const check = headerSync.slice(headerSync.indexOf('static func checkLinksToCheckpoint'));
+    expect(check).toContain('node.headers(from: height + 1, through: height + 1)');
+    expect(check).toMatch(/guard parent == sync\.bestHash\(\) else \{\s*throw HeaderSyncBenchmarkError\.notLinkedToCheckpoint/);
+  });
+
+  it('restore scans from the birthday override', () => {
+    expect(restore).toContain('let birthday = TestChainConfig.restoreBirthday');
+    expect(restore).toContain('RestoreScan(words: testWords, firstHeight: firstHeight, birthday: birthday)');
+    expect(restore).toContain('var next = scanFrom');
+    expect(restore).toContain('case .complete(let accounts, let note, let scannedFrom)');
+  });
+
+  it('worst-case still fails unless it holds 2 caches', () => {
+    expect(worstCase).toContain('static let wantedCaches: UInt64 = 2');
+    expect(worstCase).toMatch(/guard before == wantedCaches else \{\s*throw WorstCaseBenchmarkError\.cachesNotLoaded/);
+  });
+
+  it('header-sync waits for the background for the configured time', () => {
+    expect(headerSync).toContain('entered.wait(timeout: .now() + TestChainConfig.backgroundWaitSeconds)');
   });
 });
 
@@ -135,6 +193,75 @@ describe('scripts/sim-test.sh', () => {
     expect(script).toContain('-e BENCH="$bench" -e TIMEOUT="$timeout_ms"');
     expect(script).toMatch(/^BENCHES="\$\{BENCHES:-[^}]*\}"$/m);
   });
+
+  it('starts worst-case from a checkpoint below the second key, so its sync crosses the key change', () => {
+    const checkpoint = Number(/^WORST_CASE_CHECKPOINT=(\d+)$/m.exec(script)?.[1]);
+    expect(checkpoint).toBe(8000);
+    expect(checkpoint).toBeLessThan(8449);
+    expect(script).toMatch(/worst-case\) checkpoint_height="\$WORST_CASE_CHECKPOINT" ;;/);
+  });
+
+  it('starts header-sync 1,000 blocks below the tip', () => {
+    expect(script).toMatch(/^HEADER_SYNC_WINDOW=1000$/m);
+    expect(script).toMatch(
+      /header-sync\)\s*tip="\$\(bash scripts\/test-chain\.sh height\)"\s*checkpoint_height=\$\(\(tip - HEADER_SYNC_WINDOW\)\)/,
+    );
+  });
+
+  it('starts restore just below a birthday under the late funding', () => {
+    expect(script).toContain('late_block="$(bash scripts/test-chain.sh fund-late "$TEST_CHAIN_HEIGHT")"');
+    expect(script).toContain('restore_birthday=$((late_block - RESTORE_BIRTHDAY_LEAD))');
+    expect(script).toContain('checkpoint_height=$((restore_birthday - 1))');
+    expect(script).toContain(`sim_defaults ${OVERRIDES.restoreBirthday} -int "$restore_birthday"`);
+  });
+
+  it('writes each node benchmark its checkpoint right before it runs', () => {
+    expect(script).toContain('checkpoint="$(bash scripts/test-chain.sh checkpoint "$checkpoint_height")"');
+    expect(script).toContain(`sim_defaults ${OVERRIDES.checkpoint} -string "$checkpoint"`);
+    const loop = script.slice(script.indexOf('for bench in $BENCHES; do\n  echo "==> benchmark'));
+    expect(loop.indexOf('set_bench_start "$bench"')).toBeGreaterThan(0);
+    expect(loop.indexOf('set_bench_start "$bench"')).toBeLessThan(loop.indexOf('maestro --device'));
+    // A benchmark never inherits the previous one's start.
+    const setStart = script.slice(script.indexOf('set_bench_start() {'));
+    expect(setStart).toMatch(
+      /sim_defaults_delete benchTestChain\.checkpoint\s*sim_defaults_delete benchTestChain\.restoreBirthday\s*\[ "\$FULL" = 1 \] && return/,
+    );
+  });
+
+  it('waits 10 seconds for the background, and keeps FULL=1 from genesis as before', () => {
+    expect(script).toMatch(/^BACKGROUND_WAIT_SECONDS=10$/m);
+    expect(script).toContain(`sim_defaults ${OVERRIDES.backgroundWaitSeconds} -int "$BACKGROUND_WAIT_SECONDS"`);
+    expect(script).toMatch(/^FULL="\$\{FULL:-0\}"$/m);
+    expect(script).toMatch(
+      /if \[ "\$FULL" = 1 \]; then[^\n]*\n[^\n]*\n\s*sim_defaults_delete benchTestChain\.backgroundWaitSeconds\n\s*else/,
+    );
+  });
+});
+
+describe('scripts/phone-launch.sh', () => {
+  const script = read('scripts/phone-launch.sh');
+
+  it('launches the installed app on the connected iPhone at the bench screen', () => {
+    expect(script).toContain('DEVICE="${GHOST_WALLET_DEVICE:-}"');
+    expect(script).toMatch(
+      /xcrun devicectl device process launch --device "\$DEVICE" --terminate-existing\s*--payload-url ghostwallet:\/\/bench "\$APP_ID"/,
+    );
+    expect(script).toContain('launch+=(-- "${args[@]}")');
+    expect(script).toContain('On the phone, tap \\"$BENCH\\" on the bench screen, then Run.');
+  });
+
+  it('passes the node on the LAN and each override as a launch argument', () => {
+    expect(script).toContain('-benchNodeUrl "http://$lan_ip:$TEST_CHAIN_PORT"');
+    expect(script).toContain(`-${OVERRIDES.checkpoint} "$checkpoint"`);
+    expect(script).toContain(`-${OVERRIDES.genesisRlpHex} "$genesis_rlp"`);
+    expect(script).toContain(`-${OVERRIDES.blockTime} 1\n`);
+    expect(script).toContain(`-${OVERRIDES.futureDrift} 3600\n`);
+    expect(script).toContain(`-${OVERRIDES.restoreAccountsExpected} 3\n`);
+    expect(script).toContain(`-${OVERRIDES.restoreBirthday} "$restore_birthday"`);
+    expect(script).toMatch(/^TEST_CHAIN_PORT=8547$/m);
+    expect(script).toMatch(/^WORST_CASE_CHECKPOINT=8000$/m);
+    expect(script).toMatch(/^HEADER_SYNC_WINDOW=1000$/m);
+  });
 });
 
 describe('.maestro/bench.yaml', () => {
@@ -153,10 +280,20 @@ describe('.maestro/bench.yaml', () => {
 describe('scripts/test-chain.sh', () => {
   const script = read('scripts/test-chain.sh');
 
-  it('has the start, wait, stop and genesis subcommands', () => {
-    for (const command of ['start', 'wait', 'stop', 'genesis']) {
-      expect(script).toMatch(new RegExp(`^  ${command}\\) cmd_${command}`, 'm'));
+  it('has the start, wait, stop, genesis, height, checkpoint and fund-late subcommands', () => {
+    for (const command of ['start', 'wait', 'stop', 'genesis', 'height', 'checkpoint', 'fund-late']) {
+      expect(script).toMatch(new RegExp(`^  ${command}\\) cmd_${command.replace('-', '_')}`, 'm'));
     }
+  });
+
+  it('funds accounts 0, 3 and 7 again at a later height on every fund-late', () => {
+    const fundLate = script.slice(script.indexOf('cmd_fund_late() {'), script.indexOf('checkpoint_js() {'));
+    expect(fundLate).toMatch(/wait_height "\$1"\s*lowest="\$\(send_to_test_accounts "\$miner"\)"/);
+    expect(fundLate).not.toContain('marker');
+    expect(fundLate).toMatch(/echo "\$lowest"\n\}/);
+    const send = script.slice(script.indexOf('send_to_test_accounts() {'), script.indexOf('fund_accounts() {'));
+    expect(send).toContain('for account in "${FUND_ACCOUNTS[@]}"; do');
+    expect(send).toContain('eth_getTransactionReceipt');
   });
 
   it('pins ghost-node to a commit and builds geth', () => {

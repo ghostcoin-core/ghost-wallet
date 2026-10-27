@@ -105,11 +105,24 @@ The header-sync, restore and worst-case benchmarks need a Ghost node.
 `scripts/test-chain.sh` runs one on the Mac (Go 1.26+ and rustup installed):
 
 ```sh
-bash scripts/test-chain.sh start          # build ghost-node, init, mine, fund the test wallet
-bash scripts/test-chain.sh wait 8600      # block until the chain reaches a height
-bash scripts/test-chain.sh genesis        # print the block 0 RLP
+bash scripts/test-chain.sh start             # build ghost-node, init, mine, fund the test wallet
+bash scripts/test-chain.sh wait 8600         # block until the chain reaches a height
+bash scripts/test-chain.sh genesis           # print the block 0 RLP
+bash scripts/test-chain.sh height            # print the tip height
+bash scripts/test-chain.sh checkpoint 8000   # print the checkpoint JSON of block 8000
+bash scripts/test-chain.sh fund-late 8600    # at 8600, fund accounts 0, 3 and 7 again
 bash scripts/test-chain.sh stop
 ```
+
+`checkpoint <height>` prints, as one line of JSON, the block's header RLP (the
+19 fields in the order `HeaderSyncBenchmark.swift` encodes them), the total
+work up to and including it (every header's difficulty summed from block 0),
+the genesis timestamp, and the key blocks at or below it that the headers from
+`<height>+1` to the tip use (Ghost's `seed_height`, epochs of 8192 blocks used
+256 blocks late). A key block above the checkpoint is not pinned: the sync
+checks it like any other header. It needs Node. `fund-late <height>` waits for
+the height, sends 1 GHOST to each test account again (every time it runs) and
+prints the lowest block holding the transfers.
 
 `start` clones [ghost-node](https://github.com/ghostcoin-core/ghost-node) at a
 pinned commit into `~/.ghost-wallet-testchain`, builds it with `make geth`,
@@ -132,14 +145,66 @@ UserDefaults for `com.ghostcoin.wallet`:
 | `benchTestChain.futureDrift` | `3600` (the miner runs up to an hour ahead) |
 | `benchTestChain.genesisRlpHex` | the node's block 0 RLP |
 | `benchTestChain.restoreAccountsExpected` | `3` |
+| `benchTestChain.backgroundWaitSeconds` | `10` (not set with `FULL=1`) |
+| `benchTestChain.checkpoint` | per benchmark, below (not set with `FULL=1`) |
+| `benchTestChain.restoreBirthday` | restore only, below (not set with `FULL=1`) |
 
 The compiled values in `TestChainConfig.swift` (block time 30, future drift
-30) are unchanged, and are used whenever an override is not set. Each node
-benchmark gets 90 minutes. A full run:
+30, genesis start, 180-second background wait, no birthday) are unchanged,
+and are used whenever an override is not set. Each node benchmark gets 90
+minutes.
+
+Checking every header from block 0 runs at about 4.6 headers a second in the
+simulator (RandomX interpreted, as iOS requires), so a run from genesis takes
+30 to 50 minutes. The app itself starts from genesis or a published
+checkpoint, so by default each node benchmark starts from a checkpoint the
+script makes from the node's chain just before it runs:
+
+- **header-sync** from 1,000 blocks below the tip, so it measures speed over
+  1,000 checked headers;
+- **worst-case** from height 8000, below the second key's first use at 8449:
+  its sync still crosses the key change and holds both RandomX caches while it
+  proves, and it fails as before if it never holds 2;
+- **restore** from just below the wallet birthday: the script funds the test
+  accounts again (`fund-late`), sets the birthday 100 blocks below those
+  transfers and the checkpoint one block below the birthday. The scan feeds no
+  block below the birthday and reports where it started (`scannedFrom`).
+
+The header after a checkpoint must link to the checkpoint's hash, or the run
+fails; every header after it gets the full proof-of-work and difficulty check.
+
+Use the default for everyday runs:
 
 ```sh
 BENCHES="dummy summon kill-recovery header-sync restore worst-case" bash scripts/sim-test.sh
 ```
+
+Use `FULL=1` for a final confirmation before relying on a result: it runs the
+node benchmarks from genesis with no birthday and the 180-second background
+wait, exactly as before checkpoints (30 to 50 minutes each):
+
+```sh
+FULL=1 BENCHES="header-sync restore worst-case" bash scripts/sim-test.sh
+```
+
+### Run a benchmark on the iPhone
+
+With the app installed (`scripts/mac-install.sh`), the test chain running and
+the phone on the same network as the Mac, run:
+
+```sh
+GHOST_WALLET_DEVICE=<udid> bash scripts/phone-launch.sh header-sync
+```
+
+It launches the app at the bench screen with `xcrun devicectl device process
+launch --payload-url ghostwallet://bench`, passing the node URL
+(`http://<the Mac's LAN address>:8547`; set `GHOST_WALLET_LAN_IP` if en0 and
+en1 have none) and the same overrides and checkpoint as the simulator run as
+launch arguments, which iOS puts in UserDefaults' argument domain for that
+launch only. It then prints which benchmark to tap. The background wait keeps
+its 180 seconds there, so header-sync's resume can be tried by leaving the app
+and coming back. Any other use of the phone during a run can suspend the app
+and lose the run.
 
 ## Licence
 
