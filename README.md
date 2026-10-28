@@ -194,6 +194,10 @@ arguments, which iOS puts in UserDefaults' argument domain for that launch
 only. It then prints which benchmark to tap. Any other use of the phone during
 a run can suspend the app and lose the run.
 
+## Brand
+
+The Ghost brand kit is in `brand/`, and its rules are in `brand/README.txt`.
+
 ## Licence
 
 The project's own code is licensed under either of
