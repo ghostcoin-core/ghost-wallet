@@ -3,7 +3,7 @@
 // whole phrase and saves it to the Keychain.
 import { useRouter } from 'expo-router';
 import { useRef, useState } from 'react';
-import { StyleSheet, Text, View, type TextInput } from 'react-native';
+import { StyleSheet, Text, View, type TextInputInstance } from 'react-native';
 
 import { Screen, useScreenLayout } from '../components/screen';
 import { Body, Button, Title } from '../components/onboarding-ui';
@@ -34,7 +34,7 @@ export default function ImportScreen() {
   const twoColumn = useScreenLayout() === 'two-column';
   const [fields, setFields] = useState(emptyFields);
   const [error, setError] = useState<string | null>(null);
-  const boxes = useRef<(TextInput | null)[]>([]);
+  const boxes = useRef<(TextInputInstance | null)[]>([]);
 
   const [focused, setFocused] = useState<number | null>(null);
 
