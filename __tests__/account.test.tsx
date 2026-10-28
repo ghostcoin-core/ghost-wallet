@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Share } from 'react-native';
 
-import HomeScreen from '../app/index';
+import HomeScreen from '../app/home';
 import ReceiveScreen from '../app/receive';
 import RecoveryWordsScreen from '../app/recovery-words';
 import SettingsScreen from '../app/settings';

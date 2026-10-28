@@ -191,9 +191,10 @@ pub fn test_chain_id() -> u64 {
 
 /// The operating system's random source, read on every draw. A failed read
 /// is remembered (and the bytes zeroed) rather than a panic across the
-/// UniFFI boundary; [`sign_test_send`] then throws the signature away.
-struct OsRandom {
-    failed: bool,
+/// UniFFI boundary; [`sign_test_send`] then throws the signature away, and
+/// `crate::accounts` the new words.
+pub(crate) struct OsRandom {
+    pub(crate) failed: bool,
 }
 
 impl TryRng for OsRandom {

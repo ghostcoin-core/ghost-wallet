@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 
-import HomeScreen from '../app/index';
+import HomeScreen from '../app/home';
 import type { AccountReading } from '../lib/home/cache-refresh';
 
 const ADDRESS = '0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd';

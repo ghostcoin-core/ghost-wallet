@@ -5,8 +5,8 @@
     "scheme": "ghostwallet",
     "version": "0.1.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
-    "backgroundColor": "#0A0A12",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#FFFFFF",
     "platforms": ["ios"],
     "newArchEnabled": true,
     "ios": {
@@ -22,6 +22,12 @@
           "ios": {
             "usePrecompiledModules": false
           }
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Ghost Wallet uses Face ID to unlock your account."
         }
       ]
     ],
