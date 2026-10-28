@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>7. Payment · Ghost Wallet mockup</title>
+    <link rel="icon" href="../../brand/favicon/favicon.svg" />
+    <link rel="stylesheet" href="mockups.css" />
+  </head>
+  <body>
+    <div class="page">
+      <main class="screen" aria-label="Payment">
+        <div class="status-bar" aria-hidden="true">
+          <span>9:41</span>
+          <svg class="icon" viewBox="0 0 24 24"><rect x="2" y="7" width="18" height="10" rx="2" /><path d="M22 11v2" /></svg>
+        </div>
+
+        <div class="top-bar">
+          <a class="icon-button" href="home.html" aria-label="Close">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </a>
+          <span style="flex: 1"></span>
+          <span class="badge">
+            <svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5" /></svg>
+            Test network
+          </span>
+          <span class="logo"><img src="../../brand/svg/ghost-logo-primary.svg" alt="Ghost" /></span>
+        </div>
+
+        <div class="content">
+          <div>
+            <p class="quiet">You sent</p>
+            <p class="mono" style="color: #0E0D1A; font-size: 34px; font-weight: 500">25.00 <span style="font-size: 17px">GHOST</span></p>
+            <p class="quiet">to <span class="mono">0xe5fb…55fd</span></p>
+          </div>
+
+          <ol class="steps panel" style="padding: 20px" aria-label="Payment progress">
+            <li class="done">
+              <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+              <span>
+                <span class="step-title">Sent</span>
+                <span class="quiet" style="display: block">9:41, from this phone</span>
+              </span>
+            </li>
+            <li class="current" aria-current="step">
+              <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /></svg></span>
+              <span>
+                <span class="step-title">In a block</span>
+                <span class="quiet" style="display: block">Usually in under a minute</span>
+              </span>
+            </li>
+            <li>
+              <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /></svg></span>
+              <span>
+                <span class="step-title">Settled</span>
+                <span class="quiet" style="display: block">Final, cannot be undone</span>
+              </span>
+            </li>
+          </ol>
+
+          <div class="highlight" role="note">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z" /><path d="M8.5 12l2.5 2.5 4.5-5" /></svg>
+            <span>Safe to close the app. It never pays twice.</span>
+          </div>
+
+          <span style="flex: 1"></span>
+          <div class="button-row">
+            <button class="button secondary" type="button">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" /></svg>
+              Speed up
+            </button>
+            <button class="button secondary" type="button">Cancel</button>
+          </div>
+          <p class="quiet" style="text-align: center">Speed up pays a little more fee. Cancel works until it is in a block.</p>
+          <a class="button" href="home.html" style="margin-bottom: 24px">Done</a>
+        </div>
+      </main>
+
+      <nav class="flow-nav" aria-label="Mockup screens">
+        <a href="send.html">Back: 6. Send</a>
+        <a href="index.html">All screens</a>
+        <a href="receive.html">Next: 8. Receive</a>
+      </nav>
+    </div>
+  </body>
+</html>

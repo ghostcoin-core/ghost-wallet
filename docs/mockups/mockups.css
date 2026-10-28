@@ -1,0 +1,639 @@
+/*
+ * Ghost Wallet phase 1 mockups, brand kit v1.0 (brand/README.txt).
+ * Light-first: Paper pages, ink text, Ghost violet only for main buttons and links.
+ * Fonts are the kit's own files, loaded by relative path from docs/mockups/.
+ */
+
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('../../brand/fonts/InstrumentSans.ttf') format('truetype');
+  font-weight: 400 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('../../brand/fonts/IBMPlexMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: url('../../brand/fonts/IBMPlexMono-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #F5F5F8;
+  color: #0E0D1A;
+  font-family: 'Instrument Sans', sans-serif;
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+a {
+  color: #6B4CFF;
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #6B4CFF;
+  outline-offset: 2px;
+}
+
+.mono {
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+/* Page around the phone when a screen is opened on its own. */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 32px 16px;
+}
+
+.flow-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.flow-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid #E4E3EC;
+  border-radius: 22px;
+  background: #FFFFFF;
+  color: #6B4CFF;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/* The 390 x 844 screen root. */
+
+.screen {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 390px;
+  height: 844px;
+  overflow: hidden;
+  border: 1px solid #E4E3EC;
+  border-radius: 44px;
+  background: #FFFFFF;
+}
+
+.screen.on-mist {
+  background: #F5F5F8;
+}
+
+/* Inside the index frames (or on a real phone) only the screen shows. */
+@media (max-width: 400px) {
+  .page {
+    padding: 0;
+  }
+
+  .flow-nav {
+    display: none;
+  }
+
+  .screen {
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+.status-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 47px;
+  padding: 0 28px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 56px;
+  padding: 0 16px;
+}
+
+.top-bar h1 {
+  flex: 1;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-align: center;
+}
+
+/* Clear space: one square (26% of the logo's width) on every side. */
+.logo {
+  display: inline-flex;
+  padding: 8px;
+}
+
+.logo img {
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+
+.logo.large {
+  padding: 26px;
+}
+
+.logo.large img {
+  width: 100px;
+  height: 100px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid #E4E3EC;
+  border-radius: 999px;
+  background: #F5F5F8;
+  color: #4A4860;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon.small {
+  width: 14px;
+  height: 14px;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 22px;
+  background: #FFFFFF;
+  color: #0E0D1A;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 24px;
+  overflow: hidden;
+}
+
+.footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 24px 40px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+}
+
+p {
+  margin: 0;
+  color: #4A4860;
+}
+
+.quiet {
+  color: #6E6C82;
+  font-size: 14px;
+}
+
+/* Buttons: violet for the main action, outlined for the rest. */
+
+.button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 52px;
+  padding: 0 20px;
+  border: 1px solid #6B4CFF;
+  border-radius: 14px;
+  background: #6B4CFF;
+  color: #FFFFFF;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button.secondary {
+  border-color: #E4E3EC;
+  background: #FFFFFF;
+  color: #0E0D1A;
+}
+
+.button.text {
+  border-color: transparent;
+  background: transparent;
+  color: #6B4CFF;
+}
+
+.button-row {
+  display: flex;
+  gap: 12px;
+}
+
+.panel {
+  border: 1px solid #E4E3EC;
+  border-radius: 16px;
+  background: #FFFFFF;
+}
+
+.highlight {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #EEEAFF;
+  color: #0E0D1A;
+  font-size: 15px;
+}
+
+/* Word slots on the backup and import screens. */
+
+.word-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.word-grid li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 8px;
+  border: 1px solid #E4E3EC;
+  border-radius: 10px;
+  background: #F5F5F8;
+  font-size: 14px;
+}
+
+.word-grid .number {
+  min-width: 18px;
+  color: #6E6C82;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+}
+
+.word-grid .placeholder {
+  color: #4A4860;
+  font-family: 'IBM Plex Mono', monospace;
+  letter-spacing: 0.08em;
+}
+
+.word-grid.inputs li {
+  min-height: 44px;
+  background: #FFFFFF;
+}
+
+.word-grid input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: #0E0D1A;
+  font: inherit;
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+/* Form fields. */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field label,
+.field .label {
+  color: #4A4860;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.field input {
+  min-height: 52px;
+  padding: 0 14px;
+  border: 1px solid #E4E3EC;
+  border-radius: 12px;
+  background: #FFFFFF;
+  color: #0E0D1A;
+  font: inherit;
+}
+
+input::placeholder {
+  color: #6E6C82;
+  opacity: 1;
+}
+
+.field input.mono {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 14px;
+}
+
+/* Lists of rows: activity, settings, send summary. */
+
+.rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rows > li + li {
+  border-top: 1px solid #E4E3EC;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 10px 16px;
+  color: #0E0D1A;
+  text-decoration: none;
+}
+
+.row .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.row .title {
+  display: block;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row .sub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #6E6C82;
+  font-size: 13px;
+}
+
+.row .amount {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.row .amount.struck {
+  color: #6E6C82;
+  text-decoration: line-through;
+}
+
+.row .value {
+  color: #4A4860;
+  font-size: 15px;
+}
+
+.row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 18px;
+  background: #F5F5F8;
+  color: #0E0D1A;
+}
+
+.section-title {
+  margin: 8px 0 0;
+  color: #6E6C82;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.address {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 15px;
+  word-break: break-all;
+}
+
+/* Payment progress. */
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.steps li {
+  position: relative;
+  display: flex;
+  gap: 14px;
+  padding-bottom: 22px;
+}
+
+.steps li:last-child {
+  padding-bottom: 0;
+}
+
+.steps li:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  top: 30px;
+  bottom: 2px;
+  left: 13px;
+  width: 2px;
+  background: #E4E3EC;
+}
+
+.steps li.done:not(:last-child)::before {
+  background: #6B4CFF;
+}
+
+.step-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 2px solid #E4E3EC;
+  border-radius: 14px;
+  background: #FFFFFF;
+  color: #6E6C82;
+}
+
+.steps li.done .step-mark {
+  border-color: #6B4CFF;
+  background: #6B4CFF;
+  color: #FFFFFF;
+}
+
+.steps li.current .step-mark {
+  border-color: #6B4CFF;
+  color: #6B4CFF;
+}
+
+.steps .step-title {
+  font-weight: 600;
+}
+
+/* Toggle drawn as a button with aria-pressed. */
+
+.toggle {
+  position: relative;
+  width: 52px;
+  height: 44px;
+  flex: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.toggle::before {
+  content: '';
+  position: absolute;
+  top: 8px;
+  left: 0;
+  width: 52px;
+  height: 28px;
+  border-radius: 14px;
+  background: #E4E3EC;
+}
+
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 10px;
+  left: 2px;
+  width: 24px;
+  height: 24px;
+  border-radius: 12px;
+  background: #FFFFFF;
+}
+
+.toggle[aria-pressed='true']::before {
+  background: #6B4CFF;
+}
+
+.toggle[aria-pressed='true']::after {
+  left: 26px;
+}
+
+/* Index page. */
+
+.index-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 24px 40px 0;
+}
+
+.index-header img {
+  display: block;
+  height: 40px;
+}
+
+.index-intro {
+  max-width: 720px;
+  padding: 16px 40px 0;
+}
+
+.index-intro h1 {
+  margin: 0 0 8px;
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+.index-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(392px, 1fr));
+  gap: 40px 32px;
+  margin: 0;
+  padding: 32px 40px 64px;
+  list-style: none;
+}
+
+.index-grid li {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.index-grid h2 {
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.index-grid a.open {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-weight: 600;
+}
+
+.index-grid iframe {
+  display: block;
+  width: 392px;
+  height: 846px;
+  border: 1px solid #E4E3EC;
+  border-radius: 44px;
+  background: #FFFFFF;
+}
