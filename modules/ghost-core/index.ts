@@ -8,13 +8,20 @@
 // words the person types on the check and import screens. Nothing here logs
 // them, and no error message carries them. The only other words this module
 // passes over are the fixed public test words.
-import { lookUpAccountAtTip, type AccountAtTip, type FetchAccountState, type RestoreBindings } from './account-lookup';
+import {
+  lookUpSavedAccountAtTip,
+  type AccountAtTip,
+  type FetchAccountState,
+  type RestoreBindings,
+  type SavedRestoreBindings,
+} from './account-lookup';
 import { TEST_WORDS } from './test-words';
 
 export { TEST_WORDS_ACCOUNT_ZERO } from './test-words';
 export type { AccountAtTip, FetchAccountState } from './account-lookup';
 
-type GhostCoreBindings = RestoreBindings & {
+type GhostCoreBindings = RestoreBindings &
+  SavedRestoreBindings & {
   accountZeroAddress(words: string): string;
   /** Generates 24 new words from the system's random source and holds them in native memory until saved or discarded. */
   newAccountWords(): string[];
@@ -35,6 +42,8 @@ type GhostCoreBindings = RestoreBindings & {
   hasAccount(): boolean;
   /** Account 0 address of the saved words. */
   savedAccountZeroAddress(): string;
+  /** The 24 words of the saved account, for the recovery words screen only. */
+  savedAccountWords(): string[];
 };
 
 function bindings(): GhostCoreBindings {
@@ -105,19 +114,22 @@ export function savedAccountZeroAddress(): string {
 }
 
 /**
- * Account `index` of the fixed test words at the node's tip, through the
- * core's current-state lookup. `fetchState` asks the node for the address's
- * balance and nonce at the tip's block hash.
+ * Account `index` of the saved account at the node's tip, through the core's
+ * current-state lookup; the words stay in native code. `fetchState` asks the
+ * node for the address's balance and nonce at the tip's block hash.
  */
-export function lookUpTestWordsAccount(
+export function lookUpSavedAccount(
   index: number,
   tip: { height: number; hash: string },
   fetchState: FetchAccountState,
 ): Promise<AccountAtTip> {
-  return lookUpAccountAtTip(bindings(), TEST_WORDS, index, tip, fetchState);
+  return lookUpSavedAccountAtTip(bindings(), index, tip, fetchState);
 }
 
-/** The recovery words of the account shown: for now the fixed, public test words. */
-export function testRecoveryWords(): string[] {
-  return TEST_WORDS.split(' ');
+/**
+ * The saved account's 24 recovery words, for the recovery words screen only
+ * (after Face ID or the passcode). Throws when no account can be read.
+ */
+export function savedAccountWords(): string[] {
+  return bindings().savedAccountWords();
 }

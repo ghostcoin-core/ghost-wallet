@@ -12,7 +12,7 @@ jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: jest
 const mockAccountZeroAddress = jest.fn((): string => ADDRESS);
 jest.mock(
   '../modules/ghost-core/src/index',
-  () => ({ accountZeroAddress: () => mockAccountZeroAddress() }),
+  () => ({ savedAccountZeroAddress: () => mockAccountZeroAddress() }),
   { virtual: true },
 );
 

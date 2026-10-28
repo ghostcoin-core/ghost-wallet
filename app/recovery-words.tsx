@@ -3,7 +3,7 @@
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { AppState, StyleSheet, Text, View } from 'react-native';
-import { testRecoveryWords } from 'ghost-core';
+import { savedAccountWords } from 'ghost-core';
 
 import { colors, monoFont } from '../components/theme';
 import { Button, ButtonRow, IconButton, Logo, NetworkBadge, Screen, Spacer, textStyles, Title } from '../components/ui';
@@ -30,7 +30,11 @@ export default function RecoveryWordsScreen() {
       setMessage(authFailureMessage(result.reason));
       return;
     }
-    setWords(testRecoveryWords());
+    try {
+      setWords(savedAccountWords());
+    } catch {
+      setMessage('Your recovery words could not be read on this phone.');
+    }
   }
 
   return (
@@ -47,8 +51,7 @@ export default function RecoveryWordsScreen() {
     >
       <Title>Recovery words</Title>
       <Text style={textStyles.body}>
-        Anyone with these words can spend your GHOST. This account uses Ghost&apos;s public test words, so
-        they guard nothing.
+        Anyone with these words can spend your GHOST. Never share them, and keep them only on paper.
       </Text>
       {words ? (
         <View style={styles.grid} testID="recovery-words">

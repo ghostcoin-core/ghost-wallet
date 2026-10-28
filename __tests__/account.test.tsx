@@ -16,17 +16,20 @@ const COUNTING_SEED_WORDS =
   'abandon amount liar amount expire adjust cage candy arch gather drum bullet absurd math era live bid rhythm alien crouch range attend journey unaware';
 
 // The generated native bindings run only on the phone. This stand-in answers
-// like the Rust core: the expected address for the counting-seed words only.
-const mockAccountZeroAddress = jest.fn((words: string): string => {
-  if (words !== COUNTING_SEED_WORDS) {
-    throw new Error('invalid account words');
-  }
-  return EXPECTED_ADDRESS;
-});
+// like the Rust core with the counting-seed words saved in the Keychain. The
+// public test words' own address is a different one here, so a screen that
+// showed the test account instead of the saved one would fail.
+const mockSavedAccountZeroAddress = jest.fn((): string => EXPECTED_ADDRESS);
+const mockSavedAccountWords = jest.fn((): string[] => COUNTING_SEED_WORDS.split(' '));
+const mockAccountZeroAddress = jest.fn((_words: string): string => '0x' + '00'.repeat(20));
 
 jest.mock(
   '../modules/ghost-core/src/index',
-  () => ({ accountZeroAddress: (words: string) => mockAccountZeroAddress(words) }),
+  () => ({
+    accountZeroAddress: (words: string) => mockAccountZeroAddress(words),
+    savedAccountZeroAddress: () => mockSavedAccountZeroAddress(),
+    savedAccountWords: () => mockSavedAccountWords(),
+  }),
   { virtual: true },
 );
 
@@ -58,6 +61,8 @@ jest.mock('../lib/device-auth', () => ({
 
 beforeEach(() => {
   mockAccountZeroAddress.mockClear();
+  mockSavedAccountZeroAddress.mockClear();
+  mockSavedAccountWords.mockClear();
   mockPush.mockClear();
   mockAuthenticate.mockReset();
 });
@@ -71,7 +76,9 @@ describe('Account 0', () => {
   it('home never puts the words on the screen', () => {
     render(<HomeScreen />);
 
-    expect(mockAccountZeroAddress).toHaveBeenCalledWith(COUNTING_SEED_WORDS);
+    expect(mockSavedAccountZeroAddress).toHaveBeenCalled();
+    expect(mockAccountZeroAddress).not.toHaveBeenCalled();
+    expect(mockSavedAccountWords).not.toHaveBeenCalled();
     expect(screen.queryByText(TEST_WORDS, { exact: false })).toBeNull();
     expect(screen.queryByText('abandon', { exact: false })).toBeNull();
   });
@@ -102,7 +109,7 @@ describe('ReceiveScreen', () => {
   });
 
   it('says the address is unavailable when the native core fails', () => {
-    mockAccountZeroAddress.mockImplementationOnce(() => {
+    mockSavedAccountZeroAddress.mockImplementationOnce(() => {
       throw new Error('native core missing');
     });
 
@@ -127,6 +134,25 @@ describe('RecoveryWordsScreen', () => {
     expect(screen.getByTestId('recovery-words')).toBeOnTheScreen();
     expect(screen.getAllByText('amount')).toHaveLength(2);
     expect(screen.getByText('unaware')).toBeOnTheScreen();
+    expect(mockSavedAccountWords).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows no words when the saved account cannot be read', async () => {
+    mockAuthenticate.mockResolvedValue({ ok: true });
+    mockSavedAccountWords.mockImplementationOnce(() => {
+      throw new Error('no account');
+    });
+    render(<RecoveryWordsScreen />);
+
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('show-recovery-words'));
+    });
+
+    expect(screen.queryByTestId('recovery-words')).toBeNull();
+    expect(screen.queryByText('abandon')).toBeNull();
+    expect(screen.getByTestId('recovery-words-message')).toHaveTextContent(
+      'Your recovery words could not be read on this phone.',
+    );
   });
 
   it('keeps the words hidden when Face ID fails or is not in the build', async () => {

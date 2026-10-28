@@ -1,11 +1,13 @@
-// The account the app shows. Until words can be created or imported, it is
-// account 0 of Ghost's public test words.
-import { testWordsAccountZeroAddress } from 'ghost-core';
+// The account the app shows: account 0 of the account saved on this phone,
+// created or imported in onboarding. Never the public test words: if the
+// saved account cannot be read, there is no address, and Home and Receive
+// show none rather than one that is not this person's.
+import { savedAccountZeroAddress } from 'ghost-core';
 
-/** Its address, or null when this build has no native core. */
+/** Its address, or null when no saved account can be read in this build. */
 export function accountZeroAddress(): string | null {
   try {
-    return testWordsAccountZeroAddress();
+    return savedAccountZeroAddress();
   } catch {
     return null;
   }

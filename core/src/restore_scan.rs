@@ -129,6 +129,9 @@ pub enum RestoreError {
     BadState { index: u32, reason: String },
     /// No account has this index.
     NoSuchAccount { index: u64 },
+    /// The saved account could not be read (none is saved, or the Keychain
+    /// refused).
+    SavedAccount { reason: String },
 }
 
 impl fmt::Display for RestoreError {
@@ -139,6 +142,7 @@ impl fmt::Display for RestoreError {
             Self::Lookup { reason } => write!(f, "the account lookup failed: {reason}"),
             Self::BadState { index, reason } => write!(f, "the state of account {index} is malformed: {reason}"),
             Self::NoSuchAccount { index } => write!(f, "there is no account {index}"),
+            Self::SavedAccount { reason } => write!(f, "the saved account cannot be read: {reason}"),
         }
     }
 }
@@ -190,11 +194,33 @@ impl RestoreLookup {
         tip_height: u64,
         tip_hash: Vec<u8>,
     ) -> Result<Arc<Self>, RestoreError> {
-        let tip_hash: [u8; 32] = tip_hash
-            .as_slice()
-            .try_into()
-            .map_err(|_| RestoreError::BadTip { reason: "the block hash is not 32 bytes".to_owned() })?;
+        let tip_hash = tip_hash_bytes(&tip_hash)?;
         let seed = WalletSeed::from_words(&words)?;
+        Ok(Self::with_seed(seed, lookup, tip_height, tip_hash))
+    }
+
+    /// Starts a lookup of the account saved on this phone (the Keychain),
+    /// the same as [`RestoreLookup::new`] but without the words ever leaving
+    /// native code: the app's Home and Receive use this one.
+    #[uniffi::constructor]
+    pub fn saved_account(
+        lookup: Box<dyn AccountLookup>,
+        tip_height: u64,
+        tip_hash: Vec<u8>,
+    ) -> Result<Arc<Self>, RestoreError> {
+        let tip_hash = tip_hash_bytes(&tip_hash)?;
+        let seed =
+            crate::accounts::saved_seed().map_err(|error| RestoreError::SavedAccount { reason: error.to_string() })?;
+        Ok(Self::with_seed(seed, lookup, tip_height, tip_hash))
+    }
+}
+
+fn tip_hash_bytes(tip_hash: &[u8]) -> Result<[u8; 32], RestoreError> {
+    tip_hash.try_into().map_err(|_| RestoreError::BadTip { reason: "the block hash is not 32 bytes".to_owned() })
+}
+
+impl RestoreLookup {
+    fn with_seed(seed: WalletSeed, lookup: Box<dyn AccountLookup>, tip_height: u64, tip_hash: [u8; 32]) -> Arc<Self> {
         let state = State {
             seed,
             addresses: HashMap::new(),
@@ -202,9 +228,12 @@ impl RestoreLookup {
             next_index: 0,
             search_floor: u64::from(GAP_LIMIT),
         };
-        Ok(Arc::new(Self { lookup, tip_height, tip_hash, state: Mutex::new(state) }))
+        Arc::new(Self { lookup, tip_height, tip_hash, state: Mutex::new(state) })
     }
+}
 
+#[uniffi::export]
+impl RestoreLookup {
     /// Looks up the next account of the run from account 0 and returns it,
     /// or `None` once [`GAP_LIMIT`] unused accounts follow the last used one.
     /// An account already looked up with [`RestoreLookup::look_up_account`]

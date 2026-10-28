@@ -95,10 +95,51 @@ export function bigintToBytes(value: bigint): Uint8Array {
   return hexToBytes(hex);
 }
 
+/** The saved-account constructor of the generated RestoreLookup. */
+export type SavedRestoreBindings = {
+  RestoreLookup: {
+    savedAccount(lookup: CoreAccountLookup, tipHeight: bigint, tipHash: ArrayBuffer): CoreRestoreLookup;
+  };
+};
+
+type OpenLookup = (lookup: CoreAccountLookup, tipHeight: bigint, tipHash: ArrayBuffer) => CoreRestoreLookup;
+
 /** Account `index` of `words`, looked up by the core at the tip. */
-export async function lookUpAccountAtTip(
+export function lookUpAccountAtTip(
   bindings: RestoreBindings,
   words: string,
+  index: number,
+  tip: { height: number; hash: string },
+  fetchState: FetchAccountState,
+): Promise<AccountAtTip> {
+  return lookUpWith(
+    (lookup, tipHeight, tipHash) => new bindings.RestoreLookup(words, lookup, tipHeight, tipHash),
+    index,
+    tip,
+    fetchState,
+  );
+}
+
+/**
+ * Account `index` of the account saved on this phone, looked up by the core
+ * at the tip. The words stay in native code.
+ */
+export function lookUpSavedAccountAtTip(
+  bindings: SavedRestoreBindings,
+  index: number,
+  tip: { height: number; hash: string },
+  fetchState: FetchAccountState,
+): Promise<AccountAtTip> {
+  return lookUpWith(
+    (lookup, tipHeight, tipHash) => bindings.RestoreLookup.savedAccount(lookup, tipHeight, tipHash),
+    index,
+    tip,
+    fetchState,
+  );
+}
+
+async function lookUpWith(
+  open: OpenLookup,
   index: number,
   tip: { height: number; hash: string },
   fetchState: FetchAccountState,
@@ -113,7 +154,7 @@ export async function lookUpAccountAtTip(
       return answer.state;
     },
   };
-  const restore = new bindings.RestoreLookup(words, lookup, BigInt(tip.height), buffer(hexToBytes(tip.hash)));
+  const restore = open(lookup, BigInt(tip.height), buffer(hexToBytes(tip.hash)));
   try {
     const { address } = restore.deriveAccount(index);
     const blockHash = tip.hash.toLowerCase();
