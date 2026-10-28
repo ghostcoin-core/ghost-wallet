@@ -4,11 +4,13 @@
 // Rust crate in core/ (`ubrn build ios --and-generate`) and exist only in a
 // native build. Account words stay in native code: the only words this module
 // ever passes over are the fixed public test words.
+import { lookUpAccountAtTip, type AccountAtTip, type FetchAccountState, type RestoreBindings } from './account-lookup';
 import { TEST_WORDS } from './test-words';
 
 export { TEST_WORDS_ACCOUNT_ZERO } from './test-words';
+export type { AccountAtTip, FetchAccountState } from './account-lookup';
 
-type GhostCoreBindings = {
+type GhostCoreBindings = RestoreBindings & {
   accountZeroAddress(words: string): string;
 };
 
@@ -21,4 +23,22 @@ function bindings(): GhostCoreBindings {
 /** Account 0 address (rescue-key scheme 0x0003) of the fixed test words. */
 export function testWordsAccountZeroAddress(): string {
   return bindings().accountZeroAddress(TEST_WORDS);
+}
+
+/**
+ * Account `index` of the fixed test words at the node's tip, through the
+ * core's current-state lookup. `fetchState` asks the node for the address's
+ * balance and nonce at the tip's block hash.
+ */
+export function lookUpTestWordsAccount(
+  index: number,
+  tip: { height: number; hash: string },
+  fetchState: FetchAccountState,
+): Promise<AccountAtTip> {
+  return lookUpAccountAtTip(bindings(), TEST_WORDS, index, tip, fetchState);
+}
+
+/** The recovery words of the account shown: for now the fixed, public test words. */
+export function testRecoveryWords(): string[] {
+  return TEST_WORDS.split(' ');
 }
