@@ -36,11 +36,17 @@ const LIMITS = {
 /** Checks in the notes that are not user-facing limits but still fail a run. */
 const THRESHOLDS = {
   /**
-   * RandomX caches the worst-case stress run holds while it proves. The app
-   * releases the caches before a proof, so this is a stress case, not a
-   * requirement.
+   * RandomX caches the worst-case stress run held while it proved, when it
+   * synced headers: both keys' caches. The app releases the caches before a
+   * proof, so this is a stress case, not a requirement.
    */
   worstCaseCaches: 2,
+  /**
+   * RandomX caches the worst-case stress run holds while it proves now that
+   * it spot checks one header (its runs note `spotCheckCacheSeconds`): the
+   * spot check's one cache.
+   */
+  spotCheckWorstCaseCaches: 1,
 };
 
 /**
@@ -301,6 +307,8 @@ function keyNumbers(benchmark, notes) {
       add('proof bytes', 'proofBytes');
       break;
     case 'header-sync':
+      add('cache s', 'spotCheckCacheSeconds');
+      add('hash s', 'spotCheckHashSeconds');
       add('headers', 'syncedHeaders');
       add('headers/s', 'headersPerSecond');
       add('max caches', 'maxCacheCount');
@@ -330,6 +338,17 @@ function keyNumbers(benchmark, notes) {
       break;
   }
   return parts.length > 0 ? parts.join(', ') : '-';
+}
+
+/**
+ * The RandomX caches a worst-case run must hold through its proofs: the spot
+ * check's one when it spot checked a header, both keys' caches for an older
+ * run that synced headers.
+ */
+function worstCaseCaches(notes) {
+  return notes.spotCheckCacheSeconds !== undefined
+    ? THRESHOLDS.spotCheckWorstCaseCaches
+    : THRESHOLDS.worstCaseCaches;
 }
 
 /** Reasons in the notes that a check failed. */
@@ -369,10 +388,9 @@ function failedChecks(benchmark, notes) {
     if (notes.workerStress !== undefined && notes.workerStress !== 'true') {
       reasons.push(`workerStress ${notes.workerStress}: not run as the stress case`);
     }
-    if (int(notes.cacheCountBeforeProve) !== THRESHOLDS.worstCaseCaches) {
-      reasons.push(
-        `${notes.cacheCountBeforeProve ?? 'no'} RandomX caches held, not ${THRESHOLDS.worstCaseCaches}`,
-      );
+    const wanted = worstCaseCaches(notes);
+    if (int(notes.cacheCountBeforeProve) !== wanted) {
+      reasons.push(`${notes.cacheCountBeforeProve ?? 'no'} RandomX caches held, not ${wanted}`);
     }
   }
   // Kill points: every outcome that is not "ok..." lost or repeated a payment.
@@ -553,9 +571,9 @@ function resultLines(records, heading) {
 /** The stress benchmarks, and why their verdict asks for no PLAN change. */
 function stressLines() {
   return [
-    `- worst-case is a ${STRESS_LABEL}: it holds ${THRESHOLDS.worstCaseCaches} RandomX caches while it proves, ` +
-      'which the app avoids by releasing the caches before a proof; its verdict asks for no PLAN change ' +
-      'and does not fail the phone',
+    `- worst-case is a ${STRESS_LABEL}: it holds the spot check's RandomX cache while it proves ` +
+      `(${THRESHOLDS.worstCaseCaches} caches in older runs that synced headers), which the app avoids ` +
+      'by freeing the cache before a proof; its verdict asks for no PLAN change and does not fail the phone',
   ];
 }
 

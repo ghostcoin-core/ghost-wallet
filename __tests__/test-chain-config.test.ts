@@ -3,7 +3,7 @@ import path from 'path';
 
 // The node benchmarks' chain settings: the compiled values in
 // TestChainConfig.swift stay as shipped, and a local test chain changes them
-// only through test-only UserDefaults overrides that the simulator script sets.
+// only through test-only UserDefaults overrides that the scripts set.
 const ROOT = path.join(__dirname, '..');
 const CONFIG = 'modules/ghost-bench/ios/Benchmarks/TestChainConfig.swift';
 
@@ -12,13 +12,11 @@ function read(relative: string): string {
 }
 
 const OVERRIDES = {
-  blockTime: 'benchTestChain.blockTime',
-  futureDrift: 'benchTestChain.futureDrift',
-  genesisRlpHex: 'benchTestChain.genesisRlpHex',
   restoreAccountsExpected: 'benchTestChain.restoreAccountsExpected',
-  checkpoint: 'benchTestChain.checkpoint',
-  backgroundWaitSeconds: 'benchTestChain.backgroundWaitSeconds',
 };
+
+// Overrides earlier versions read, for the header sync the phone no longer runs.
+const RETIRED = ['blockTime', 'futureDrift', 'genesisRlpHex', 'checkpoint', 'backgroundWaitSeconds'];
 
 // The body of `enum <name> { ... }` in the Swift source.
 function enumBody(source: string, name: string): string {
@@ -47,21 +45,29 @@ function getterBody(source: string, name: string): string {
   throw new Error(`${name} is not closed`);
 }
 
+// The body of `static func <name>(...) ... { ... }` in the Swift source.
+function funcBody(source: string, name: string): string {
+  const start = source.indexOf(`static func ${name}(`);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    if (source[i] === '}' && --depth === 0) return source.slice(open + 1, i);
+  }
+  throw new Error(`${name} is not closed`);
+}
+
 describe('TestChainConfig.swift', () => {
   const source = read(CONFIG);
 
-  it('keeps the compiled defaults: block time 30, future drift 30, nothing pinned', () => {
+  it('keeps the compiled default: no restore accounts expected', () => {
     const compiled = enumBody(source, 'Compiled');
-    expect(compiled).toMatch(/static let blockTime: UInt64 = 30\n/);
-    expect(compiled).toMatch(/static let futureDrift: UInt64 = 30\n/);
     expect(compiled).toMatch(/static let restoreAccountsExpected = 0\n/);
-    expect(compiled).toContain('static let start: Start = .genesis(rlpHex: "")');
-    expect(compiled).toMatch(/static let backgroundWaitSeconds: Double = 180\n/);
-    expect(compiled).not.toMatch(/checkpoint|[bB]irthday/);
-    expect(source).toContain('static let halfLife: UInt64 = 3600');
+    expect(compiled).not.toMatch(/checkpoint|[bB]irthday|start/);
   });
 
-  it('declares exactly the six override keys, with no restore start among them', () => {
+  it('declares exactly the one override key, and none of the header sync ones', () => {
     expect(source).not.toMatch(/[bB]irthday/);
     const keys = enumBody(source, 'OverrideKey');
     const declared = [...keys.matchAll(/static let (\w+) = "([^"]+)"/g)].map(([, name, key]) => [
@@ -72,51 +78,26 @@ describe('TestChainConfig.swift', () => {
     for (const key of Object.values(OVERRIDES)) {
       expect(source.split(`"${key}"`)).toHaveLength(2);
     }
+    for (const retired of RETIRED) {
+      expect(source).not.toContain(`benchTestChain.${retired}`);
+    }
   });
 
-  it('falls back to the compiled value for each overridable setting', () => {
-    expect(getterBody(source, 'blockTime')).toMatch(
-      /overrideCount\(OverrideKey\.blockTime\)[\s\S]*\?\? Compiled\.blockTime/,
-    );
-    expect(getterBody(source, 'futureDrift')).toMatch(
-      /overrideCount\(OverrideKey\.futureDrift\)[\s\S]*\?\? Compiled\.futureDrift/,
-    );
+  it('pins the spot check minimum difficulty at the test chain floor', () => {
+    expect(source).toContain('static let spotCheckMinDifficulty: UInt64 = 1\n');
+  });
+
+  it('falls back to the compiled value', () => {
     expect(getterBody(source, 'restoreAccountsExpected')).toMatch(
       /overrideCount\(OverrideKey\.restoreAccountsExpected\)[\s\S]*\?\? Compiled\.restoreAccountsExpected/,
     );
-    expect(getterBody(source, 'backgroundWaitSeconds')).toMatch(
-      /overrideCount\(OverrideKey\.backgroundWaitSeconds\)[\s\S]*\?\? Compiled\.backgroundWaitSeconds/,
-    );
-    const start = getterBody(source, 'start');
-    expect(start).toContain('overrideString(OverrideKey.genesisRlpHex)');
-    expect(start).toContain('return Compiled.start');
-  });
-
-  it('takes a checkpoint override before the genesis one and refuses one that does not decode', () => {
-    const start = getterBody(source, 'start');
-    const checkpoint = start.indexOf('overrideString(OverrideKey.checkpoint)');
-    expect(checkpoint).toBeGreaterThanOrEqual(0);
-    expect(checkpoint).toBeLessThan(start.indexOf('OverrideKey.genesisRlpHex'));
-    expect(start).toContain('return try checkpoint(fromJson: json)');
-    expect(start).toMatch(/object\(forKey: OverrideKey\.checkpoint\) != nil \{\s*throw/);
-    const json = source.slice(source.indexOf('struct CheckpointJson'), source.indexOf('enum Compiled'));
-    for (const field of ['rlpHex: String', 'height: UInt64', 'totalWorkHex: String', 'genesisTimestamp: UInt64']) {
-      expect(json).toContain(`let ${field}`);
-    }
-    expect(json).toContain('let keyBlocks: [KeyBlock]');
-    expect(json).toContain('let hashHex: String');
-    const parse = source.slice(source.indexOf('static func checkpoint(fromJson'));
-    expect(parse).toMatch(/catch \{\s*throw OverrideError\.badCheckpoint/);
   });
 
   it('reads every override from UserDefaults only', () => {
-    expect(getterBody(source, 'blockTime')).not.toMatch(/UserDefaults|ProcessInfo|Bundle/);
-    for (const reader of ['overrideCount', 'overrideString']) {
-      const body = source.slice(source.indexOf(`func ${reader}(`));
-      const fn = body.slice(0, body.indexOf('\n  }\n'));
-      expect(fn).toContain('UserDefaults.standard.');
-      expect(fn).toMatch(/forKey: key\)/);
-    }
+    const body = source.slice(source.indexOf('func overrideCount('));
+    const fn = body.slice(0, body.indexOf('\n  }\n'));
+    expect(fn).toContain('UserDefaults.standard.');
+    expect(fn).toMatch(/forKey: key\)/);
     expect(source).not.toMatch(/ProcessInfo|environment|arguments|Bundle\.main|infoDictionary/);
     expect(source).not.toMatch(/\.set\(|setValue|register\(defaults/);
   });
@@ -130,43 +111,45 @@ describe('the node benchmarks', () => {
   const headerSync = read('modules/ghost-bench/ios/Benchmarks/HeaderSyncBenchmark.swift');
   const restore = read('modules/ghost-bench/ios/Benchmarks/RestoreBenchmark.swift');
   const worstCase = read('modules/ghost-bench/ios/Benchmarks/WorstCaseBenchmark.swift');
+  const benchmarks = { headerSync, restore, worstCase };
 
-  it('fail when the header after a checkpoint does not link to it', () => {
-    const fromCheckpoint = headerSync.slice(headerSync.indexOf('case .checkpoint(let rlpHex'));
-    expect(fromCheckpoint).toMatch(
-      /HeaderSync\.fromCheckpoint\([\s\S]*try checkLinksToCheckpoint\(sync: sync, height: height, node: node\)\s*return sync/,
-    );
-    const check = headerSync.slice(headerSync.indexOf('static func checkLinksToCheckpoint'));
-    expect(check).toContain('node.headers(from: height + 1, through: height + 1)');
-    expect(check).toMatch(/guard parent == sync\.bestHash\(\) else \{\s*throw HeaderSyncBenchmarkError\.notLinkedToCheckpoint/);
+  it('never run the header sync', () => {
+    for (const [name, source] of Object.entries(benchmarks)) {
+      for (const call of [
+        'HeaderSync.',
+        'HeaderSync(',
+        'startRun(',
+        'addHeaders(',
+        'syncThrough(',
+        'makeSync(',
+        'releaseCaches(',
+        'waitForBackgroundRoundTrip',
+        'didEnterBackgroundNotification',
+      ]) {
+        expect([name, source.includes(call)]).toEqual([name, false]);
+      }
+    }
+    expect(headerSync).not.toMatch(/context\.stage\("(sync|resume)"\)/);
   });
 
-  // The restore's run function, without the header check and lookup classes.
+  // The restore's run function, without the account lookup class.
   const restoreRun = restore.slice(
     restore.indexOf('static func run(_ context: BenchContext)'),
-    restore.indexOf('final class BackgroundHeaderCheck'),
-  );
-  const headerCheck = restore.slice(
-    restore.indexOf('final class BackgroundHeaderCheck'),
     restore.indexOf('final class NodeAccountLookup'),
   );
 
   it("restore looks up each account at the node's tip at once, with no start height", () => {
     expect(restore).not.toMatch(/[bB]irthday|scannedFrom|firstHeight|feedBlock|eth_getBlockByNumber|eth_getTransactionReceipt/);
-    // The tip is the node's, taken before any header is checked.
     expect(restoreRun).toContain('let tip = try node.latestBlock()');
-    expect(restoreRun).not.toMatch(/makeSync|syncThrough|startRun|bestHeight|bestHash|blockNumber/);
+    expect(restoreRun).not.toMatch(/bestHeight|bestHash|blockNumber|spotCheck|SpotCheck/);
     expect(restoreRun).toMatch(
       /RestoreLookup\(\s*words: testWords, lookup: NodeAccountLookup\(url: url\), tipHeight: tip\.height,\s*tipHash: tip\.hash\)/,
     );
-    const tip = restoreRun.indexOf('let tip = try node.latestBlock()');
-    const start = restoreRun.indexOf('headerCheck.start(height: tip.height, hash: tip.hash)');
-    expect(start).toBeGreaterThan(tip);
-    expect(start).toBeLessThan(restoreRun.indexOf('try RestoreLookup('));
     expect(restoreRun).toMatch(/while let account = next \{[\s\S]*next = try lookup\.lookUpNext\(\)/);
     const latest = headerSync.slice(headerSync.indexOf('func latestBlock()'));
-    expect(latest).toContain('"method": "eth_getBlockByNumber", "params": ["latest", false]');
     expect(latest).toMatch(/hash\.count == 32/);
+    expect(headerSync).toContain('"method": "eth_getBlockByNumber", "params": [tag, false]');
+    expect(headerSync).toContain('try blockObject("latest", name: "latest block")');
     const lookup = restore.slice(restore.indexOf('final class NodeAccountLookup: AccountLookup'));
     expect(lookup).toContain('func accountState(address: Data, blockHash: Data) throws -> AccountState');
     expect(lookup).toContain('"blockHash": "0x" + Hex.encode(blockHash), "requireCanonical": true');
@@ -194,102 +177,107 @@ describe('the node benchmarks', () => {
     );
   });
 
-  it('restore shows first balance, lookup and header check as separate stages', () => {
-    // "first balance" runs inside "lookup", both from the start of the run.
+  it('restore shows first balance and lookup as its only stages', () => {
     const lookupStage = restoreRun.indexOf('try context.stage("lookup")');
     const firstStage = restoreRun.indexOf('try context.stage("first balance")');
     expect(lookupStage).toBeGreaterThanOrEqual(0);
     expect(firstStage).toBeGreaterThan(lookupStage);
     expect(firstStage).toBeLessThan(restoreRun.indexOf('let tip = try node.latestBlock()'));
     expect(restoreRun.indexOf('let restoreStart')).toBeLessThan(lookupStage);
-    expect(restoreRun).not.toMatch(/context\.stage\("(sync|derive|header check)"\)/);
-    expect(headerCheck).toContain('try context.stage("header check")');
+    expect([...restore.matchAll(/context\.stage\("([^"]+)"\)/g)].map((m) => m[1])).toEqual([
+      'lookup',
+      'first balance',
+    ]);
   });
 
-  it('restore runs the header check on its own thread, in its own budgeted run, up to the lookup block', () => {
-    expect(headerCheck).toMatch(/DispatchQueue\.global\(qos: \.\w+\)\.async \{/);
-    expect(headerCheck).toMatch(
-      /sync\.startRun\(\s*budget: HeaderSyncBenchmark\.runBudget, conditions: HeaderSyncBenchmark\.conditions\(\)\)/,
+  it('restore shows its result once the balances are in, with no header check and no wait', () => {
+    expect(restore).not.toMatch(/lookupBlockVerified|BackgroundHeaderCheck|headerCheck\./);
+    expect(restoreRun).not.toMatch(/\.wait\(|DispatchQueue|DispatchGroup|DispatchSemaphore/);
+    expect(restore).not.toMatch(/headerCheckFailed|lookupBlockNotOnCheckedChain/);
+    expect(restoreRun).toContain('context.note("headerCheck", "none")');
+  });
+
+  it('header-sync spot checks the tip once and notes its timings, memory and heat', () => {
+    expect(headerSync).toContain('static let name = "header-sync"');
+    const run = funcBody(headerSync, 'run');
+    expect(run).toContain('try context.stage("fetch") { try fetchTip(node: node, context: context) }');
+    expect(run).toMatch(
+      /try context\.stage\("spot check"\) \{\s*try spotCheckHeader\(\s*header: tip\.header, keyBlockHash: tip\.keyBlockHash,\s*minDifficulty: minDifficulty\(\)\)/,
     );
-    expect(headerCheck).toMatch(/HeaderSyncBenchmark\.syncThrough\(\s*height, sync: sync, run: run/);
-    expect(headerCheck).toContain('return sync.bestHeight() == height && sync.bestHash() == hash');
-    // The lookup never waits for it: the only waits come after every balance.
-    const waits = [...restoreRun.matchAll(/headerCheck\.wait\(\)/g)].map((m) => m.index!);
-    expect(waits).toHaveLength(2);
-    const lastBalance = restoreRun.indexOf('next = try lookup.lookUpNext()');
-    for (const at of waits) expect(at).toBeGreaterThan(lastBalance);
-    // A failed lookup stops the header run before waiting for it.
-    expect(restoreRun).toMatch(/\} catch \{[\s\S]*headerCheck\.cancel\(\)\s*_ = headerCheck\.wait\(\)\s*throw error/);
+    expect(run.match(/spotCheckHeader\(/g)).toHaveLength(1);
+    const notes = funcBody(headerSync, 'noteSpotCheck');
+    expect(notes).toContain('context.note("spotCheckCacheSeconds", String(format: "%.3f", report.cacheSeconds))');
+    expect(notes).toContain('context.note("spotCheckHashSeconds", String(format: "%.3f", report.hashSeconds))');
+    const device = funcBody(headerSync, 'noteDevice');
+    expect(device).toContain('context.note("peakResidentBytes", String(memory.residentPeakBytes))');
+    expect(device).toContain('context.note("thermalState", Metrics.thermalName(Metrics.thermalState()))');
+    // headerBudgetOk is written only once the check has passed, last.
+    const budget = run.indexOf('context.note("headerBudgetOk", "true")');
+    expect(budget).toBeGreaterThan(run.indexOf('try requirePassed(report, tip: tip)'));
+    expect(run.slice(budget, run.indexOf('#else')).trim()).toBe('context.note("headerBudgetOk", "true")');
   });
 
-  it('restore notes lookupBlockVerified and fails unless it is yes', () => {
-    const pending = restoreRun.indexOf('context.note("lookupBlockVerified", "pending")');
-    expect(pending).toBeGreaterThanOrEqual(0);
-    expect(pending).toBeLessThan(restoreRun.indexOf('let restoreStart'));
-    expect(restoreRun).toContain('case .success(true)?: context.note("lookupBlockVerified", "yes")');
-    expect(restoreRun).toContain('case .success(false)?: context.note("lookupBlockVerified", "no")');
-    const verdict = restoreRun.slice(restoreRun.lastIndexOf('switch verified {'));
-    expect(verdict).toMatch(/case \.success\(true\)\?: break\n/);
-    expect(verdict).toMatch(/case \.success\(false\)\?:\s*throw RestoreBenchmarkError\.lookupBlockNotOnCheckedChain/);
-    expect(verdict).toMatch(/case \.failure\(let error\)\?:\s*throw RestoreBenchmarkError\.headerCheckFailed/);
-    expect(verdict).toMatch(/case nil:\s*throw RestoreBenchmarkError\.headerCheckFailed/);
+  it("header-sync keys the check with the tip's key block and fails on a header it did not ask for", () => {
+    const fetch = funcBody(headerSync, 'fetchTip');
+    expect(fetch).toContain('let keyHeight = spotCheckSeedHeight(height: latest.height)');
+    expect(fetch).toContain('let keyHash = try node.blockHash(at: keyHeight)');
+    expect(fetch).toMatch(/guard latest\.height > 0 else \{\s*throw HeaderSyncBenchmarkError\.noSealedTip/);
+    const passed = funcBody(headerSync, 'requirePassed');
+    expect(passed).toMatch(/guard report\.height == tip\.height else \{\s*throw/);
+    expect(passed).toMatch(/guard report\.hash == tip\.hash else \{\s*throw HeaderSyncBenchmarkError\.hashMismatch/);
+    expect(passed).toMatch(/guard report\.passed else \{\s*throw HeaderSyncBenchmarkError\.spotCheckFailed/);
+    expect(funcBody(headerSync, 'minDifficulty')).toContain('TestChainConfig.spotCheckMinDifficulty.bigEndian');
   });
 
-  it('worst-case still fails unless it holds 2 caches', () => {
-    expect(worstCase).toContain('static let wantedCaches: UInt64 = 2');
-    expect(worstCase).toMatch(/guard before == wantedCaches else \{\s*throw WorstCaseBenchmarkError\.cachesNotLoaded/);
+  it('worst-case holds one spot-check cache through its proofs, with no header sync', () => {
+    expect(worstCase).toContain('static let wantedCaches: UInt64 = 1');
+    const run = funcBody(worstCase, 'run');
+    expect(run).toContain('let key = try SpotCheckKey(keyBlockHash: tip.keyBlockHash)');
+    expect(run).toMatch(/guard before == wantedCaches else \{\s*throw WorstCaseBenchmarkError\.cacheNotHeld/);
+    const firstProof = run.indexOf('proveTestSummon()');
+    const release = run.indexOf('key.release()');
+    expect(run.indexOf('SpotCheckKey(')).toBeLessThan(firstProof);
+    expect(release).toBeGreaterThan(run.indexOf('throw WorstCaseBenchmarkError.notVerified(index)'));
+    expect(run).toMatch(/guard key\.isHeld\(\) else \{\s*throw WorstCaseBenchmarkError\.cacheNotHeld/);
+    expect(run.match(/release\(\)/g)).toHaveLength(1);
+    // Any tip above block 0 will do: no second RandomX key is needed.
+    expect(worstCase).not.toMatch(/8449|8192|cachesNotLoaded/);
   });
 
-  it('worst-case is noted as the stress case and releases the caches after its proofs', () => {
+  it('worst-case is noted as the stress case', () => {
     expect(worstCase).toContain('context.note("workerStress", "true")');
     expect(worstCase).toContain('static let kind = "stress benchmark only"');
-    const lastProof = worstCase.indexOf('throw WorstCaseBenchmarkError.notVerified(index)');
-    expect(worstCase.indexOf('sync.releaseCaches()')).toBeGreaterThan(lastProof);
-  });
-
-  it('header-sync checks headers in budgeted runs and resumes from the saved state', () => {
-    expect(headerSync).toContain('static let runBudget = RunBudget(');
-    expect(headerSync.match(/sync\.startRun\(budget: runBudget, conditions: conditions\(\)\)/g)).toHaveLength(2);
-    // The thermal state and Low Power Mode come from the phone before each batch.
-    expect(headerSync).toContain('info.isLowPowerModeEnabled');
-    expect(headerSync).toMatch(/run\.setConditions\(conditions: conditions\(\)\)\s*let checkStart/);
-    expect(headerSync).not.toContain('sync.addHeaders(');
-    // The caches are released between the stages, so resume rebuilds the chain.
-    const release = headerSync.indexOf('sync.releaseCaches()');
-    expect(release).toBeGreaterThan(headerSync.indexOf('try context.stage("sync")'));
-    expect(release).toBeLessThan(headerSync.indexOf('try context.stage("resume")'));
-    expect(headerSync.indexOf('sync.allowCaches()')).toBeGreaterThan(release);
-    // headerBudgetOk is true only once both runs are done, false on a budget stop.
-    expect(headerSync.indexOf('context.note("headerBudgetOk", "true")')).toBeGreaterThan(
-      headerSync.indexOf('try context.stage("resume")'),
-    );
-    expect(headerSync).toMatch(/case \.cpuBudget, \.headerBudget, \.byteBudget: context\.note\("headerBudgetOk", "false"\)/);
-  });
-
-  it('header-sync waits for the background for the configured time', () => {
-    expect(headerSync).toContain('entered.wait(timeout: .now() + TestChainConfig.backgroundWaitSeconds)');
+    expect(worstCase).toContain('HeaderSyncBenchmark.noteSpotCheck(report, context: context)');
   });
 });
 
 describe('scripts/sim-test.sh', () => {
   const script = read('scripts/sim-test.sh');
 
-  it('writes the node URL and every override into the simulator for the node benchmarks', () => {
+  it('writes the node URL and the restore override into the simulator for the node benchmarks', () => {
     expect(script).toContain('NODE_BENCHES="header-sync restore worst-case"');
     expect(script).toMatch(/xcrun simctl spawn "\$udid" defaults write "\$APP_ID"/);
     expect(script).toContain('APP_ID=com.ghostcoin.wallet');
     expect(script).toContain('sim_defaults benchNodeUrl -string "http://127.0.0.1:$TEST_CHAIN_PORT"');
-    expect(script).toContain(`sim_defaults ${OVERRIDES.blockTime} -int 1\n`);
-    expect(script).toContain(`sim_defaults ${OVERRIDES.futureDrift} -int 3600\n`);
-    expect(script).toContain(`sim_defaults ${OVERRIDES.genesisRlpHex} -string "$genesis_rlp"`);
     expect(script).toContain(`sim_defaults ${OVERRIDES.restoreAccountsExpected} -int 3\n`);
   });
 
-  it('starts the test chain and waits past the second RandomX key first', () => {
+  it('passes only what the benchmarks still read, and clears the retired overrides', () => {
+    expect([...script.matchAll(/^\s*sim_defaults (\S+)/gm)].map((m) => m[1])).toEqual([
+      'benchNodeUrl',
+      OVERRIDES.restoreAccountsExpected,
+    ]);
+    expect(script).toContain(`for unread in ${RETIRED.join(' ')}; do`);
+    expect(script).toContain('sim_defaults_delete "benchTestChain.$unread"');
+    expect(script).not.toMatch(/HEADER_SYNC_WINDOW|WORST_CASE_CHECKPOINT|BACKGROUND_WAIT|test-chain\.sh (checkpoint|genesis)|FULL/);
+  });
+
+  it('starts the test chain and waits past the test accounts funding first', () => {
     expect(script).toContain('bash scripts/test-chain.sh start');
     expect(script).toContain('bash scripts/test-chain.sh wait "$TEST_CHAIN_HEIGHT"');
     const height = Number(/^TEST_CHAIN_HEIGHT=(\d+)$/m.exec(script)?.[1]);
-    expect(height).toBeGreaterThan(8449);
+    expect(height).toBeGreaterThan(5);
+    expect(height).toBeLessThan(8449);
     expect(script).toMatch(/^TEST_CHAIN_PORT=8547$/m);
     const start = script.indexOf('bash scripts/test-chain.sh start');
     const install = script.indexOf('xcrun simctl install');
@@ -300,50 +288,14 @@ describe('scripts/sim-test.sh', () => {
     expect(write).toBeLessThan(run);
   });
 
-  it('gives node benchmarks 90 minutes and passes BENCH and TIMEOUT to the flow', () => {
-    expect(script).toMatch(/^NODE_BENCH_TIMEOUT_MS=5400000$/m);
+  it('gives node benchmarks 20 minutes and passes BENCH and TIMEOUT to the flow', () => {
+    expect(script).toMatch(/^NODE_BENCH_TIMEOUT_MS=1200000$/m);
     expect(script).toContain('-e BENCH="$bench" -e TIMEOUT="$timeout_ms"');
     expect(script).toMatch(/^BENCHES="\$\{BENCHES:-[^}]*\}"$/m);
   });
 
-  it('starts worst-case from a checkpoint below the second key, so its sync crosses the key change', () => {
-    const checkpoint = Number(/^WORST_CASE_CHECKPOINT=(\d+)$/m.exec(script)?.[1]);
-    expect(checkpoint).toBe(8000);
-    expect(checkpoint).toBeLessThan(8449);
-    expect(script).toMatch(/worst-case\) checkpoint_height="\$WORST_CASE_CHECKPOINT" ;;/);
-  });
-
-  it('checks header-sync and restore headers from 1,000 blocks below the tip', () => {
-    expect(script).toMatch(/^HEADER_SYNC_WINDOW=1000$/m);
-    expect(script).toMatch(
-      /header-sync \| restore\)\s*tip="\$\(bash scripts\/test-chain\.sh height\)"\s*checkpoint_height=\$\(\(tip - HEADER_SYNC_WINDOW\)\)/,
-    );
-  });
-
   it('gives restore no start height and no late funding', () => {
     expect(script).not.toMatch(/[bB]irthday|BIRTHDAY|fund-late/);
-  });
-
-  it('writes each node benchmark its checkpoint right before it runs', () => {
-    expect(script).toContain('checkpoint="$(bash scripts/test-chain.sh checkpoint "$checkpoint_height")"');
-    expect(script).toContain(`sim_defaults ${OVERRIDES.checkpoint} -string "$checkpoint"`);
-    const loop = script.slice(script.indexOf('for bench in $BENCHES; do\n  echo "==> benchmark'));
-    expect(loop.indexOf('set_bench_start "$bench"')).toBeGreaterThan(0);
-    expect(loop.indexOf('set_bench_start "$bench"')).toBeLessThan(loop.indexOf('maestro --device'));
-    // A benchmark never inherits the previous one's start.
-    const setStart = script.slice(script.indexOf('set_bench_start() {'));
-    expect(setStart).toMatch(
-      /sim_defaults_delete benchTestChain\.checkpoint\s*\[ "\$FULL" = 1 \] && return/,
-    );
-  });
-
-  it('waits 10 seconds for the background, and keeps FULL=1 from genesis as before', () => {
-    expect(script).toMatch(/^BACKGROUND_WAIT_SECONDS=10$/m);
-    expect(script).toContain(`sim_defaults ${OVERRIDES.backgroundWaitSeconds} -int "$BACKGROUND_WAIT_SECONDS"`);
-    expect(script).toMatch(/^FULL="\$\{FULL:-0\}"$/m);
-    expect(script).toMatch(
-      /if \[ "\$FULL" = 1 \]; then[^\n]*\n[^\n]*\n\s*sim_defaults_delete benchTestChain\.backgroundWaitSeconds\n\s*else/,
-    );
   });
 });
 
@@ -359,20 +311,21 @@ describe('scripts/phone-launch.sh', () => {
     expect(script).toContain('On the phone, tap \\"$BENCH\\" on the bench screen, then Run.');
   });
 
-  it('passes the node on the LAN and each override as a launch argument', () => {
-    expect(script).toContain('-benchNodeUrl "http://$lan_ip:$TEST_CHAIN_PORT"');
-    expect(script).toContain(`-${OVERRIDES.checkpoint} "$checkpoint"`);
-    expect(script).toContain(`-${OVERRIDES.genesisRlpHex} "$genesis_rlp"`);
-    expect(script).toContain(`-${OVERRIDES.blockTime} 1\n`);
-    expect(script).toContain(`-${OVERRIDES.futureDrift} 3600\n`);
-    expect(script).toContain(`-${OVERRIDES.restoreAccountsExpected} 3\n`);
+  it('passes only the node on the LAN and the restore override as launch arguments', () => {
+    const args = script.slice(script.indexOf('args+=('), script.indexOf(')', script.indexOf('args+=(') + 7));
+    expect(args).toContain('-benchNodeUrl "http://$lan_ip:$TEST_CHAIN_PORT"');
+    expect(args).toContain(`-${OVERRIDES.restoreAccountsExpected} 3\n`);
+    expect([...args.matchAll(/^\s*-(\S+)/gm)].map((m) => m[1])).toEqual([
+      'benchNodeUrl',
+      OVERRIDES.restoreAccountsExpected,
+    ]);
+    for (const retired of RETIRED) {
+      expect(script).not.toContain(`benchTestChain.${retired}`);
+    }
     expect(script).not.toMatch(/[bB]irthday|BIRTHDAY|fund-late/);
-    expect(script).toMatch(
-      /header-sync \| restore\)\s*tip="\$\(bash scripts\/test-chain\.sh height\)"\s*checkpoint_height=\$\(\(tip - HEADER_SYNC_WINDOW\)\)/,
-    );
+    expect(script).not.toMatch(/HEADER_SYNC_WINDOW|WORST_CASE_CHECKPOINT|test-chain\.sh (checkpoint|genesis)/);
     expect(script).toMatch(/^TEST_CHAIN_PORT=8547$/m);
-    expect(script).toMatch(/^WORST_CASE_CHECKPOINT=8000$/m);
-    expect(script).toMatch(/^HEADER_SYNC_WINDOW=1000$/m);
+    expect(Number(/^TEST_CHAIN_HEIGHT=(\d+)$/m.exec(script)?.[1])).toBeLessThan(8449);
   });
 });
 

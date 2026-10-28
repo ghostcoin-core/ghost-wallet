@@ -106,7 +106,7 @@ The header-sync, restore and worst-case benchmarks need a Ghost node.
 
 ```sh
 bash scripts/test-chain.sh start             # build ghost-node, init, mine, fund the test wallet
-bash scripts/test-chain.sh wait 8600         # block until the chain reaches a height
+bash scripts/test-chain.sh wait 100          # block until the chain reaches a height
 bash scripts/test-chain.sh genesis           # print the block 0 RLP
 bash scripts/test-chain.sh height            # print the tip height
 bash scripts/test-chain.sh checkpoint 8000   # print the checkpoint JSON of block 8000
@@ -134,61 +134,47 @@ namespaces; `genesis` reads block 0 through the node's local IPC socket. The fir
 and 7 of the counting-bytes test words. The chain is kept between runs.
 
 When `BENCHES` names a node benchmark, `scripts/sim-test.sh` starts the chain,
-waits for height 8600 (worst-case needs the second RandomX key, at 8449), and
-writes the node URL and these test-only overrides into the simulator's
-UserDefaults for `com.ghostcoin.wallet`:
+waits for height 100 (past the test accounts' funding), and writes the node
+URL and the one test-only override the benchmarks read into the simulator's
+UserDefaults for `com.ghostcoin.wallet`; it removes the overrides older
+versions wrote for the header sync:
 
 | Key | Value |
 | --- | --- |
 | `benchNodeUrl` | `http://127.0.0.1:8547` |
-| `benchTestChain.blockTime` | `1` |
-| `benchTestChain.futureDrift` | `3600` (the miner runs up to an hour ahead) |
-| `benchTestChain.genesisRlpHex` | the node's block 0 RLP |
 | `benchTestChain.restoreAccountsExpected` | `3` |
-| `benchTestChain.backgroundWaitSeconds` | `10` (not set with `FULL=1`) |
-| `benchTestChain.checkpoint` | per benchmark, below (not set with `FULL=1`) |
 
-The compiled values in `TestChainConfig.swift` (block time 30, future drift
-30, genesis start, 180-second background wait) are unchanged,
-and are used whenever an override is not set. Each node benchmark gets 90
-minutes.
+The compiled value in `TestChainConfig.swift` (no accounts expected) is used
+when the override is not set. Each node benchmark gets 20 minutes.
 
-Checking every header from block 0 runs at about 4.6 headers a second in the
-simulator (RandomX interpreted, as iOS requires), so a run from genesis takes
-30 to 50 minutes. The app itself starts from genesis or a published
-checkpoint, so by default each node benchmark starts from a checkpoint the
-script makes from the node's chain just before it runs:
+The phone does not check the chain's headers one after another, not even in
+the background: one RandomX hash costs seconds there, after minutes of cache
+setup. It spot checks one header now and then instead, and every node
+benchmark shows its numbers at once:
 
-- **header-sync** from 1,000 blocks below the tip, so it measures speed over
-  1,000 checked headers;
-- **worst-case** from height 8000, below the second key's first use at 8449:
-  its sync still crosses the key change and holds both RandomX caches while it
-  proves, and it fails as before if it never holds 2;
-- **restore** from 1,000 blocks below the tip too, far above the blocks that
-  funded the test accounts. The checkpoint only anchors the header check: the
-  restore derives the accounts from the words and asks the node for each
-  one's balance and nonce at the checked tip's block hash, reporting each
+- **header-sync** (the name is kept for the scripts and flows) spot checks the
+  node's tip once: it fetches the tip's header and the hash of its key block,
+  and the native core's `spot_check_header` builds that key block's RandomX
+  cache, hashes the header once, checks the hash against the header's
+  difficulty and that difficulty against a minimum (here the test chain's
+  floor, 1; a release pins its own), and frees the cache. It records
+  `spotCheckCacheSeconds`, `spotCheckHashSeconds`, peak memory and the
+  thermal state, and `headerBudgetOk` `true` when it finishes;
+- **worst-case** holds one spot-check cache (the core's `SpotCheckKey`) while
+  three Summon proofs run, as a stress case only. Any tip above block 0 will
+  do: it needs no second RandomX key;
+- **restore** derives the accounts from the words and asks the node for each
+  one's balance and nonce at the node's tip block hash, reporting each
   balance as it arrives, until 20 unused accounts follow the last used one.
-  It downloads no block or receipt, so accounts funded before the checkpoint,
-  paid by a contract or paid a mining reward are all found. It records
-  `timeToFirstBalanceSeconds`, `restoreSeconds`, `accountsFound`,
-  `accountsExpected` and `scanComplete`.
+  It checks no header and waits for nothing else. It downloads no block or
+  receipt, so accounts funded long ago, paid by a contract or paid a mining
+  reward are all found. It records `timeToFirstBalanceSeconds`,
+  `restoreSeconds`, `accountsFound`, `accountsExpected` and `scanComplete`.
 
-The header after a checkpoint must link to the checkpoint's hash, or the run
-fails; every header after it gets the full proof-of-work and difficulty check.
-
-Use the default for everyday runs:
+The core's `HeaderSync` stays in place for the app; no benchmark runs it.
 
 ```sh
 BENCHES="dummy summon kill-recovery header-sync restore worst-case" bash scripts/sim-test.sh
-```
-
-Use `FULL=1` for a final confirmation before relying on a result: it runs the
-node benchmarks from genesis with the 180-second background
-wait, exactly as before checkpoints (30 to 50 minutes each):
-
-```sh
-FULL=1 BENCHES="header-sync restore worst-case" bash scripts/sim-test.sh
 ```
 
 ### Run a benchmark on the iPhone
@@ -203,12 +189,10 @@ GHOST_WALLET_DEVICE=<udid> bash scripts/phone-launch.sh header-sync
 It launches the app at the bench screen with `xcrun devicectl device process
 launch --payload-url ghostwallet://bench`, passing the node URL
 (`http://<the Mac's LAN address>:8547`; set `GHOST_WALLET_LAN_IP` if en0 and
-en1 have none) and the same overrides and checkpoint as the simulator run as
-launch arguments, which iOS puts in UserDefaults' argument domain for that
-launch only. It then prints which benchmark to tap. The background wait keeps
-its 180 seconds there, so header-sync's resume can be tried by leaving the app
-and coming back. Any other use of the phone during a run can suspend the app
-and lose the run.
+en1 have none) and the same override as the simulator run as launch
+arguments, which iOS puts in UserDefaults' argument domain for that launch
+only. It then prints which benchmark to tap. Any other use of the phone during
+a run can suspend the app and lose the run.
 
 ## Licence
 

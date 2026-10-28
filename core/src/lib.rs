@@ -10,6 +10,7 @@ use ghost_client::account::{SeedError, WalletSeed};
 
 pub mod header_sync;
 pub mod restore_scan;
+pub mod spot_check;
 pub mod step_sequence;
 pub mod summon;
 
@@ -22,6 +23,7 @@ pub use restore_scan::{
     AccountLookup, AccountState, DerivedAccount, GAP_LIMIT, RestoreError, RestoreLookup, RestoreResult,
     RestoredAccount, UNVERIFIED_NOTE,
 };
+pub use spot_check::{SpotCheckError, SpotCheckKey, SpotCheckReport, spot_check_header, spot_check_seed_height};
 pub use step_sequence::{
     Attempt, ChainView, Identity, Inclusion, MAX_ATTEMPTS, PaymentIntent, PaymentKind, PaymentRecord, PaymentSequence,
     PaymentStore, RECORD_VERSION, Receipt, ReceiptStatus, Recovery, SETTLE_CONFIRMATIONS, Step, StepError,

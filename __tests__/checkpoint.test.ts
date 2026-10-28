@@ -129,10 +129,10 @@ describe('the key-block selection', () => {
   });
 
   it('pins the key blocks at or below the checkpoint that the headers after it use', () => {
-    // Worst-case from 8000: the headers up to 8448 use block 0; from 8449 they
-    // use 8192, above the checkpoint, which the sync checks itself.
+    // A checkpoint at 8000: the headers up to 8448 use block 0; from 8449 they
+    // use 8192, above the checkpoint, which a header sync checks itself.
     expect(builder.keyBlockHeights(8000, 8600)).toEqual([0]);
-    // Header-sync 1,000 below a tip of 8600.
+    // A checkpoint 1,000 below a tip of 8600.
     expect(builder.keyBlockHeights(7600, 8600)).toEqual([0]);
     // Past the second key's first use, only 8192 is used.
     expect(builder.keyBlockHeights(8499, 8700)).toEqual([8192]);
@@ -159,7 +159,7 @@ describe('the checkpoint', () => {
       genesisTimestamp: 1798767600,
       keyBlocks: [{ height: 0, hashHex: '039d14f59db29e2e76c8ed76f90b70de42e48f8a67dba060b363501af50e3ba4' }],
     });
-    // The five fields, in that order, as the benchmarks' override reads them.
+    // The five fields, in that order, as HeaderSync.fromCheckpoint takes them.
     expect(Object.keys(checkpoint)).toEqual([
       'rlpHex',
       'height',
