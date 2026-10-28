@@ -145,6 +145,19 @@ export function cssRules(css: string): Rule[] {
   return rules;
 }
 
+// The text inside `@media <query> { ... }`, matching braces.
+function mediaBlock(css: string, query: string): string | undefined {
+  const head = css.indexOf(`@media ${query} {`);
+  if (head < 0) return undefined;
+  const start = css.indexOf('{', head) + 1;
+  let depth = 1;
+  for (let i = start; i < css.length; i++) {
+    if (css[i] === '{') depth++;
+    if (css[i] === '}' && --depth === 0) return css.slice(start, i);
+  }
+  return undefined;
+}
+
 function declarations(body: string): { prop: string; value: string }[] {
   return body
     .split(';')
@@ -565,6 +578,20 @@ describe('click-through', () => {
       expect(decls).toContainEqual({ prop: 'height', value: `${h}px` });
     }
     expect(css).toMatch(/@media \(min-width: 560px\) and \(max-width: 700px\)/);
+  });
+
+  it('lets the folded Duo scroll the content to every field and button', () => {
+    const css = stripComments(read(path.join(MOCKUPS, 'mockups.css')));
+    const base = cssRules(css).find((r) => r.selectors.includes('.content'));
+    expect(declarations(base!.body)).toContainEqual({ prop: 'overflow', value: 'hidden' });
+    const block = mediaBlock(css, '(max-width: 700px)');
+    expect(block).toBeDefined();
+    const scroll = cssRules(block!).filter((r) =>
+      declarations(r.body).some((d) => d.prop === 'overflow-y' && d.value === 'auto'),
+    );
+    // The rule must beat the base .content rule that comes later in the file.
+    const selectors = scroll.flatMap((r) => r.selectors);
+    expect(selectors.some((s) => /\.content$/.test(s) && (s.match(/\./g) ?? []).length > 1)).toBe(true);
   });
 
   it.each(pages)('%s uses real buttons and links, not clickable boxes', (name) => {
