@@ -255,7 +255,7 @@ describe('scripts/sim-test.sh', () => {
   const script = read('scripts/sim-test.sh');
 
   it('writes the node URL and the restore override into the simulator for the node benchmarks', () => {
-    expect(script).toContain('NODE_BENCHES="header-sync restore worst-case"');
+    expect(script).toContain('NODE_BENCHES="header-sync restore worst-case kill-recovery"');
     expect(script).toMatch(/xcrun simctl spawn "\$udid" defaults write "\$APP_ID"/);
     expect(script).toContain('APP_ID=com.ghostcoin.wallet');
     expect(script).toContain('sim_defaults benchNodeUrl -string "http://127.0.0.1:$TEST_CHAIN_PORT"');
@@ -297,6 +297,17 @@ describe('scripts/sim-test.sh', () => {
   it('gives restore no start height and no late funding', () => {
     expect(script).not.toMatch(/[bB]irthday|BIRTHDAY|fund-late/);
   });
+
+  it('runs kill-recovery as a node benchmark: the chain, the node URL and the node timeout', () => {
+    const nodeBenches = /^NODE_BENCHES="([^"]*)"$/m.exec(script)![1].split(' ');
+    expect(nodeBenches).toEqual(['header-sync', 'restore', 'worst-case', 'kill-recovery']);
+    // The default run includes kill-recovery, so it starts the chain.
+    const defaults = /^BENCHES="\$\{BENCHES:-([^}]*)\}"$/m.exec(script)![1].split(' ');
+    expect(defaults).toContain('kill-recovery');
+    expect(script).toMatch(/if is_node_bench "\$bench"; then\s*needs_chain=true/);
+    expect(script).toMatch(/if is_node_bench "\$bench"; then\s*timeout_ms="\$NODE_BENCH_TIMEOUT_MS"/);
+    expect(script).toMatch(/if \[ "\$needs_chain" = true \]; then[\s\S]*sim_defaults benchNodeUrl/);
+  });
 });
 
 describe('scripts/phone-launch.sh', () => {
@@ -326,6 +337,78 @@ describe('scripts/phone-launch.sh', () => {
     expect(script).not.toMatch(/HEADER_SYNC_WINDOW|WORST_CASE_CHECKPOINT|test-chain\.sh (checkpoint|genesis)/);
     expect(script).toMatch(/^TEST_CHAIN_PORT=8547$/m);
     expect(Number(/^TEST_CHAIN_HEIGHT=(\d+)$/m.exec(script)?.[1])).toBeLessThan(8449);
+  });
+
+  it('waits for the test chain and passes the node URL for kill-recovery like the other node benchmarks', () => {
+    const nodeCase = /^ {2}([a-z| -]+)\)\n\s*lan_ip=/m.exec(script);
+    expect(nodeCase).not.toBeNull();
+    expect(nodeCase![1].split('|').map((name) => name.trim())).toEqual([
+      'header-sync',
+      'restore',
+      'worst-case',
+      'kill-recovery',
+    ]);
+    const branch = script.slice(nodeCase!.index, script.indexOf(';;', nodeCase!.index));
+    expect(branch).toContain('bash scripts/test-chain.sh wait "$TEST_CHAIN_HEIGHT"');
+    expect(branch).toContain('-benchNodeUrl "http://$lan_ip:$TEST_CHAIN_PORT"');
+  });
+});
+
+describe('kill-recovery on the test chain', () => {
+  const benchmark = read('modules/ghost-bench/ios/Benchmarks/KillRecoveryBenchmark.swift');
+  const view = read('modules/ghost-bench/ios/Benchmarks/TestChainView.swift');
+  const both = benchmark + view;
+
+  it('drives a real chain view, not the fake chain or synthetic bytes', () => {
+    expect(both).not.toMatch(/FakeTestChain|syntheticSend|syntheticIntent|\.mine\(\)|1_300_000/);
+    expect(view).toContain('final class TestChainView: ChainView {');
+    expect(benchmark).toContain('TestChainConfig.nodeUrlKey');
+    expect(view).toContain('TestChainConfig.requestTimeoutSeconds');
+    expect(benchmark).toContain('context.note("chain", "real test chain: \\(url.absoluteString), chain id \\(chainId)")');
+  });
+
+  it('signs in the native core and broadcasts raw bytes only', () => {
+    expect(both).not.toContain('eth_sendTransaction"');
+    expect(both).not.toMatch(/secp256k1|ECDSA|SecRandomCopyBytes/);
+    expect(view).toContain('"eth_sendRawTransaction"');
+    expect(view).toMatch(/already known[\s\S]*return \.alreadyKnown/);
+    expect(view).toContain('the node\'s transaction hash is not keccak256 of the bytes');
+    expect(benchmark).toMatch(/signTestSend\(testWords: RestoreBenchmark\.testWords, accountIndex: senderIndex/);
+    expect(benchmark).toContain('gasLimit: testSendGasLimit()');
+    // The stored bytes are what is sent, and the broadcast is counted first.
+    const send = benchmark.slice(benchmark.indexOf('case .send:'), benchmark.indexOf('case .wait:'));
+    expect(send).toMatch(/let bytes = try sequence\.markSent\(\)[\s\S]*\$0\.broadcasts\[hash, default: 0\] \+= 1[\s\S]*node\.sendRaw\(bytes\)/);
+    expect(benchmark.slice(benchmark.indexOf('case .wait:'))).toMatch(/^case \.wait:\s*Thread\.sleep\(forTimeInterval: pollSeconds\)/);
+  });
+
+  it('keeps the seven kill points and their notes', () => {
+    const points = /enum KillPoint: String, CaseIterable, Codable \{([\s\S]*?)\n {2}\}/.exec(benchmark)![1];
+    expect([...points.matchAll(/case (\w+)/g)].map((m) => m[1])).toEqual([
+      'prepared',
+      'backedUp',
+      'signed',
+      'sent',
+      'afterBroadcast',
+      'included',
+      'settled',
+    ]);
+    expect(benchmark).toContain('static let killPointKey = "benchKillPoint"');
+    expect(benchmark).toContain('static let killSignalKey = "benchKillSignal"');
+    for (const note of ['killPoint.\\(point)', 'recoveryMs.\\(point)', 'launchToRecoveredMs.\\(point)']) {
+      expect(benchmark).toContain(`context.note("${note}"`);
+    }
+    expect(benchmark).toContain('"\\(state.outcomes.count - failed.count) of \\(KillPoint.allCases.count) kill points recorded"');
+  });
+
+  it('checks the payment on the chain after recovery', () => {
+    const check = benchmark.slice(benchmark.indexOf('static func check('), benchmark.indexOf('static func drive('));
+    expect(check).toContain('node.transactions(from: sender, nonce: nonce, fromHeight: details.startHeight)');
+    expect(check).toMatch(/guard landed\.count == 1/);
+    expect(check).toMatch(/if count != nonce \+ 1 \{/);
+    expect(check).toContain('receipt.status == .success');
+    expect(check).toContain('if let before = hashAtKill, before != hash {');
+    expect(check).toContain('if broadcasts != 1 {');
+    expect(check).toContain('inclusion.blockHash != receipt.blockHash');
   });
 });
 
