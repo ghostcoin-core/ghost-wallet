@@ -121,8 +121,16 @@ input:focus-visible {
     border: 0;
     border-radius: 0;
   }
-}
 
+  /*
+   * The folded Duo (466 x 678) is shorter than the screens, so the content
+   * scrolls to reach every field and button. .screen raises this above the
+   * base .content rule further down, which hides overflow.
+   */
+  .screen .content {
+    overflow-y: auto;
+  }
+}
 
 .status-bar {
   display: flex;
