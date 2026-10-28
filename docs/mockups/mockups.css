@@ -101,8 +101,12 @@ input:focus-visible {
   background: #F5F5F8;
 }
 
-/* Inside the index frames (or on a real phone) only the screen shows. */
-@media (max-width: 400px) {
+/*
+ * Inside the index device frames (or on a real phone) only the screen shows,
+ * filling the device: regular iPhone 393 x 852, iPhone Duo folded 466 x 678,
+ * iPhone Duo open 626 x 890 (points).
+ */
+@media (max-width: 700px) {
   .page {
     padding: 0;
   }
@@ -112,10 +116,13 @@ input:focus-visible {
   }
 
   .screen {
+    width: 100vw;
+    height: 100vh;
     border: 0;
     border-radius: 0;
   }
 }
+
 
 .status-bar {
   display: flex;
@@ -604,7 +611,7 @@ input::placeholder {
 
 .index-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(392px, 1fr));
+  grid-template-columns: 1fr;
   gap: 40px 32px;
   margin: 0;
   padding: 32px 40px 64px;
@@ -629,11 +636,79 @@ input::placeholder {
   font-weight: 600;
 }
 
+.index-devices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.index-devices figure {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+
+.index-devices figcaption {
+  color: #4A4860;
+  font-size: 14px;
+}
+
 .index-grid iframe {
   display: block;
-  width: 392px;
-  height: 846px;
   border: 1px solid #E4E3EC;
   border-radius: 44px;
   background: #FFFFFF;
+}
+
+.index-grid iframe.iphone {
+  width: 393px;
+  height: 852px;
+}
+
+.index-grid iframe.duo-folded {
+  width: 466px;
+  height: 678px;
+}
+
+.index-grid iframe.duo-open {
+  width: 626px;
+  height: 890px;
+}
+
+/*
+ * iPhone Duo open: use the wide inner screen, not a stretched phone.
+ * Screens marked two-col split into two columns; the rest stay one centered,
+ * readable column.
+ */
+@media (min-width: 560px) and (max-width: 700px) {
+  .content,
+  .footer {
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto;
+  }
+
+  .content.two-col {
+    display: block;
+    max-width: none;
+    column-count: 2;
+    column-gap: 24px;
+    padding: 8px 32px;
+  }
+
+  .content.two-col > * {
+    break-inside: avoid;
+    margin: 0 0 16px;
+  }
+
+  .button-row .button {
+    min-width: 0;
+    padding: 0 12px;
+  }
+
+  .activity .section-title {
+    margin-top: 0;
+  }
 }
