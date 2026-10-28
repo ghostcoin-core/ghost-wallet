@@ -6,16 +6,19 @@
 #
 # Runs on the Mac Studio after scripts/mac-install.sh has installed the app.
 # <bench> is one of dummy, summon, kill-recovery, header-sync, restore or
-# worst-case. For the node benchmarks (header-sync, restore, worst-case) the
-# local test chain of scripts/test-chain.sh must be running: the phone reaches
-# it on this Mac's LAN address (GHOST_WALLET_LAN_IP, else en0's or en1's) on
-# port 8547. No header window or checkpoint is needed: header-sync and
-# worst-case spot check the node's tip header once, and restore looks up each
-# account's current state at the node's tip.
+# worst-case. For the node benchmarks (header-sync, restore, worst-case,
+# kill-recovery) the local test chain of scripts/test-chain.sh must be
+# running: the phone reaches it on this Mac's LAN address (GHOST_WALLET_LAN_IP,
+# else en0's or en1's) on port 8547. No header window or checkpoint is needed:
+# header-sync and worst-case spot check the node's tip header once, restore
+# looks up each account's current state at the node's tip, and kill-recovery
+# sends test GHOST from account 0 of the test words to account 3.
 #
 # The test-only overrides of TestChainConfig.swift are passed as launch
 # arguments ("-key value"), which iOS puts in UserDefaults' argument domain
-# for that launch only: nothing is written to the phone.
+# for that launch only: nothing is written to the phone. kill-recovery keeps
+# the node URL of its last run in its own state file, so a payment killed
+# mid-send is still recovered when the app is next opened from its icon.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -50,7 +53,7 @@ TEST_CHAIN_HEIGHT=100
 
 args=()
 case "$BENCH" in
-  header-sync | restore | worst-case)
+  header-sync | restore | worst-case | kill-recovery)
     lan_ip="${GHOST_WALLET_LAN_IP:-}"
     if [ -z "$lan_ip" ]; then
       lan_ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"

@@ -14,13 +14,15 @@
 # finish with a result that starts with "<name>: ok". A screenshot of each
 # result is saved under sim-results/.
 #
-# The node benchmarks (header-sync, restore, worst-case) run against the local
-# test chain of scripts/test-chain.sh: when BENCHES names one, the chain is
-# started, mined past the test accounts' funding, and its node URL and the
-# restore's expected account count are written into the simulator's
-# UserDefaults. No header window or checkpoint is needed: header-sync and
-# worst-case spot check the node's tip header once, and restore looks up each
-# account's current state at the node's tip, so each finishes in minutes.
+# The node benchmarks (header-sync, restore, worst-case, kill-recovery) run
+# against the local test chain of scripts/test-chain.sh: when BENCHES names
+# one, the chain is started, mined past the test accounts' funding, and its
+# node URL and the restore's expected account count are written into the
+# simulator's UserDefaults. No header window or checkpoint is needed:
+# header-sync and worst-case spot check the node's tip header once, restore
+# looks up each account's current state at the node's tip, and kill-recovery
+# sends test GHOST from account 0 of the test words to account 3, so each
+# finishes in minutes.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -38,7 +40,7 @@ APP_ID=com.ghostcoin.wallet
 
 # The benchmarks that need a Ghost node, and what the local test chain needs
 # for them: past the test accounts' funding near block 5.
-NODE_BENCHES="header-sync restore worst-case"
+NODE_BENCHES="header-sync restore worst-case kill-recovery"
 TEST_CHAIN_PORT=8547
 TEST_CHAIN_HEIGHT=100
 # The Maestro wait for a result: 10 minutes, or 20 for a node benchmark.

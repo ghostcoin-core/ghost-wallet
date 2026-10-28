@@ -9,8 +9,9 @@ public class GhostBenchModule: Module {
     OnCreate {
       BenchRunner.recordUnfinishedRun()
       // A kill-recovery payment left unfinished by a kill is recovered at
-      // launch, before anything else runs; the outcome goes into the next
-      // kill-recovery run's notes.
+      // launch, off the main thread (it waits on the test chain), and the
+      // next kill-recovery run waits for it; the outcome goes into that
+      // run's notes.
       KillRecoveryBenchmark.recoverAtLaunch()
     }
 
