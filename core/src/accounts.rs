@@ -242,8 +242,21 @@ impl<S: SeedStore> AccountVault<S> {
     /// The account 0 address (rescue-key scheme `0x0003`) of the saved
     /// account, as `0x` and 40 lowercase hex digits.
     pub fn saved_account_zero_address(&self) -> Result<String, AccountError> {
-        let seed = self.store.load()?.ok_or(AccountError::NoAccount)?;
+        let seed = self.saved_seed()?;
         Ok(to_hex_address(seed.rescue_account(0).address()))
+    }
+
+    /// The 24 words of the saved account, for the recovery words screen
+    /// (which shows them only after Face ID or the passcode).
+    pub fn saved_account_words(&self) -> Result<Vec<String>, AccountError> {
+        let seed = self.saved_seed()?;
+        let words = seed.to_words();
+        Ok(words.as_str().split_whitespace().map(str::to_owned).collect())
+    }
+
+    /// The saved account's seed, for lookups that stay in native code.
+    pub fn saved_seed(&self) -> Result<WalletSeed, AccountError> {
+        self.store.load()?.ok_or(AccountError::NoAccount)
     }
 
     /// Whether a new account is held.
@@ -376,6 +389,18 @@ pub fn has_account() -> Result<bool, AccountError> {
 #[uniffi::export]
 pub fn saved_account_zero_address() -> Result<String, AccountError> {
     ACCOUNTS.saved_account_zero_address()
+}
+
+/// The 24 words of the saved account, for the recovery words screen only.
+#[uniffi::export]
+pub fn saved_account_words() -> Result<Vec<String>, AccountError> {
+    ACCOUNTS.saved_account_words()
+}
+
+/// The saved account's seed: [`crate::RestoreLookup::saved_account`] looks it
+/// up without the words leaving native code.
+pub(crate) fn saved_seed() -> Result<WalletSeed, AccountError> {
+    ACCOUNTS.saved_seed()
 }
 
 #[cfg(test)]

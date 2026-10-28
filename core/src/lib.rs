@@ -21,7 +21,7 @@ pub mod summon;
 pub use accounts::{
     AccountError, AccountVault, CHECKED_WORDS, MemoryStore, SeedStore, check_new_account_word, discard_new_account,
     has_account, import_account_words, is_account_word, is_listed_word, new_account_words, save_new_account,
-    saved_account_zero_address,
+    saved_account_words, saved_account_zero_address,
 };
 pub use header_sync::{
     ChainState, DeviceConditions, HeaderChainConstants, HeaderProgress, HeaderRun, HeaderStore, HeaderSync,
