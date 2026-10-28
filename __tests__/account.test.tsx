@@ -86,7 +86,7 @@ describe('ReceiveScreen', () => {
   });
 
   it('copies and shares the address', async () => {
-    const share = jest.spyOn(Share, 'share').mockResolvedValue({ action: Share.sharedAction });
+    const share = jest.spyOn(Share, 'share').mockResolvedValue({ action: Share.sharedAction, activityType: undefined });
     render(<ReceiveScreen />);
 
     await act(async () => {
