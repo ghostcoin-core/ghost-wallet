@@ -1,7 +1,7 @@
 // A text box for one account word: no autocorrect, no capitals, no autofill,
 // so the keyboard neither changes nor learns the word.
 import { forwardRef } from 'react';
-import { StyleSheet, TextInput, type TextInputProps } from 'react-native';
+import { StyleSheet, TextInput, type TextInputInstance, type TextInputProps } from 'react-native';
 
 import { colours, fonts } from '../lib/theme';
 
@@ -10,7 +10,7 @@ type WordFieldProps = Omit<
   'autoCapitalize' | 'autoComplete' | 'autoCorrect' | 'spellCheck' | 'textContentType'
 > & { invalid?: boolean };
 
-export const WordField = forwardRef<TextInput, WordFieldProps>(function WordField(
+export const WordField = forwardRef<TextInputInstance, WordFieldProps>(function WordField(
   { invalid, style, ...props },
   ref,
 ) {
