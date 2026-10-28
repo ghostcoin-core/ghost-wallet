@@ -27,27 +27,30 @@
           <span class="logo"><img src="../../brand/svg/ghost-logo-primary.svg" alt="Ghost" /></span>
         </div>
 
-        <form class="content" action="home.html">
-          <h2>Check three words</h2>
-          <p>Type these words from your paper, so you know the backup is right.</p>
-
-          <div class="field">
-            <label for="word-4">Word 4</label>
-            <input id="word-4" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 4" />
-          </div>
-          <div class="field">
-            <label for="word-11">Word 11</label>
-            <input id="word-11" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 11" />
-          </div>
-          <div class="field">
-            <label for="word-19">Word 19</label>
-            <input id="word-19" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 19" />
-          </div>
-
-          <p class="quiet">Wrong word? You can go back and look again. Nothing is lost.</p>
-
-          <span style="flex: 1"></span>
-          <button class="button" type="submit" style="margin-bottom: 24px">Confirm and open my account</button>
+        <form class="content split" action="home.html">
+          <section class="pane">
+            <h2>Check three words</h2>
+            <p>Type these words from your paper, so you know the backup is right.</p>
+            <p class="section-title duo-only">On your paper</p>
+            <ol class="paper-grid duo-only" aria-label="Positions of the words to check"><li>1</li><li>2</li><li>3</li><li class="ask">4</li><li>5</li><li>6</li><li>7</li><li>8</li><li>9</li><li>10</li><li class="ask">11</li><li>12</li><li>13</li><li>14</li><li>15</li><li>16</li><li>17</li><li>18</li><li class="ask">19</li><li>20</li><li>21</li><li>22</li><li>23</li><li>24</li></ol>
+            <p class="quiet">Wrong word? You can go back and look again. Nothing is lost.</p>
+          </section>
+          <section class="pane">
+            <div class="field">
+              <label for="word-4">Word 4</label>
+              <input id="word-4" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 4" />
+            </div>
+            <div class="field">
+              <label for="word-11">Word 11</label>
+              <input id="word-11" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 11" />
+            </div>
+            <div class="field">
+              <label for="word-19">Word 19</label>
+              <input id="word-19" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 19" />
+            </div>
+            <span style="flex: 1"></span>
+            <button class="button" type="submit" style="margin-bottom: 24px">Confirm and open my account</button>
+          </section>
         </form>
       </main>
 

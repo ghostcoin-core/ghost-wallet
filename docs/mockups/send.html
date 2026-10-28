@@ -27,40 +27,43 @@
           <span class="logo"><img src="../../brand/svg/ghost-logo-primary.svg" alt="Ghost" /></span>
         </div>
 
-        <form class="content two-col" action="payment.html">
-          <h2>Send GHOST</h2>
-
-          <div class="field">
-            <label for="recipient">To</label>
-            <input id="recipient" class="mono" type="text" autocomplete="off" spellcheck="false" value="0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd" />
-          </div>
-
-          <div class="field">
-            <label for="amount">Amount</label>
-            <input id="amount" class="mono" type="text" inputmode="decimal" value="25.00" style="font-size: 22px" />
-            <span class="quiet">You have <span class="mono">1,284.50</span> GHOST</span>
-          </div>
-
-          <ul class="rows panel" aria-label="Summary">
-            <li class="row">
-              <span class="grow">Fee</span>
-              <span class="amount">0.002 GHOST</span>
-            </li>
-            <li class="row">
-              <span class="grow">Arrives</span>
-              <span class="value">In under a minute</span>
-            </li>
-            <li class="row">
-              <span class="grow">Total</span>
-              <span class="amount">25.002 GHOST</span>
-            </li>
-          </ul>
-
-          <span style="flex: 1"></span>
-          <button class="button" type="submit" style="margin-bottom: 24px">
-            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 9v1M15 9v1M12 9v4h-1M9 16c1.7 1.3 4.3 1.3 6 0" /></svg>
-            Send with Face ID
-          </button>
+        <form class="content split" action="payment.html">
+          <section class="pane">
+            <h2>Send GHOST</h2>
+            <div class="field">
+              <label for="recipient">To</label>
+              <input id="recipient" class="mono" type="text" autocomplete="off" spellcheck="false" value="0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd" />
+            </div>
+            <div class="field">
+              <label for="amount">Amount</label>
+              <input id="amount" class="mono" type="text" inputmode="decimal" value="25.00" style="font-size: 22px" />
+              <span class="quiet">You have <span class="mono">1,284.50</span> GHOST</span>
+            </div>
+            <p class="section-title duo-only">Recent</p>
+            <ul class="rows panel duo-only" aria-label="Recent addresses">
+              <li><a class="row" href="#"><span class="row-icon mono">E5</span><span class="grow"><span class="title mono">0xe5fb…55fd</span><span class="sub">Sent 25.00 yesterday</span></span></a></li>
+              <li><a class="row" href="#"><span class="row-icon mono">7A</span><span class="grow"><span class="title mono">0x7a21…c90e</span><span class="sub">Sent 4.20 on Monday</span></span></a></li>
+              <li><a class="row" href="#"><span class="row-icon mono">B3</span><span class="grow"><span class="title mono">0xb3d0…1f47</span><span class="sub">Received 60.00 last week</span></span></a></li>
+            </ul>
+          </section>
+          <section class="pane">
+            <p class="section-title">Review</p>
+            <div class="duo-only" style="flex-direction: column; gap: 4px">
+              <p class="quiet">You send</p>
+              <p class="mono hero-amount" style="color: #0E0D1A; font-size: 34px; font-weight: 500">25.00 <span style="font-size: 17px">GHOST</span></p>
+              <p class="quiet">to <span class="mono">0xe5fb…55fd</span></p>
+            </div>
+            <ul class="rows panel" aria-label="Summary">
+              <li class="row"><span class="grow">Fee</span><span class="amount">0.002 GHOST</span></li>
+              <li class="row"><span class="grow">Arrives</span><span class="value">In under a minute</span></li>
+              <li class="row"><span class="grow">Total</span><span class="amount">25.002 GHOST</span></li>
+            </ul>
+            <span style="flex: 1"></span>
+            <button class="button" type="submit" style="margin-bottom: 24px">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 9v1M15 9v1M12 9v4h-1M9 16c1.7 1.3 4.3 1.3 6 0" /></svg>
+              Send with Face ID
+            </button>
+          </section>
         </form>
       </main>
 
