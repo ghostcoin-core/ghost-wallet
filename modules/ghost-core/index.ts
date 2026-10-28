@@ -44,6 +44,111 @@ type GhostCoreBindings = RestoreBindings &
   savedAccountZeroAddress(): string;
   /** The 24 words of the saved account, for the recovery words screen only. */
   savedAccountWords(): string[];
+} & Partial<VanishBindings>;
+
+/** The Vanish, Summon and Claim calls of core/src/vanish.rs, as generated. */
+export type VanishBindings = {
+  checkKeyWords(text: string): { verdict: string; position: number };
+  prepareVanish(chainId: bigint, amountWei: string): CoreVanishCommit;
+  takePhantomKeyWords(): string[];
+  checkPhantomKeyWord(position: number, word: string): boolean;
+  confirmPhantomKeySaved(): void;
+  forgetPhantomKey(): void;
+  signVanish(send: CoreVanishSend): CoreSigned;
+  commitLeaf(commitData: ArrayBuffer, amountWei: string): CoinLeaf;
+  revealLeaf(envelope: ArrayBuffer): { marker: ArrayBuffer; leaf: CoinLeaf };
+  findKeyCoins(keyText: string, chainId: bigint, leaves: CoinLeaf[], spent: ArrayBuffer[]): KeyCoins;
+  proveKeyReveal(keyText: string, request: CoreRevealRequest, leaves: CoinLeaf[], spent: ArrayBuffer[]): CoreProvedReveal;
+  revealFeeWei(bRefWei: string): string;
+  minVanishWei(bRefWei: string): string;
+  feeWindow(tip: bigint): { referenceHeight: bigint; validUntil: bigint };
+  commitEntryAddress(): string;
+  vanishGasLimit(): bigint;
+  testChainId(): bigint;
+  transactionHash(signed: ArrayBuffer): ArrayBuffer;
+  encodePaymentRecord(record: CorePaymentRecord): ArrayBuffer;
+  decodePaymentRecord(bytes: ArrayBuffer): CorePaymentRecord;
+  PaymentSequence: CorePaymentSequenceClass;
+};
+
+export type CoinLeaf = { commitment: ArrayBuffer; note: ArrayBuffer; salt?: ArrayBuffer };
+export type KeyCoins = { status: string; amountWei: string };
+export type CoreVanishCommit = { commitData: ArrayBuffer; amountWei: string; commitment: ArrayBuffer };
+export type CoreVanishSend = {
+  chainId: bigint;
+  genesisHash: ArrayBuffer;
+  nonce: bigint;
+  commitData: ArrayBuffer;
+  amountWei: string;
+  maxPriorityFeePerGas: bigint;
+  maxFeePerGas: bigint;
+  gasLimit: bigint;
+};
+export type CoreSigned = { transactionHash: ArrayBuffer; sender: ArrayBuffer; envelope: ArrayBuffer };
+export type CoreRevealRequest = {
+  chainId: bigint;
+  genesisHash: ArrayBuffer;
+  recipient: ArrayBuffer;
+  baseFeeRefWei: string;
+  outWei?: string;
+};
+export type CoreProvedReveal = {
+  transactionHash: ArrayBuffer;
+  marker: ArrayBuffer;
+  envelope: ArrayBuffer;
+  feeWei: string;
+  outWei: string;
+  remainderWei: string;
+  proveMillis: bigint;
+};
+
+/** The step sequence's identity, intent and record (core/src/step_sequence.rs). */
+export type CoreIdentity =
+  | { tag: 'AccountNonce'; inner: { account: ArrayBuffer; nonce: bigint } }
+  | { tag: 'RevealMarker'; inner: { marker: ArrayBuffer } };
+export type CorePaymentIntent = { kind: number | string; identity: CoreIdentity; details: ArrayBuffer };
+export type CoreAttempt = { transactionHash: ArrayBuffer; validUntil?: bigint };
+export type CorePaymentRecord = {
+  id: string;
+  intent: CorePaymentIntent;
+  step: number | string;
+  attempts: CoreAttempt[];
+  inclusion?: { transactionHash: ArrayBuffer; blockHash: ArrayBuffer; blockHeight: bigint };
+  version: number;
+  checksum: ArrayBuffer;
+};
+export type CoreRecovery = { tag: string; inner?: { transactionHash?: ArrayBuffer; step?: number | string } };
+export type CoreReceipt = { status: number | string; blockHash: ArrayBuffer; blockHeight: bigint };
+
+export type CorePaymentStore = {
+  save(record: CorePaymentRecord): void;
+  load(id: string): CorePaymentRecord | undefined;
+  list(): string[];
+  remove(id: string): void;
+  savePayload(id: string, transactionHash: ArrayBuffer, signedTransaction: ArrayBuffer): void;
+  loadPayload(id: string, transactionHash: ArrayBuffer): ArrayBuffer | undefined;
+};
+
+export type CoreChainView = {
+  receipt(transactionHash: ArrayBuffer): CoreReceipt | undefined;
+  pending(transactionHash: ArrayBuffer): boolean;
+  identityUsedBy(identity: CoreIdentity): ArrayBuffer | undefined;
+  effectApplied(intent: CorePaymentIntent, transactionHash: ArrayBuffer): boolean;
+  tipHeight(): bigint;
+};
+
+export type CorePaymentSequence = {
+  record(): CorePaymentRecord;
+  step(): number | string;
+  recover(chain: CoreChainView): CoreRecovery;
+  markBackedUp(): void;
+  addAttempt(signedTransaction: ArrayBuffer, validUntil?: bigint): ArrayBuffer;
+  markSent(): ArrayBuffer;
+};
+
+export type CorePaymentSequenceClass = {
+  start(store: CorePaymentStore, id: string, intent: CorePaymentIntent): CorePaymentSequence;
+  open(store: CorePaymentStore, id: string): CorePaymentSequence;
 };
 
 function bindings(): GhostCoreBindings {
@@ -132,4 +237,25 @@ export function lookUpSavedAccount(
  */
 export function savedAccountWords(): string[] {
   return bindings().savedAccountWords();
+}
+
+/** The Vanish, Summon and Claim calls; throws when this build has no native core. */
+export function vanishCore(): VanishBindings {
+  const core = bindings();
+  if (typeof core.checkKeyWords !== 'function' || typeof core.prepareVanish !== 'function') {
+    throw new Error('this build has no Vanish in its native core');
+  }
+  return core as GhostCoreBindings & VanishBindings;
+}
+
+/**
+ * What typed words are: a Phantom Key, a wallet's recovery words, or why
+ * neither. The core never echoes the words back.
+ */
+export function checkKeyWords(text: string): { verdict: string; position: number } {
+  const check = bindings().checkKeyWords;
+  if (typeof check !== 'function') {
+    throw new Error('this build cannot check keys');
+  }
+  return check(text);
 }

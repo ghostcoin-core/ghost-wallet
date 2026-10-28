@@ -17,6 +17,7 @@ pub mod send;
 pub mod spot_check;
 pub mod step_sequence;
 pub mod summon;
+pub mod vanish;
 
 pub use accounts::{
     AccountError, AccountVault, CHECKED_WORDS, MemoryStore, SeedStore, check_new_account_word, discard_new_account,
@@ -43,6 +44,15 @@ pub use step_sequence::{
     decode_payment_record, encode_payment_record, settle_confirmations, transaction_hash,
 };
 pub use summon::{SummonError, SummonReport, prove_test_summon};
+pub use vanish::{
+    BuiltPrivateTx, CHECKED_KEY_WORDS, COMMIT_DATA_BYTES, COMMIT_ENTRY, CoinLeaf, ENVELOPE_BYTES, FEE_WINDOW,
+    FeeWindow, KeyCoins, KeyVault, MIN_VANISH_FEES, PRIVATE_TX_GAS, PRIVATE_TX_TYPE, ProvedReveal, RevealRequest,
+    RevealedLeaf, SignedVanish, VANISH_GAS_LIMIT, VANISH_MIN_GAS, VanishCommit, VanishError, VanishSend, WordsCheck,
+    check_key_words, check_phantom_key_word, classify_words, commit_leaf, confirm_phantom_key_saved, fee_window,
+    find_coins, find_key_coins, forget_phantom_key, min_vanish_wei, parse_wei, prepare_vanish, private_envelope,
+    prove_key_reveal, prove_reveal_with, reveal_fee, reveal_fee_wei, reveal_leaf, sign_vanish, sign_vanish_with,
+    take_phantom_key_words, vanish_commit_with,
+};
 
 uniffi::setup_scaffolding!();
 

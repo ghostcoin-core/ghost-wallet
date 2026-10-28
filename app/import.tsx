@@ -17,7 +17,9 @@ import {
 } from '../lib/onboarding/import-validation';
 import { useSession } from '../lib/session';
 import { colours, fonts } from '../lib/theme';
-import { importAccountWords, isAccountWord } from '../modules/ghost-core';
+import { walletFieldRule } from '../lib/vanish/field-rules';
+import { parseWordsCheck } from '../lib/vanish/word-validation';
+import { checkKeyWords, importAccountWords, isAccountWord } from '../modules/ghost-core';
 
 function knownWord(word: string): boolean {
   try {
@@ -56,8 +58,14 @@ export default function ImportScreen() {
     if (!status.ready) {
       return;
     }
+    const words = joinWords(fields);
+    const rule = walletFieldRule(words, (text) => parseWordsCheck(checkKeyWords(text)));
+    if (!rule.accept) {
+      setError(rule.message);
+      return;
+    }
     try {
-      importAccountWords(joinWords(fields));
+      importAccountWords(words);
     } catch {
       setError('These 24 words are not a Ghost account. Check their order and spelling.');
       return;
