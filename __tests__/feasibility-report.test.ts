@@ -290,6 +290,24 @@ describe('feasibility-report', () => {
       expect(verdictOf(both).verdict).toBe('works');
     });
 
+    it('asks a spot-check worst case for its one cache, and an older one for both', () => {
+      const proved = { workerStress: 'true', runs: '3', verifiedCount: '3' };
+      const spotCheck = (caches: string) =>
+        ok({
+          benchmark: 'worst-case',
+          notes: { ...proved, spotCheckCacheSeconds: '95.000', cacheCountBeforeProve: caches },
+        });
+      expect(verdictOf(spotCheck('1'))).toEqual({ verdict: 'works', reasons: [] });
+      expect(verdictOf(spotCheck('0'))).toEqual({
+        verdict: "doesn't work",
+        reasons: ['0 RandomX caches held, not 1'],
+      });
+      expect(verdictOf(spotCheck('2')).reasons).toEqual(['2 RandomX caches held, not 1']);
+      // A run that synced headers, with no spot check note, still needs both.
+      const older = ok({ benchmark: 'worst-case', notes: { ...proved, cacheCountBeforeProve: '1' } });
+      expect(verdictOf(older).reasons).toEqual(['1 RandomX caches held, not 2']);
+    });
+
     it("is doesn't work for a worst case not run as the stress case", () => {
       const notStress = ok({
         benchmark: 'worst-case',
@@ -322,6 +340,21 @@ describe('feasibility-report', () => {
       const summon = ok({ benchmark: 'summon', notes: { runs: '1', verifiedCount: '1', 'proveMillis-1': '4000' } });
       expect(verdictOf(summon).verdict).toBe('works');
     });
+  });
+
+  it("shows a spot-check header-sync run's cache and hash times and judges it by headerBudgetOk", () => {
+    const run = ok({
+      benchmark: 'header-sync',
+      notes: {
+        spotCheckCacheSeconds: '95.000',
+        spotCheckHashSeconds: '2.500',
+        spotCheckPassed: 'true',
+        headerBudgetOk: 'true',
+      },
+    });
+    const row = rows(buildReport([run]), 'iPhone13,2').get('header-sync')!;
+    expect(row[KEY_NUMBERS]).toBe('cache s 95.000, hash s 2.500, budget ok true');
+    expect(row[VERDICT]).toBe('works');
   });
 
   it('reads the results file text, and rejects what is not an array', () => {
