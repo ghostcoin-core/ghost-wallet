@@ -544,9 +544,27 @@ describe('click-through', () => {
   it('index shows and links every screen', () => {
     const html = read(path.join(MOCKUPS, 'index.html'));
     for (const name of SCREENS) {
-      expect(html).toContain(`<iframe src="${name}"`);
+      expect(html).toContain(`src="${name}"`);
       expect(hrefs(html)).toContain(name);
     }
+  });
+
+  it('index shows every screen on iPhone, iPhone Duo folded and iPhone Duo open', () => {
+    const html = read(path.join(MOCKUPS, 'index.html'));
+    for (const name of SCREENS) {
+      for (const device of ['iphone', 'duo-folded', 'duo-open']) {
+        expect(html).toMatch(new RegExp(`<iframe class="${device}" src="${name.replace('.', '\\.')}`));
+      }
+    }
+    const css = read(path.join(MOCKUPS, 'mockups.css'));
+    for (const [device, w, h] of [['iphone', 393, 852], ['duo-folded', 466, 678], ['duo-open', 626, 890]] as const) {
+      const rule = cssRules(css).find((r) => r.selectors.includes(`.index-grid iframe.${device}`));
+      expect(rule).toBeDefined();
+      const decls = declarations(rule!.body);
+      expect(decls).toContainEqual({ prop: 'width', value: `${w}px` });
+      expect(decls).toContainEqual({ prop: 'height', value: `${h}px` });
+    }
+    expect(css).toMatch(/@media \(min-width: 560px\) and \(max-width: 700px\)/);
   });
 
   it.each(pages)('%s uses real buttons and links, not clickable boxes', (name) => {
