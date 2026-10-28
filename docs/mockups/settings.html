@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>10. Settings · Ghost Wallet mockup</title>
+    <link rel="icon" href="../../brand/favicon/favicon.svg" />
+    <link rel="stylesheet" href="mockups.css" />
+  </head>
+  <body>
+    <div class="page">
+      <main class="screen on-mist" aria-label="Settings">
+        <div class="status-bar" aria-hidden="true">
+          <span>9:41</span>
+          <svg class="icon" viewBox="0 0 24 24"><rect x="2" y="7" width="18" height="10" rx="2" /><path d="M22 11v2" /></svg>
+        </div>
+
+        <div class="top-bar">
+          <a class="icon-button" href="home.html" aria-label="Back" style="background: #F5F5F8">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+          </a>
+          <span style="flex: 1"></span>
+          <span class="badge" style="background: #FFFFFF">
+            <svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5" /></svg>
+            Test network
+          </span>
+          <span class="logo"><img src="../../brand/svg/ghost-logo-primary.svg" alt="Ghost" /></span>
+        </div>
+
+        <div class="content" style="gap: 8px">
+          <h2>Settings</h2>
+
+          <h3 class="section-title">Account</h3>
+          <ul class="rows panel">
+            <li>
+              <a class="row" href="receive.html">
+                <span class="row-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg></span>
+                <span class="grow">
+                  <span class="title">Account 1</span>
+                  <span class="sub mono">0xe5fb…55fd</span>
+                </span>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+              </a>
+            </li>
+            <li>
+              <a class="row" href="backup.html">
+                <span class="row-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4" /><path d="M11 12l9-9M17 6l3 3" /></svg></span>
+                <span class="grow">
+                  <span class="title">Backup words</span>
+                  <span class="sub">Checked on 28 Oct</span>
+                </span>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+              </a>
+            </li>
+          </ul>
+
+          <h3 class="section-title">Security</h3>
+          <ul class="rows panel">
+            <li class="row">
+              <span class="row-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg></span>
+              <span class="grow">
+                <span class="title" id="app-lock-label">App lock</span>
+                <span class="sub">Face ID or passcode</span>
+              </span>
+              <button class="toggle" type="button" aria-pressed="true" aria-labelledby="app-lock-label"></button>
+            </li>
+          </ul>
+
+          <h3 class="section-title">Network</h3>
+          <ul class="rows panel">
+            <li class="row">
+              <span class="row-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></svg></span>
+              <span class="grow">
+                <span class="title">Network</span>
+                <span class="sub">Coins here have no value</span>
+              </span>
+              <span class="value">Test network</span>
+            </li>
+          </ul>
+
+          <h3 class="section-title">About</h3>
+          <ul class="rows panel">
+            <li>
+              <a class="row" href="index.html">
+                <span class="row-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8v.01" /></svg></span>
+                <span class="grow">
+                  <span class="title">About Ghost Wallet</span>
+                  <span class="sub">Version 0.1.0, experimental</span>
+                </span>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+              </a>
+            </li>
+          </ul>
+        </div>
+      </main>
+
+      <nav class="flow-nav" aria-label="Mockup screens">
+        <a href="lock.html">Back: 9. Lock</a>
+        <a href="index.html">Next: All screens</a>
+        <a href="welcome.html">Start again: 1. Welcome</a>
+      </nav>
+    </div>
+  </body>
+</html>

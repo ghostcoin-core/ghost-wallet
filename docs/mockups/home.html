@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>5. Home · Ghost Wallet mockup</title>
+    <link rel="icon" href="../../brand/favicon/favicon.svg" />
+    <link rel="stylesheet" href="mockups.css" />
+  </head>
+  <body>
+    <div class="page">
+      <main class="screen on-mist" aria-label="Home">
+        <div class="status-bar" aria-hidden="true">
+          <span>9:41</span>
+          <svg class="icon" viewBox="0 0 24 24"><rect x="2" y="7" width="18" height="10" rx="2" /><path d="M22 11v2" /></svg>
+        </div>
+
+        <div class="top-bar">
+          <span class="logo"><img src="../../brand/svg/ghost-logo-primary.svg" alt="Ghost" /></span>
+          <span class="badge">
+            <svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5" /></svg>
+            Test network
+          </span>
+          <span style="flex: 1"></span>
+          <a class="icon-button" href="settings.html" aria-label="Settings" style="background: #F5F5F8">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9L7 7M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1" /></svg>
+          </a>
+        </div>
+
+        <div class="content">
+          <section class="panel" style="padding: 20px" aria-label="Balance">
+            <p class="quiet">Balance</p>
+            <p class="mono" style="margin-top: 4px; color: #0E0D1A; font-size: 38px; font-weight: 500; letter-spacing: -0.02em">
+              1,284.50 <span style="font-size: 18px">GHOST</span>
+            </p>
+            <p class="quiet" style="margin-top: 4px">Up to date, just now</p>
+
+            <div class="button-row" style="margin-top: 20px">
+              <a class="button" href="send.html">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9" /></svg>
+                Send
+              </a>
+              <a class="button secondary" href="receive.html">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 7L7 17M16 17H7V8" /></svg>
+                Receive
+              </a>
+            </div>
+          </section>
+
+          <h3 class="section-title">Activity</h3>
+          <ul class="rows panel" aria-label="Activity">
+            <li>
+              <a class="row" href="payment.html">
+                <span class="row-icon">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+                </span>
+                <span class="grow">
+                  <span class="title">Sent to 0xe5fb…55fd</span>
+                  <span class="sub">Pending, about 2 seconds</span>
+                </span>
+                <span class="amount">−25.00</span>
+              </a>
+            </li>
+            <li>
+              <a class="row" href="payment.html">
+                <span class="row-icon">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+                </span>
+                <span class="grow">
+                  <span class="title">Received from 0x3a1c…9b02</span>
+                  <span class="sub">Received, today 9:12</span>
+                </span>
+                <span class="amount">+40.00</span>
+              </a>
+            </li>
+            <li>
+              <a class="row" href="payment.html">
+                <span class="row-icon">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M15 9l-6 6M9 9l6 6" /></svg>
+                </span>
+                <span class="grow">
+                  <span class="title">Send to 0x81d0…c7a4</span>
+                  <span class="sub">Failed, nothing spent</span>
+                </span>
+                <span class="amount struck">−10.00</span>
+              </a>
+            </li>
+            <li>
+              <a class="row" href="payment.html">
+                <span class="row-icon">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l9 16H3z" /><path d="M12 10v4M12 16.8v.01" /></svg>
+                </span>
+                <span class="grow">
+                  <span class="title">Send to 0x5be2…0e31</span>
+                  <span class="sub">Conflicted, another send went first</span>
+                </span>
+                <span class="amount struck">−4.20</span>
+              </a>
+            </li>
+          </ul>
+        </div>
+      </main>
+
+      <nav class="flow-nav" aria-label="Mockup screens">
+        <a href="import.html">Back: 4. Enter 24 words</a>
+        <a href="index.html">All screens</a>
+        <a href="send.html">Next: 6. Send</a>
+      </nav>
+    </div>
+  </body>
+</html>

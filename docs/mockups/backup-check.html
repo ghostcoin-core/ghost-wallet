@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>3. Check backup · Ghost Wallet mockup</title>
+    <link rel="icon" href="../../brand/favicon/favicon.svg" />
+    <link rel="stylesheet" href="mockups.css" />
+  </head>
+  <body>
+    <div class="page">
+      <main class="screen" aria-label="Check your backup words">
+        <div class="status-bar" aria-hidden="true">
+          <span>9:41</span>
+          <svg class="icon" viewBox="0 0 24 24"><rect x="2" y="7" width="18" height="10" rx="2" /><path d="M22 11v2" /></svg>
+        </div>
+
+        <div class="top-bar">
+          <a class="icon-button" href="backup.html" aria-label="Back">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+          </a>
+          <span style="flex: 1"></span>
+          <span class="badge">
+            <svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="5" /></svg>
+            Test network
+          </span>
+          <span class="logo"><img src="../../brand/svg/ghost-logo-primary.svg" alt="Ghost" /></span>
+        </div>
+
+        <form class="content" action="home.html">
+          <h2>Check three words</h2>
+          <p>Type these words from your paper, so you know the backup is right.</p>
+
+          <div class="field">
+            <label for="word-4">Word 4</label>
+            <input id="word-4" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 4" />
+          </div>
+          <div class="field">
+            <label for="word-11">Word 11</label>
+            <input id="word-11" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 11" />
+          </div>
+          <div class="field">
+            <label for="word-19">Word 19</label>
+            <input id="word-19" class="mono" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Word 19" />
+          </div>
+
+          <p class="quiet">Wrong word? You can go back and look again. Nothing is lost.</p>
+
+          <span style="flex: 1"></span>
+          <button class="button" type="submit" style="margin-bottom: 24px">Confirm and open my account</button>
+        </form>
+      </main>
+
+      <nav class="flow-nav" aria-label="Mockup screens">
+        <a href="backup.html">Back: 2. Backup words</a>
+        <a href="index.html">All screens</a>
+        <a href="import.html">Next: 4. Enter 24 words</a>
+      </nav>
+    </div>
+  </body>
+</html>
