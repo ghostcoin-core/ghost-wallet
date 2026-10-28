@@ -33,7 +33,15 @@ describe('route guards', () => {
   });
 
   it('with an unlocked account opens the wallet screens and the bench, and no onboarding screen', () => {
-    expect(openRoutes(UNLOCKED).sort()).toEqual(['bench', 'home', 'receive', 'recovery-words', 'settings']);
+    expect(openRoutes(UNLOCKED).sort()).toEqual([
+      'bench',
+      'home',
+      'receive',
+      'recovery-words',
+      'settings',
+      'summon',
+      'vanish',
+    ]);
   });
 
   it('never opens Home without both an account and an unlock', () => {

@@ -98,6 +98,23 @@ export default function HomeScreen() {
                 testID="open-receive"
               />
             </ButtonRow>
+            <ButtonRow>
+              <Button
+                label="Vanish"
+                icon="key"
+                disabled={address === null}
+                onPress={() => router.push('/vanish')}
+                testID="open-vanish"
+              />
+              <Button
+                label="Summon"
+                icon="receive"
+                secondary
+                disabled={address === null}
+                onPress={() => router.push('/summon')}
+                testID="open-summon"
+              />
+            </ButtonRow>
           </View>
         </Panel>
       </Column>
@@ -137,6 +154,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   actions: {
+    gap: 12,
     marginTop: 20,
   },
   empty: {

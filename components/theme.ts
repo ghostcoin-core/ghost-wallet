@@ -10,6 +10,9 @@ export const colors = {
   quiet: '#6E6C82',
   violet: '#6B4CFF',
   violetTint: '#EEEAFF',
+  /** Summon mint: only when coins come back, as a fill with ink text. */
+  mint: '#4FF0C8',
+  danger: '#B3261E',
 } as const;
 
 /** Amounts, addresses and words: anything people copy or check. */

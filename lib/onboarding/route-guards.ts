@@ -22,6 +22,8 @@ export const ROUTE_GROUPS = {
   receive: 'wallet',
   settings: 'wallet',
   'recovery-words': 'wallet',
+  vanish: 'wallet',
+  summon: 'wallet',
   // The feasibility bench holds only the public test words, and the device and
   // simulator scripts open it by link (ghostwallet://bench), so it stays
   // reachable without an account or unlock. Seven taps on the version in

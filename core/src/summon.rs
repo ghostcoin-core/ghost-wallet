@@ -156,7 +156,7 @@ fn amount(wei: u128) -> Result<Amount, SummonError> {
 /// The root over `leaves` (position order, the rest empty) and the path of
 /// the leaf at `position`. Each path is 32 siblings; empty subtrees are zero
 /// hashes.
-fn root_and_path(leaves: &[[u8; 32]], position: u32) -> ([u8; 32], [[u8; 32]; TREE_DEPTH]) {
+pub(crate) fn root_and_path(leaves: &[[u8; 32]], position: u32) -> ([u8; 32], [[u8; 32]; TREE_DEPTH]) {
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
     let mut zero = empty_leaf();
     let mut path = [[0u8; 32]; TREE_DEPTH];
