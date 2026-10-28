@@ -27,35 +27,44 @@
           <span class="logo"><img src="../../brand/svg/ghost-logo-primary.svg" alt="Ghost" /></span>
         </div>
 
-        <div class="content two-col" style="align-items: center; text-align: center">
-          <h2>Receive GHOST</h2>
-          <p>Share this address. Only send GHOST on the test network to it.</p>
-
-          <div
-            role="img"
-            aria-label="QR code of the address, placeholder"
-            style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 240px; height: 240px; margin-top: 8px; border: 2px dashed #E4E3EC; border-radius: 20px; background: #F5F5F8; color: #6E6C82"
-          >
-            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" style="width: 48px; height: 48px; stroke-width: 1.25"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3M21 14v7h-4M14 21v-3" /></svg>
-            <span style="font-size: 14px">QR code</span>
-          </div>
-
-          <div class="panel" style="width: 100%; padding: 16px">
-            <p class="quiet">Your address</p>
-            <p class="address" style="margin-top: 6px; color: #0E0D1A">0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd</p>
-          </div>
-
-          <span style="flex: 1"></span>
-          <div class="button-row" style="width: 100%; margin-bottom: 24px">
-            <button class="button" type="button">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a1 1 0 0 1 1-1h9" /></svg>
-              Copy
-            </button>
-            <button class="button secondary" type="button">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 8l5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6" /></svg>
-              Share
-            </button>
-          </div>
+        <div class="content split">
+          <section class="pane" style="align-items: center; text-align: center">
+            <h2>Receive GHOST</h2>
+            <p>Share this address. Only send GHOST on the test network to it.</p>
+            <div
+              class="qr"
+              role="img"
+              aria-label="QR code of the address, placeholder"
+              style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 240px; height: 240px; margin-top: 8px; border: 2px dashed #E4E3EC; border-radius: 20px; background: #F5F5F8; color: #6E6C82"
+            >
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" style="width: 48px; height: 48px; stroke-width: 1.25"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3M21 14v7h-4M14 21v-3" /></svg>
+              <span style="font-size: 14px">QR code</span>
+            </div>
+          </section>
+          <section class="pane">
+            <div class="panel" style="width: 100%; padding: 16px">
+              <p class="quiet">Your address</p>
+              <p class="address" style="margin-top: 6px; color: #0E0D1A">0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd</p>
+            </div>
+            <div class="field duo-only" style="flex-direction: column">
+              <label for="ask-amount">Ask for an amount (optional)</label>
+              <input id="ask-amount" class="mono" type="text" inputmode="decimal" placeholder="0.00 GHOST" />
+            </div>
+            <div class="highlight duo-only" role="note">
+              <span>Payments to this address show on Home as soon as a node sees them.</span>
+            </div>
+            <span style="flex: 1"></span>
+            <div class="button-row" style="width: 100%; margin-bottom: 24px">
+              <button class="button" type="button">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a1 1 0 0 1 1-1h9" /></svg>
+                Copy
+              </button>
+              <button class="button secondary" type="button">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 8l5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6" /></svg>
+                Share
+              </button>
+            </div>
+          </section>
         </div>
       </main>
 

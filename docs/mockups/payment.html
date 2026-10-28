@@ -27,52 +27,49 @@
           <span class="logo"><img src="../../brand/svg/ghost-logo-primary.svg" alt="Ghost" /></span>
         </div>
 
-        <div class="content two-col">
-          <div>
-            <p class="quiet">You sent</p>
-            <p class="mono" style="color: #0E0D1A; font-size: 34px; font-weight: 500">25.00 <span style="font-size: 17px">GHOST</span></p>
-            <p class="quiet">to <span class="mono">0xe5fb…55fd</span></p>
-          </div>
-
-          <ol class="steps panel" style="padding: 20px" aria-label="Payment progress">
-            <li class="done">
-              <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
-              <span>
-                <span class="step-title">Sent</span>
-                <span class="quiet" style="display: block">9:41, from this phone</span>
-              </span>
-            </li>
-            <li class="current" aria-current="step">
-              <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /></svg></span>
-              <span>
-                <span class="step-title">In a block</span>
-                <span class="quiet" style="display: block">Usually in under a minute</span>
-              </span>
-            </li>
-            <li>
-              <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /></svg></span>
-              <span>
-                <span class="step-title">Settled</span>
-                <span class="quiet" style="display: block">Final, cannot be undone</span>
-              </span>
-            </li>
-          </ol>
-
-          <div class="highlight" role="note">
-            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z" /><path d="M8.5 12l2.5 2.5 4.5-5" /></svg>
-            <span>Safe to close the app. It never pays twice.</span>
-          </div>
-
-          <span style="flex: 1"></span>
-          <div class="button-row">
-            <button class="button secondary" type="button">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" /></svg>
-              Speed up
-            </button>
-            <button class="button secondary" type="button">Cancel</button>
-          </div>
-          <p class="quiet" style="text-align: center">Speed up pays a little more fee. Cancel works until it is in a block.</p>
-          <a class="button" href="home.html" style="margin-bottom: 24px">Done</a>
+        <div class="content split">
+          <section class="pane">
+            <div>
+              <p class="quiet">You sent</p>
+              <p class="mono hero-amount" style="color: #0E0D1A; font-size: 34px; font-weight: 500">25.00 <span style="font-size: 17px">GHOST</span></p>
+              <p class="quiet">to <span class="mono">0xe5fb…55fd</span></p>
+            </div>
+            <ul class="rows panel duo-only" aria-label="Details">
+              <li class="row"><span class="grow">Fee</span><span class="amount">0.002 GHOST</span></li>
+              <li class="row"><span class="grow">Total</span><span class="amount">25.002 GHOST</span></li>
+              <li class="row"><span class="grow">Sent at</span><span class="value">9:41 today</span></li>
+            </ul>
+            <div class="highlight" role="note">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z" /><path d="M8.5 12l2.5 2.5 4.5-5" /></svg>
+              <span>Safe to close the app. It never pays twice.</span>
+            </div>
+          </section>
+          <section class="pane">
+            <ol class="steps panel" style="padding: 20px" aria-label="Payment progress">
+              <li class="done">
+                <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span><span class="step-title">Sent</span><span class="quiet" style="display: block">9:41, from this phone</span></span>
+              </li>
+              <li class="current" aria-current="step">
+                <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /></svg></span>
+                <span><span class="step-title">In a block</span><span class="quiet" style="display: block">Usually in under a minute</span></span>
+              </li>
+              <li>
+                <span class="step-mark"><svg class="icon small" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /></svg></span>
+                <span><span class="step-title">Settled</span><span class="quiet" style="display: block">Final, cannot be undone</span></span>
+              </li>
+            </ol>
+            <span style="flex: 1"></span>
+            <div class="button-row">
+              <button class="button secondary" type="button">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" /></svg>
+                Speed up
+              </button>
+              <button class="button secondary" type="button">Cancel</button>
+            </div>
+            <p class="quiet" style="text-align: center">Speed up pays a little more fee. Cancel works until it is in a block.</p>
+            <a class="button" href="home.html" style="margin-bottom: 24px">Done</a>
+          </section>
         </div>
       </main>
 

@@ -720,3 +720,113 @@ input::placeholder {
     margin-top: 0;
   }
 }
+
+/*
+ * Split screens (check words, send, payment, receive).
+ * On a phone the two panes stack as one column. On the iPhone Duo open they
+ * sit side by side as two equal halves, one on each side of the fold, each
+ * filling the full height with its own action at the bottom (Apple's iPhone
+ * Duo guidance: equal halves, nothing tappable in the fold).
+ */
+.pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.duo-only {
+  display: none;
+}
+
+.paper-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.paper-grid li {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  border: 1px solid #E4E3EC;
+  border-radius: 8px;
+  background: #F5F5F8;
+  color: #6E6C82;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+}
+
+.paper-grid.duo-only {
+  display: none;
+}
+
+.paper-grid li.ask {
+  border-color: #6B4CFF;
+  background: #EEEAFF;
+  color: #6B4CFF;
+  font-weight: 500;
+}
+
+@media (min-width: 560px) and (max-width: 700px) {
+  .content.split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 56px;
+    max-width: none;
+    padding: 16px 32px 32px;
+  }
+
+  .content.split > .pane {
+    min-height: 0;
+  }
+
+  .content.split .button {
+    margin-bottom: 0 !important;
+  }
+
+  .duo-only {
+    display: flex;
+  }
+
+  ul.duo-only,
+  ol.duo-only {
+    display: block;
+  }
+
+  .paper-grid.duo-only {
+    display: grid;
+  }
+
+  .pane h2 {
+    font-size: 32px;
+  }
+
+  .pane .hero-amount {
+    font-size: 40px !important;
+    white-space: nowrap;
+  }
+
+  .pane .row .value {
+    font-size: 14px;
+    text-align: right;
+  }
+
+  .pane .qr {
+    width: 100% !important;
+    height: auto !important;
+    aspect-ratio: 1;
+  }
+
+  .pane .field input {
+    min-height: 60px;
+    font-size: 17px;
+  }
+
+  .pane .steps li {
+    padding-bottom: 40px;
+  }
+}
