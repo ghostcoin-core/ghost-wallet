@@ -1,8 +1,9 @@
 // The parts the Vanish and Summon screens share: the Phantom Key's words in
 // their own colour (ink, so they are never mistaken for recovery words on
 // paper), and the payment's progress.
-import { StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
+import { LOOKING_UP, SLOW_NOTE, useSlowAfter } from '../lib/vanish/lookup-progress';
 import { progressRows, statusDetail, type PaymentStatus, type RevealKind } from '../lib/vanish/status-mapping';
 import { Icon } from './icons';
 import { colors, monoFont } from './theme';
@@ -100,6 +101,39 @@ export function PaymentExit({
   );
 }
 
+/**
+ * The lookup of a Phantom Key's coins: a spinner and "Looking up this key's
+ * coins…", a note once it is slow, or why it failed with Try again.
+ */
+export function KeyLookupProgress({ failure, onRetry }: { failure: string | null; onRetry: () => void }) {
+  const slow = useSlowAfter(failure === null);
+  if (failure !== null) {
+    return (
+      <Panel style={styles.lookup} testID="key-lookup-failed">
+        <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.lookupError]} testID="summon-error">
+          {failure}
+        </Text>
+        <Button label="Try again" onPress={onRetry} testID="key-lookup-retry" />
+      </Panel>
+    );
+  }
+  return (
+    <Panel style={styles.lookup} testID="key-lookup-progress">
+      <View style={styles.lookupRow}>
+        <ActivityIndicator color={colors.ink} testID="key-lookup-spinner" />
+        <Text accessibilityLiveRegion="polite" style={styles.progressLabel} testID="key-lookup-status">
+          {LOOKING_UP}
+        </Text>
+      </View>
+      {slow ? (
+        <Text accessibilityLiveRegion="polite" style={textStyles.quiet} testID="key-lookup-slow">
+          {SLOW_NOTE}
+        </Text>
+      ) : null}
+    </Panel>
+  );
+}
+
 /** Coins back in the account: the brand's Summon mint, as a fill with ink text. */
 export function CoinsBack({ text }: { text: string }) {
   return (
@@ -176,6 +210,19 @@ const styles = StyleSheet.create({
   },
   leave: {
     gap: 4,
+  },
+  lookup: {
+    gap: 8,
+    padding: 16,
+  },
+  lookupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    minHeight: 40,
+  },
+  lookupError: {
+    color: colors.danger,
   },
   back: {
     padding: 14,
