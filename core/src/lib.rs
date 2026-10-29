@@ -9,6 +9,7 @@ use core::fmt;
 use ghost_client::account::{SeedError, WalletSeed};
 
 pub mod accounts;
+pub mod card;
 pub mod header_sync;
 #[cfg(target_os = "ios")]
 pub mod keychain;

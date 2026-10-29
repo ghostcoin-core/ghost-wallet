@@ -130,6 +130,14 @@ export default function SettingsScreen() {
           onPress={() => router.push('/recovery-words')}
           testID="settings-recovery-words"
         />
+        <Row
+          icon="cross"
+          title="Wipe a card"
+          detail="Phantom Key cards this iPhone wrote"
+          opens
+          onPress={() => router.push('/wipe-card')}
+          testID="settings-wipe-card"
+        />
       </Panel>
 
       <SectionTitle>Security</SectionTitle>

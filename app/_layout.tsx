@@ -31,6 +31,7 @@ function GuardedStack() {
         <Stack.Screen name="recovery-words" />
         <Stack.Screen name="vanish" />
         <Stack.Screen name="summon" />
+        <Stack.Screen name="wipe-card" />
       </Stack.Protected>
       <Stack.Protected guard={open.developer}>
         <Stack.Screen name="bench" options={{ contentStyle: { backgroundColor: '#0A0A12' } }} />

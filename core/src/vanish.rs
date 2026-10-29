@@ -352,6 +352,20 @@ impl KeyVault {
         self.lock().is_some()
     }
 
+    /// Runs `use_words` on the held key's words once they were shown and
+    /// [`CHECKED_KEY_WORDS`] of them typed back, so a card never holds the
+    /// only copy of a key. The key stays held.
+    pub fn with_checked_words<T>(&self, use_words: impl FnOnce(&str) -> T) -> Result<T, VanishError> {
+        let guard = self.lock();
+        let held = guard.as_ref().ok_or(VanishError::NoKeyHeld)?;
+        let checked = held.checked.iter().filter(|checked| **checked).count() as u32;
+        if !held.shown || checked < CHECKED_KEY_WORDS {
+            return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
+        }
+        let words = held.key.format_words().ok_or_else(|| malformed("the key has no words view"))?;
+        Ok(use_words(words.as_str()))
+    }
+
     fn lock(&self) -> MutexGuard<'_, Option<HeldKey>> {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -384,6 +398,11 @@ pub fn vanish_commit_with<R: CryptoRng + ?Sized>(
 }
 
 static NEW_KEY: LazyLock<KeyVault> = LazyLock::new(KeyVault::new);
+
+/// The new Phantom Key Vanish holds, for the card bridge.
+pub(crate) fn new_key() -> &'static KeyVault {
+    &NEW_KEY
+}
 
 /// Makes a fresh Phantom Key from the operating system's random source,
 /// holds it in native memory, and returns its Vanish commit for

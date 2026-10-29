@@ -41,6 +41,7 @@ describe('route guards', () => {
       'settings',
       'summon',
       'vanish',
+      'wipe-card',
     ]);
   });
 

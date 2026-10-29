@@ -3,9 +3,11 @@
 // the coin tree this phone rebuilt from the test chain, proves the reveal here
 // on the phone and sends it to the account. Summon brings the whole coin back,
 // less the fee; Claim brings part of it, and the rest stays with the key. A
-// key this phone cannot find shows as not found yet, never as zero.
+// key this phone cannot find shows as not found yet, never as zero. Or the
+// person taps a card this iPhone wrote: the card's key goes straight to the
+// native core, and the same lookup and proof run on it there.
 import { useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { colors, monoFont } from '../components/theme';
@@ -15,7 +17,7 @@ import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
 import { formatGhost } from '../lib/home/balance-format';
 import { useSettings } from '../lib/settings/settings';
-import { lookUpKey, proveRevealAgain, startReveal, type KeyLookup } from '../lib/vanish/actions';
+import { CARD_KEY, lookUpKey, proveRevealAgain, startReveal, type KeyLookup, type KeySource } from '../lib/vanish/actions';
 import { parseGhostAmount } from '../lib/vanish/amount';
 import { keyFieldRule } from '../lib/vanish/field-rules';
 import { decodeDetails, newestPayment } from '../lib/vanish/payments';
@@ -23,9 +25,18 @@ import { isFinal, lookupMessage, statusOfStep, type RevealKind } from '../lib/va
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import { normaliseKeyText, parseWordsCheck } from '../lib/vanish/word-validation';
 import { checkKeyWords, type CorePaymentSequence } from '../modules/ghost-core';
+import { CardCancelled, cardsSupported, readPhantomKeyFromCard } from '../modules/ghost-nfc';
 
 function checkWords(text: string) {
   return parseWordsCheck(checkKeyWords(text));
+}
+
+function forgetCardKey(kit: PaymentKit | null) {
+  try {
+    kit?.core.forgetCardKey();
+  } catch {
+    // A core without the card calls holds no card key.
+  }
 }
 
 /** The Summon or Claim the app was closed in, to show again. */
@@ -56,11 +67,24 @@ export default function SummonScreen() {
   const [proving, setProving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [cards] = useState(cardsSupported);
+  const [fromCard, setFromCard] = useState(false);
+  const [tapping, setTapping] = useState(false);
+
   const rule = keyFieldRule(keyText, checkWords);
   const typedKey = rule.accept ? normaliseKeyText(keyText) : null;
+  const key: KeySource | null = fromCard ? CARD_KEY : typedKey;
   const rebuild = useMemo(
-    () => (kit && sequence && typedKey && address ? proveRevealAgain(kit, sequence, typedKey, address) : null),
-    [kit, sequence, typedKey, address],
+    () => (kit && sequence && key && address ? proveRevealAgain(kit, sequence, key, address) : null),
+    [kit, sequence, key, address],
+  );
+
+  // The card's key leaves the native core with the screen, as a typed key does.
+  useEffect(
+    () => () => {
+      forgetCardKey(kit);
+    },
+    [kit],
   );
   const payment = usePayment(kit, sequence, rebuild, true);
 
@@ -68,21 +92,50 @@ export default function SummonScreen() {
   const most = lookup ? BigInt(lookup.amountWei) - BigInt(lookup.feeWei) : 0n;
   const canReveal = lookup?.status === 'found' && most > 0n && (!claiming || (claimWei !== null && claimWei <= most));
 
-  async function find() {
-    if (!kit || !typedKey) {
+  async function find(source: KeySource | null = key) {
+    if (!kit || !source) {
       return;
     }
     setError(null);
     setLookup(null);
     try {
-      setLookup(await lookUpKey(kit, typedKey));
+      setLookup(await lookUpKey(kit, source));
     } catch (failure) {
       setError(failure instanceof Error ? `The coins could not be looked up: ${failure.message}` : 'The coins could not be looked up.');
     }
   }
 
+  /** Reads a card this iPhone wrote into the native core, then looks its key up. */
+  async function tapCard() {
+    if (!kit) {
+      return;
+    }
+    setTapping(true);
+    setError(null);
+    setLookup(null);
+    try {
+      await readPhantomKeyFromCard();
+    } catch (failure) {
+      if (!(failure instanceof CardCancelled)) {
+        setError(failure instanceof Error ? failure.message : 'The card could not be read.');
+      }
+      return;
+    } finally {
+      setTapping(false);
+    }
+    setKeyText('');
+    setFromCard(true);
+    await find(CARD_KEY);
+  }
+
+  function typeKeyInstead() {
+    forgetCardKey(kit);
+    setFromCard(false);
+    setLookup(null);
+  }
+
   function reveal() {
-    if (!kit || !typedKey || !address || !canReveal) {
+    if (!kit || !key || !address || !canReveal) {
       return;
     }
     const out = claiming ? claimWei : null;
@@ -91,7 +144,7 @@ export default function SummonScreen() {
     setError(null);
     // Let the screen show "Proving on this phone" before the proof starts.
     setTimeout(() => {
-      startReveal(kit, typedKey, address, out).then(
+      startReveal(kit, key, address, out).then(
         (started) => {
           setProving(false);
           setSequence(started);
@@ -106,7 +159,7 @@ export default function SummonScreen() {
 
   const unavailable = !kit || !address;
   const status = proving ? 'proving' : payment?.status;
-  const keyNeeded = payment?.needsKey && !typedKey;
+  const keyNeeded = payment?.needsKey && !key;
 
   return (
     <Screen
@@ -123,11 +176,20 @@ export default function SummonScreen() {
     >
       <Column>
         <Title>Summon</Title>
-        {!sequence || keyNeeded ? (
+        {(!sequence || keyNeeded) && fromCard ? (
+          <Panel style={styles.form} testID="summon-card-key">
+            <Text style={textStyles.quiet}>Phantom Key</Text>
+            <Text style={textStyles.body}>Read from your card. It stays in this iPhone&apos;s native core, not on screen.</Text>
+            {!sequence ? (
+              <Button label="Type a key instead" secondary onPress={typeKeyInstead} testID="summon-type-instead" />
+            ) : null}
+          </Panel>
+        ) : null}
+        {(!sequence || keyNeeded) && !fromCard ? (
           <>
             <Text style={textStyles.body}>
               {keyNeeded
-                ? 'The fee changed while the app was closed. Type the Phantom Key again to make a new proof.'
+                ? 'The fee changed while the app was closed. Type the Phantom Key again, or tap its card, to make a new proof.'
                 : 'Type or paste a Phantom Key: 24 words, or its digits. Its coins come back to your account.'}
             </Text>
             <Panel style={styles.form}>
@@ -153,6 +215,16 @@ export default function SummonScreen() {
             ) : null}
             {!sequence ? (
               <Button label="Find its coins" disabled={!rule.accept || unavailable} onPress={() => void find()} testID="summon-find" />
+            ) : null}
+            {cards ? (
+              <Button
+                label={tapping ? 'Hold the card near the iPhone' : 'Tap a card'}
+                icon="key"
+                secondary
+                disabled={unavailable || tapping}
+                onPress={() => void tapCard()}
+                testID="summon-tap-card"
+              />
             ) : null}
           </>
         ) : null}
@@ -224,6 +296,12 @@ export default function SummonScreen() {
               The proof is made on this phone; the key never leaves it and is not kept. Recovery words never go here:
               a Phantom Key holds coins, not your wallet.
             </Text>
+            {cards ? (
+              <Text style={textStyles.quiet} testID="summon-card-note">
+                A card can be read only on the iPhone that wrote it; its keys are in this iPhone&apos;s Keychain. On
+                another phone, type the key&apos;s words instead.
+              </Text>
+            ) : null}
           </Panel>
         )}
       </Column>

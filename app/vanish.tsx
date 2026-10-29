@@ -4,12 +4,14 @@
 // copied or saved to photos), three of them are typed back, the core drops
 // the key, and only then is the Vanish signed (ML-DSA-44) and sent. The
 // payment is saved at every step, so it survives the app being killed.
+// Once the three words are checked the key can also be put on a blank NTAG
+// 424 card before the core drops it: the card is never the only copy.
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { colors, monoFont } from '../components/theme';
-import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
+import { Button, ButtonRow, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
 import { PaymentProgress, PhantomKeyWords } from '../components/vanish-ui';
 import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
@@ -23,6 +25,7 @@ import { newestPayment } from '../lib/vanish/payments';
 import { isFinal, statusOfStep, stepName } from '../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import type { CorePaymentSequence } from '../modules/ghost-core';
+import { CardCancelled, cardsSupported, putPhantomKeyOnCard } from '../modules/ghost-nfc';
 
 /**
  * The Vanish the app was closed in, to show again. One still waiting for
@@ -49,6 +52,7 @@ type Phase =
   | { name: 'amount' }
   | { name: 'save'; words: string[] }
   | { name: 'check'; words: string[]; positions: number[] }
+  | { name: 'card' }
   | { name: 'sending' };
 
 export default function VanishScreen() {
@@ -65,6 +69,8 @@ export default function VanishScreen() {
   const [typed, setTyped] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [cards] = useState(cardsSupported);
+  const [writing, setWriting] = useState(false);
 
   useEffect(() => {
     if (!kit) {
@@ -96,9 +102,10 @@ export default function VanishScreen() {
     }
   }
 
-  function confirm() {
-    if (!kit || !sequence || phase.name !== 'check') {
-      return;
+  /** Whether the three typed words match the key; says which do not. */
+  function wordsMatch(): boolean {
+    if (!kit || phase.name !== 'check') {
+      return false;
     }
     const wrong = phase.positions.filter((position) => {
       try {
@@ -109,6 +116,21 @@ export default function VanishScreen() {
     });
     if (wrong.length > 0) {
       setError(`Word ${wrong.join(', ')} does not match your Phantom Key. Check what you wrote down.`);
+      return false;
+    }
+    return true;
+  }
+
+  function confirm() {
+    if (!kit || !sequence || phase.name !== 'check' || !wordsMatch()) {
+      return;
+    }
+    send();
+  }
+
+  /** Drops the key in the core and sends the Vanish. */
+  function send() {
+    if (!kit || !sequence) {
       return;
     }
     try {
@@ -122,6 +144,36 @@ export default function VanishScreen() {
     setError(null);
     // The words leave the screen's memory here.
     setPhase({ name: 'sending' });
+  }
+
+  /** Checks the words, then writes the key the core still holds to a blank card, then sends. */
+  function putOnCard() {
+    if (!kit || !sequence || phase.name !== 'check' || !wordsMatch()) {
+      return;
+    }
+    setTyped({});
+    setPhase({ name: 'card' });
+    void writeCard();
+  }
+
+  async function writeCard() {
+    setWriting(true);
+    setError(null);
+    try {
+      await putPhantomKeyOnCard();
+    } catch (failure) {
+      setError(
+        failure instanceof CardCancelled
+          ? 'No card was written. Try again, or Vanish without a card: your key words still work.'
+          : failure instanceof Error
+            ? failure.message
+            : 'The card could not be written.',
+      );
+      return;
+    } finally {
+      setWriting(false);
+    }
+    send();
   }
 
   function cancel() {
@@ -221,7 +273,37 @@ export default function VanishScreen() {
               onPress={confirm}
               testID="vanish-send"
             />
+            {cards ? (
+              <Button
+                label="Put on a card, then Vanish"
+                icon="key"
+                secondary
+                disabled={phase.positions.some((position) => (typed[position] ?? '').trim() === '')}
+                onPress={putOnCard}
+                testID="vanish-card"
+              />
+            ) : null}
             <Button label="Show the key again" secondary onPress={() => setPhase({ name: 'save', words: phase.words })} />
+          </>
+        ) : null}
+        {phase.name === 'card' ? (
+          <>
+            <Text style={textStyles.body} testID="vanish-card-hold">
+              {writing
+                ? 'Hold a blank NTAG 424 DNA card near the top of the iPhone until it says the key is on the card.'
+                : 'The card was not written. Nothing has been sent yet.'}
+            </Text>
+            {!writing ? (
+              <ButtonRow>
+                <Button label="Try the card again" icon="key" onPress={() => void writeCard()} testID="vanish-card-retry" />
+                <Button
+                  label={amount !== null ? `Vanish ${formatGhost(amount)} GHOST` : 'Vanish'}
+                  secondary
+                  onPress={send}
+                  testID="vanish-without-card"
+                />
+              </ButtonRow>
+            ) : null}
           </>
         ) : null}
         {error ? (
@@ -245,6 +327,13 @@ export default function VanishScreen() {
               The key is made on this phone and shown once. The Vanish is signed with your account and sent only after
               you have checked three of its words. Summon it back any time by typing the key.
             </Text>
+            {cards ? (
+              <Text style={textStyles.quiet} testID="vanish-card-note">
+                A blank NTAG 424 DNA card can hold the key too. The card must pass NXP&apos;s genuineness check, gets
+                its own random keys kept in this iPhone&apos;s Keychain, and can be read only on this iPhone. The words
+                stay your backup.
+              </Text>
+            ) : null}
           </Panel>
         )}
         {phase.name === 'sending' ? (

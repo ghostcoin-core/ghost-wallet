@@ -59,6 +59,11 @@ export type VanishBindings = {
   revealLeaf(envelope: ArrayBuffer): { marker: ArrayBuffer; leaf: CoinLeaf };
   findKeyCoins(keyText: string, chainId: bigint, leaves: CoinLeaf[], spent: ArrayBuffer[]): KeyCoins;
   proveKeyReveal(keyText: string, request: CoreRevealRequest, leaves: CoinLeaf[], spent: ArrayBuffer[]): CoreProvedReveal;
+  /** The card calls of core/src/card.rs: the key a tapped card handed to the core, never to JavaScript. */
+  hasCardKey(): boolean;
+  forgetCardKey(): void;
+  findCardKeyCoins(chainId: bigint, leaves: CoinLeaf[], spent: ArrayBuffer[]): KeyCoins;
+  proveCardKeyReveal(request: CoreRevealRequest, leaves: CoinLeaf[], spent: ArrayBuffer[]): CoreProvedReveal;
   revealFeeWei(bRefWei: string): string;
   minVanishWei(bRefWei: string): string;
   feeWindow(tip: bigint): { referenceHeight: bigint; validUntil: bigint };
