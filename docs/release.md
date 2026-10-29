@@ -20,7 +20,66 @@ With `EXPO_PUBLIC_GHOST_BUILD=release` the config:
 The same variable is read at runtime by the app to pick its node list; that
 lives under `lib/` and is not part of this configuration.
 
-## Building
+## Uploading to TestFlight
+
+`scripts/release-testflight.sh` makes a store build of the current commit on
+the Mac Studio (Xcode signed in to the team, CocoaPods, Node 22 and rustup
+installed) and uploads it to App Store Connect, from where it reaches
+TestFlight.
+
+1. Check out the commit to release, normally the tip of `main`. The script
+   refuses to run with any uncommitted change or untracked file, so the build
+   always matches a commit.
+2. Try it without uploading:
+
+   ```sh
+   bash scripts/release-testflight.sh --dry-run
+   ```
+
+   The dry run does everything except the upload and needs no App Store
+   Connect key. It leaves a signed `GhostWallet.ipa` in
+   `ios/build/release/export/` (git-ignored).
+3. Upload, with the App Store Connect API key:
+
+   ```sh
+   GHOST_ASC_KEY_PATH=<path to the .p8 file> \
+   GHOST_ASC_KEY_ID=<key id> \
+   GHOST_ASC_ISSUER_ID=<issuer id> \
+   bash scripts/release-testflight.sh
+   ```
+
+   - `GHOST_ASC_KEY_PATH`: the path of the API key's `.p8` file. Keep it outside
+     the repository (for example in `~/.appstoreconnect/`); never commit it.
+   - `GHOST_ASC_KEY_ID`: the key's id, shown next to it in App Store Connect
+     (Users and Access, Integrations).
+   - `GHOST_ASC_ISSUER_ID`: the issuer id shown on the same page.
+
+   Without all three, or when the key file does not exist, the script refuses
+   to run. It never prints their values.
+
+What the script does, in order:
+
+- checks the tree is clean, the build number and (unless `--dry-run`) the key
+  variables, before it builds anything;
+- prints the version and build number;
+- `pnpm install --frozen-lockfile`, builds the Rust core and its bindings as
+  `scripts/mac-install.sh` does;
+- `expo prebuild --platform ios --clean` with `EXPO_PUBLIC_GHOST_BUILD=release`
+  and `GHOST_BUILD_NUMBER` set, then `pod install`;
+- `xcodebuild archive` of the `Release` configuration into
+  `ios/build/release/GhostWallet.xcarchive`;
+- `xcodebuild -exportArchive` with an export options plist it writes to a
+  temporary file: method `app-store-connect`, automatic signing, the team id
+  and bundle id from `app.json`, and destination `upload` (or `export` for
+  `--dry-run`). A real run passes the key with `-authenticationKeyPath`,
+  `-authenticationKeyID` and `-authenticationKeyIssuerID`;
+- prints the version and build number again, and the `.ipa` path on a dry run.
+
+The build then shows in App Store Connect under TestFlight once Apple has
+processed it. Run prebuild again with `--clean` before going back to a dev
+build (the install script does).
+
+## Building by hand
 
 On the Mac Studio:
 
@@ -48,9 +107,14 @@ privacy manifest should exist.
   `package.json`. Bump it there.
 - The build number (`CFBundleVersion`) is `GHOST_BUILD_NUMBER`, a positive whole
   number, default `1`. App Store Connect rejects an upload whose build number is
-  not higher than the last one for the same version, so pass a higher number for
-  every upload (for example the CI run number). Anything that is not a positive
-  whole number stops the config from loading.
+  not higher than the last one for the same version, so every upload needs a
+  higher number. Anything that is not a positive whole number stops the config
+  from loading.
+- `scripts/release-testflight.sh` sets `GHOST_BUILD_NUMBER` to the number of
+  commits on the current branch (`git rev-list --count HEAD`), which goes up
+  with every commit on `main`; nothing is written to a file. It warns when run
+  off `main`. To use another number, set `GHOST_BUILD_NUMBER` yourself; the
+  script refuses one that is not a positive whole number.
 
 ## Export compliance: `ITSAppUsesNonExemptEncryption = false`
 
