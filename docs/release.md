@@ -8,9 +8,9 @@ exactly `app.json`.
 
 With `EXPO_PUBLIC_GHOST_BUILD=release` the config:
 
-- removes `NSAllowsLocalNetworking` (and the then-empty
-  `NSAppTransportSecurity` block) and `NSLocalNetworkUsageDescription` from the
-  Info.plist;
+- removes `NSLocalNetworkUsageDescription` from the Info.plist and sets
+  `NSAppTransportSecurity` to `NSAllowsArbitraryLoads = false`, so the React
+  Native template's `NSAllowsLocalNetworking` exception is replaced;
 - sets `ITSAppUsesNonExemptEncryption` to `false` (see below);
 - sets `ios.privacyManifests`, which prebuild writes to `PrivacyInfo.xcprivacy`
   in the app bundle;

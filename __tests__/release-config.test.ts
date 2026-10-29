@@ -53,7 +53,7 @@ describe('release configuration', () => {
   it('drops the local-networking exception and its usage text', () => {
     const plist = release().ios.infoPlist;
     expect(plist).not.toHaveProperty('NSLocalNetworkUsageDescription');
-    expect(plist.NSAppTransportSecurity?.NSAllowsLocalNetworking).toBeUndefined();
+    expect(plist.NSAppTransportSecurity).toEqual({ NSAllowsArbitraryLoads: false });
     expect(JSON.stringify(release())).not.toContain('NSAllowsLocalNetworking');
   });
 
