@@ -7,8 +7,8 @@
 //! nor see one:
 //!
 //! - [`ghost_wallet_card_copy_new_key`] copies the words of the key Vanish
-//!   holds, once they were shown and three of them typed back (the card is
-//!   never the only copy), for the card module to seal;
+//!   holds, once they were shown (the card is never the only copy), for the
+//!   card module to seal; a key put on a card needs no word typed back;
 //! - [`ghost_wallet_card_hold_key`] takes the words a card held, checks they
 //!   are a Phantom Key and holds them here.
 //!
@@ -27,7 +27,7 @@ use crate::vanish::{
 /// The key a card handed over: its words, wiped when replaced or forgotten.
 static CARD_KEY: Mutex<Option<String>> = Mutex::new(None);
 
-/// No key is held, or its words were not checked yet.
+/// No key is held, or its words were not shown yet.
 pub const CARD_NO_KEY: isize = -1;
 /// The buffer is too small for the words.
 pub const CARD_TOO_SMALL: isize = -2;
@@ -50,17 +50,21 @@ pub unsafe extern "C" fn ghost_wallet_card_copy_new_key(out: *mut u8, capacity: 
     if out.is_null() {
         return CARD_NULL;
     }
-    let copied = new_key().with_checked_words(|words| {
+    let copied = new_key().with_card_words(|words| {
         let bytes = words.as_bytes();
         if bytes.len() > capacity {
-            return CARD_TOO_SMALL;
+            return None;
         }
         // SAFETY: the caller guarantees `out` holds `capacity` bytes, and
         // `bytes.len() <= capacity`.
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
-        bytes.len() as isize
+        Some(bytes.len() as isize)
     });
-    copied.unwrap_or(CARD_NO_KEY)
+    match copied {
+        Ok(Some(length)) => length,
+        Ok(None) => CARD_TOO_SMALL,
+        Err(_) => CARD_NO_KEY,
+    }
 }
 
 /// Holds the Phantom Key a card handed over (`length` bytes of UTF-8 words

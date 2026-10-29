@@ -21,9 +21,10 @@ pub mod summon;
 pub mod vanish;
 
 pub use accounts::{
-    AccountError, AccountVault, CHECKED_WORDS, MemoryStore, SeedStore, check_new_account_word, discard_new_account,
-    has_account, import_account_words, is_account_word, is_listed_word, new_account_words, save_new_account,
-    saved_account_words, saved_account_zero_address,
+    AccountError, AccountVault, CHECKED_WORDS, MemoryStore, SeedStore, check_new_account_word,
+    check_saved_account_words, discard_new_account, has_account, import_account_words, is_account_word,
+    is_listed_word, new_account_words, save_new_account, save_new_account_unchecked, saved_account_words,
+    saved_account_zero_address,
 };
 pub use header_sync::{
     ChainState, DeviceConditions, HeaderChainConstants, HeaderProgress, HeaderRun, HeaderStore, HeaderSync,
@@ -49,8 +50,8 @@ pub use vanish::{
     BuiltPrivateTx, CHECKED_KEY_WORDS, COMMIT_DATA_BYTES, COMMIT_ENTRY, CoinLeaf, ENVELOPE_BYTES, FEE_WINDOW,
     FeeWindow, KeyCoins, KeyVault, MIN_VANISH_FEES, PRIVATE_TX_GAS, PRIVATE_TX_TYPE, ProvedReveal, RevealRequest,
     RevealedLeaf, SignedVanish, VANISH_GAS_LIMIT, VANISH_MIN_GAS, VanishCommit, VanishError, VanishSend, WordsCheck,
-    check_key_words, check_phantom_key_word, classify_words, commit_leaf, confirm_phantom_key_saved, fee_window,
-    find_coins, find_key_coins, forget_phantom_key, min_vanish_wei, parse_wei, prepare_vanish, private_envelope,
+    check_key_words, check_phantom_key_word, classify_words, commit_leaf, confirm_phantom_key_saved,
+    confirm_phantom_key_saved_unchecked, fee_window, find_coins, find_key_coins, forget_phantom_key, min_vanish_wei, parse_wei, prepare_vanish, private_envelope,
     prove_key_reveal, prove_reveal_with, reveal_fee, reveal_fee_wei, reveal_leaf, sign_vanish, sign_vanish_with,
     take_phantom_key_words, vanish_commit_with,
 };

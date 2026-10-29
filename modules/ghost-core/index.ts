@@ -32,6 +32,16 @@ type GhostCoreBindings = RestoreBindings &
    * three different words have been checked right, and when an account is saved already.
    */
   saveNewAccount(): void;
+  /**
+   * Saves the held new words with none checked, and forgets them. Only for a person who ticked
+   * "Skip the check"; throws when nothing is held, and when an account is saved already.
+   */
+  saveNewAccountUnchecked(): void;
+  /**
+   * Whether the words typed at `positions` (exactly three different ones) all match the saved
+   * account. It never says which word is wrong.
+   */
+  checkSavedAccountWords(positions: number[], words: string[]): boolean;
   /** Forgets the held new words without saving them. */
   discardNewAccount(): void;
   /** Whether `word` is in the account word list. */
@@ -52,7 +62,10 @@ export type VanishBindings = {
   prepareVanish(chainId: bigint, amountWei: string): CoreVanishCommit;
   takePhantomKeyWords(): string[];
   checkPhantomKeyWord(position: number, word: string): boolean;
+  /** Drops the held key once three words were typed back, or once it was put on a card. */
   confirmPhantomKeySaved(): void;
+  /** Drops the held key with no word typed back: only when the person ticked "Skip the check". */
+  confirmPhantomKeySavedUnchecked(): void;
   forgetPhantomKey(): void;
   signVanish(send: CoreVanishSend): CoreSigned;
   commitLeaf(commitData: ArrayBuffer, amountWei: string): CoinLeaf;
@@ -185,6 +198,16 @@ export function checkNewAccountWord(position: number, word: string): boolean {
 
 export function saveNewAccount(): void {
   bindings().saveNewAccount();
+}
+
+/** Saves the new account with no word checked: only when "Skip the check" is ticked. */
+export function saveNewAccountUnchecked(): void {
+  bindings().saveNewAccountUnchecked();
+}
+
+/** Whether the three typed words all match the saved account. */
+export function checkSavedAccountWords(positions: number[], words: string[]): boolean {
+  return bindings().checkSavedAccountWords(positions, words);
 }
 
 export function discardNewAccount(): void {

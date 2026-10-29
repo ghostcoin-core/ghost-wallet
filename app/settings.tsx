@@ -1,5 +1,6 @@
 // Settings, after docs/mockups/settings.html: the account, the recovery words
-// (behind Face ID), app lock, the node, and the app version. Tapping the
+// (behind Face ID), "Backup not checked" when the word check was skipped,
+// app lock, the node, and the app version. Tapping the
 // version seven times opens the bench screen.
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
@@ -24,6 +25,7 @@ import {
 import { accountZeroAddress } from '../lib/account';
 import { authenticate, authFailureMessage } from '../lib/device-auth';
 import { shortAddress } from '../lib/home/balance-format';
+import { useBackupUnchecked } from '../lib/onboarding/backup-status';
 import { createTapCounter } from '../lib/settings/developer-entry';
 import { DEFAULT_NODE_URL, normaliseNodeUrl, settingsStore, useSettings } from '../lib/settings/settings';
 
@@ -80,6 +82,7 @@ function NodeEditor({ nodeUrl, onDone }: { nodeUrl: string; onDone: () => void }
 export default function SettingsScreen() {
   const router = useRouter();
   const settings = useSettings();
+  const backupUnchecked = useBackupUnchecked();
   const [address] = useState(accountZeroAddress);
   const [editingNode, setEditingNode] = useState(false);
   const [lockMessage, setLockMessage] = useState<string | null>(null);
@@ -130,6 +133,16 @@ export default function SettingsScreen() {
           onPress={() => router.push('/recovery-words')}
           testID="settings-recovery-words"
         />
+        {backupUnchecked ? (
+          <Row
+            icon="warning"
+            title="Backup not checked"
+            detail="Check my words now"
+            opens
+            onPress={() => router.push('/check-words')}
+            testID="settings-backup-unchecked"
+          />
+        ) : null}
         <Row
           icon="cross"
           title="Wipe a card"

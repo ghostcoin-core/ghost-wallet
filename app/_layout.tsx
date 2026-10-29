@@ -29,6 +29,7 @@ function GuardedStack() {
         <Stack.Screen name="receive" />
         <Stack.Screen name="settings" />
         <Stack.Screen name="recovery-words" />
+        <Stack.Screen name="check-words" />
         <Stack.Screen name="vanish" />
         <Stack.Screen name="summon" />
         <Stack.Screen name="wipe-card" />

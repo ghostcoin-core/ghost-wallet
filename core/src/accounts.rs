@@ -6,7 +6,10 @@
 //! whether the word at a position is the one typed from paper, and
 //! [`save_new_account`] saves the seed to the Keychain once
 //! [`CHECKED_WORDS`] different words have been typed right. Until then
-//! [`discard_new_account`] forgets it.
+//! [`discard_new_account`] forgets it. The check can be skipped only by the
+//! person's own choice (the "Skip the check" box): the app then calls
+//! [`save_new_account_unchecked`] instead, and may later check three words of
+//! the saved account with [`check_saved_account_words`].
 //!
 //! Import: [`import_account_words`] checks 24 typed words (the word list and
 //! the checksum, by `ghost_client`) and saves them. [`is_account_word`] tells
@@ -51,6 +54,9 @@ pub enum AccountError {
     BadPosition { position: u32 },
     /// Too few words of the new account have been typed right to save it.
     NotChecked { checked: u32, needed: u32 },
+    /// A check of the saved account asks for a number of different words
+    /// other than [`CHECKED_WORDS`].
+    CheckCount { asked: u32, needed: u32 },
     /// An account is saved already, and it is never overwritten.
     AccountExists,
     /// No account is saved.
@@ -71,6 +77,9 @@ impl fmt::Display for AccountError {
             Self::BadPosition { position } => write!(f, "word {position} is not 1 to {SEED_WORDS}"),
             Self::NotChecked { checked, needed } => {
                 write!(f, "{checked} of the {needed} words to check have been typed right")
+            }
+            Self::CheckCount { asked, needed } => {
+                write!(f, "a check asks for {needed} different words, not {asked}")
             }
             Self::AccountExists => f.write_str("an account is saved already"),
             Self::NoAccount => f.write_str("no account is saved"),
@@ -220,6 +229,53 @@ impl<S: SeedStore> AccountVault<S> {
         Ok(())
     }
 
+    /// Saves the held new account and forgets it without any word typed
+    /// back: only for a person who ticked "Skip the check" and accepted that
+    /// a mistake in their paper copy cannot be put right. If the store
+    /// refuses, the account stays held.
+    pub fn save_new_account_unchecked(&self) -> Result<(), AccountError> {
+        let mut held = self.held();
+        let account = held.as_ref().ok_or(AccountError::NoNewAccount)?;
+        self.store.save(&account.seed)?;
+        *held = None;
+        Ok(())
+    }
+
+    /// Whether every one of `checks` (a position, 1 to 24, and the word typed
+    /// for it) matches the saved account, ignoring surrounding spaces and
+    /// case. It takes exactly [`CHECKED_WORDS`] different positions and says
+    /// only whether all of them match, never which, so it cannot be used to
+    /// guess the words one by one.
+    pub fn check_saved_account_words(&self, checks: &[(u32, &str)]) -> Result<bool, AccountError> {
+        let mut indexes = Vec::with_capacity(checks.len());
+        for (position, _) in checks {
+            let index = position
+                .checked_sub(1)
+                .and_then(|index| usize::try_from(index).ok())
+                .filter(|index| *index < SEED_WORDS)
+                .ok_or(AccountError::BadPosition { position: *position })?;
+            indexes.push(index);
+        }
+        let mut distinct = indexes.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if checks.len() != CHECKED_WORDS as usize || distinct.len() != checks.len() {
+            let asked = u32::try_from(distinct.len()).unwrap_or(u32::MAX);
+            return Err(AccountError::CheckCount { asked, needed: CHECKED_WORDS });
+        }
+        let seed = self.saved_seed()?;
+        let words = seed.to_words();
+        let held: Vec<&str> = words.as_str().split_whitespace().collect();
+        // Every word is compared, whatever the first mismatch.
+        let all = indexes
+            .iter()
+            .zip(checks)
+            .fold(true, |all, (index, (_, word))| same_word(held[*index], word.trim()) & all);
+        drop(held);
+        drop(words);
+        Ok(all)
+    }
+
     /// Forgets the held new account without saving it.
     pub fn discard_new_account(&self) {
         *self.held() = None;
@@ -355,6 +411,32 @@ pub fn check_new_account_word(position: u32, word: String) -> Result<bool, Accou
 #[uniffi::export]
 pub fn save_new_account() -> Result<(), AccountError> {
     ACCOUNTS.save_new_account()
+}
+
+/// Saves the held new account to the Keychain, this device only, and forgets
+/// it, with no word typed back. The app calls this only when the person
+/// ticked "Skip the check".
+#[uniffi::export]
+pub fn save_new_account_unchecked() -> Result<(), AccountError> {
+    ACCOUNTS.save_new_account_unchecked()
+}
+
+/// Whether the words typed at `positions` (exactly [`CHECKED_WORDS`]
+/// different ones) all match the saved account; the words are wiped once
+/// read, and the answer never says which one is wrong.
+#[uniffi::export]
+pub fn check_saved_account_words(positions: Vec<u32>, words: Vec<String>) -> Result<bool, AccountError> {
+    let result = if positions.len() == words.len() {
+        let checks: Vec<(u32, &str)> = positions.iter().copied().zip(words.iter().map(String::as_str)).collect();
+        ACCOUNTS.check_saved_account_words(&checks)
+    } else {
+        let asked = u32::try_from(positions.len().min(words.len())).unwrap_or(u32::MAX);
+        Err(AccountError::CheckCount { asked, needed: CHECKED_WORDS })
+    };
+    for word in words {
+        wipe_string(word);
+    }
+    result
 }
 
 /// Forgets the held new account without saving it.

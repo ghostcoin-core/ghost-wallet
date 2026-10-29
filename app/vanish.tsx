@@ -4,8 +4,10 @@
 // copied or saved to photos), three of them are typed back, the core drops
 // the key, and only then is the Vanish signed (ML-DSA-44) and sent. The
 // payment is saved at every step, so it survives the app being killed.
-// Once the three words are checked the key can also be put on a blank NTAG
-// 424 card before the core drops it: the card is never the only copy.
+// The person may tick "Skip the check" instead of typing the words (unticked
+// every time); the core then drops the key unchecked. Once the words were
+// shown the key can also be put on a blank NTAG 424 card before the core
+// drops it, with no word check: the card is never the only copy.
 // Done shows only once the Vanish is settled or failed; until then the person
 // may leave, and Home lists it as pending. Leaving before the key is written
 // down (or on its card) keeps the key: opening the Vanish again returns there.
@@ -28,6 +30,7 @@ import {
   textStyles,
   Title,
 } from '../components/ui';
+import { SkipCheckBox } from '../components/skip-check';
 import { PaymentExit, PaymentProgress, PhantomKeyWords } from '../components/vanish-ui';
 import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
@@ -98,7 +101,8 @@ type Phase =
   | { name: 'amount' }
   | { name: 'save'; words: string[] }
   | { name: 'check'; words: string[]; positions: number[] }
-  | { name: 'card' }
+  /** `checked`: the three words were typed back before the card. */
+  | { name: 'card'; checked: boolean; positions: number[] | null }
   | { name: 'sending' };
 
 function resumedPhase(resumed: ReturnType<typeof resumeVanish>): Phase {
@@ -112,7 +116,7 @@ function resumedPhase(resumed: ReturnType<typeof resumeVanish>): Phase {
     case 'check':
       return { name: 'check', words: held.words, positions: held.positions ?? pickCheckPositions() };
     case 'card':
-      return { name: 'card' };
+      return { name: 'card', checked: held.checked === true, positions: held.positions };
     default:
       return { name: 'sending' };
   }
@@ -134,6 +138,8 @@ export default function VanishScreen() {
   const [busy, setBusy] = useState(false);
   const [cards] = useState(cardsSupported);
   const [writing, setWriting] = useState(false);
+  // Never remembered: every check starts unticked.
+  const [skip, setSkip] = useState(false);
 
   useEffect(() => {
     if (!kit) {
@@ -159,6 +165,7 @@ export default function VanishScreen() {
    */
   function keyStep(next: Extract<Phase, { name: 'save' | 'check' | 'card' }>, of: CorePaymentSequence | null = sequence) {
     setPhase(next);
+    setSkip(false);
     if (!of) {
       return;
     }
@@ -168,8 +175,8 @@ export default function VanishScreen() {
     } else if (next.name === 'check') {
       holdVanish({ id, step: 'check', words: next.words, positions: next.positions });
     } else {
-      // The words were checked: the card step needs only the key the core holds.
-      holdVanish({ id, step: 'card', words: [], positions: null });
+      // The words were shown: the card step needs only the key the core holds.
+      holdVanish({ id, step: 'card', words: [], positions: next.positions, checked: next.checked });
     }
   }
 
@@ -211,19 +218,33 @@ export default function VanishScreen() {
   }
 
   function confirm() {
-    if (!kit || !sequence || phase.name !== 'check' || !wordsMatch()) {
+    if (!kit || !sequence || phase.name !== 'check') {
       return;
     }
-    send();
+    if (skip) {
+      // The person chose to skip: the core drops the key with no word typed back.
+      send(true);
+      return;
+    }
+    if (wordsMatch()) {
+      send();
+    }
   }
 
-  /** Drops the key in the core and sends the Vanish. */
-  function send() {
+  /**
+   * Drops the key in the core and sends the Vanish. `unchecked` only when the
+   * person ticked "Skip the check".
+   */
+  function send(unchecked = false) {
     if (!kit || !sequence) {
       return;
     }
     try {
-      kit.core.confirmPhantomKeySaved();
+      if (unchecked) {
+        kit.core.confirmPhantomKeySavedUnchecked();
+      } else {
+        kit.core.confirmPhantomKeySaved();
+      }
       sequence.markBackedUp();
     } catch {
       setError('The Vanish could not be saved. Nothing was sent.');
@@ -236,14 +257,37 @@ export default function VanishScreen() {
     setPhase({ name: 'sending' });
   }
 
-  /** Checks the words, then writes the key the core still holds to a blank card, then sends. */
+  /**
+   * Writes the key the core still holds to a blank card, then sends. A card
+   * needs no word check; words typed in full are still checked, so a mistake
+   * on the paper is caught.
+   */
   function putOnCard() {
-    if (!kit || !sequence || phase.name !== 'check' || !wordsMatch()) {
+    if (!kit || !sequence || phase.name !== 'check') {
+      return;
+    }
+    const typedAll = phase.positions.every((position) => (typed[position] ?? '').trim() !== '');
+    const checked = !skip && typedAll;
+    if (checked && !wordsMatch()) {
       return;
     }
     setTyped({});
-    keyStep({ name: 'card' });
+    keyStep({ name: 'card', checked, positions: phase.positions });
     void writeCard();
+  }
+
+  /** After a card was not written: sends if the words were checked, or goes back to the check. */
+  function vanishWithoutCard() {
+    if (phase.name !== 'card') {
+      return;
+    }
+    if (phase.checked) {
+      send();
+      return;
+    }
+    setError(null);
+    // The words left the screen at the card step: the check goes on without them.
+    keyStep({ name: 'check', words: [], positions: phase.positions ?? pickCheckPositions() });
   }
 
   async function writeCard() {
@@ -362,28 +406,31 @@ export default function VanishScreen() {
                 </View>
               ))}
             </Panel>
+            <SkipCheckBox
+              checked={skip}
+              onChange={(checked) => {
+                setSkip(checked);
+                setError(null);
+              }}
+              testID="vanish-skip-check"
+            />
             <Button
               label={vanishAmount !== null ? `Vanish ${formatGhost(vanishAmount)} GHOST` : 'Vanish'}
-              disabled={phase.positions.some((position) => (typed[position] ?? '').trim() === '')}
+              disabled={!skip && phase.positions.some((position) => (typed[position] ?? '').trim() === '')}
               onPress={confirm}
               testID="vanish-send"
             />
             {cards ? (
+              <Button label="Put on a card, then Vanish" icon="key" secondary onPress={putOnCard} testID="vanish-card" />
+            ) : null}
+            {phase.words.length > 0 ? (
               <Button
-                label="Put on a card, then Vanish"
-                icon="key"
+                label="Show the key again"
                 secondary
-                disabled={phase.positions.some((position) => (typed[position] ?? '').trim() === '')}
-                onPress={putOnCard}
-                testID="vanish-card"
+                onPress={() => keyStep({ name: 'save', words: phase.words })}
+                testID="vanish-show-again"
               />
             ) : null}
-            <Button
-              label="Show the key again"
-              secondary
-              onPress={() => keyStep({ name: 'save', words: phase.words })}
-              testID="vanish-show-again"
-            />
             <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" />
           </>
         ) : null}
@@ -400,7 +447,7 @@ export default function VanishScreen() {
                 <Button
                   label={vanishAmount !== null ? `Vanish ${formatGhost(vanishAmount)} GHOST` : 'Vanish'}
                   secondary
-                  onPress={send}
+                  onPress={vanishWithoutCard}
                   testID="vanish-without-card"
                 />
               </ButtonRow>
@@ -427,7 +474,8 @@ export default function VanishScreen() {
             <Text style={textStyles.quiet}>How it works</Text>
             <Text style={textStyles.body}>
               The key is made on this phone and shown once. The Vanish is signed with your account and sent only after
-              you have checked three of its words. Summon it back any time by typing the key.
+              you have checked three of its words, or chosen to skip the check. Summon it back any time by typing the
+              key.
             </Text>
             {cards ? (
               <Text style={textStyles.quiet} testID="vanish-card-note">

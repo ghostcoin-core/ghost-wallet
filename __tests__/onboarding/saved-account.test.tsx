@@ -3,6 +3,7 @@ import { act, fireEvent, renderRouter, screen } from 'expo-router/testing-librar
 import BackupScreen from '../../app/backup';
 import BenchScreen from '../../app/bench';
 import CheckScreen from '../../app/check';
+import CheckWordsScreen from '../../app/check-words';
 import HomeScreen from '../../app/home';
 import ImportScreen from '../../app/import';
 import WelcomeScreen from '../../app/index';
@@ -128,6 +129,7 @@ const APP = {
   receive: ReceiveScreen,
   settings: SettingsScreen,
   'recovery-words': RecoveryWordsScreen,
+  'check-words': CheckWordsScreen,
   bench: BenchScreen,
 };
 
