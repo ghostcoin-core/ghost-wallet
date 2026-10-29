@@ -35,6 +35,7 @@ describe('route guards', () => {
   it('with an unlocked account opens the wallet screens and the bench, and no onboarding screen', () => {
     expect(openRoutes(UNLOCKED).sort()).toEqual([
       'bench',
+      'check-words',
       'home',
       'receive',
       'recovery-words',
