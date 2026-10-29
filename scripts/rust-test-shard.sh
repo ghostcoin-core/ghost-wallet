@@ -25,14 +25,14 @@ manifest=core/Cargo.toml
 cargo test --manifest-path "$manifest" --locked --no-run
 
 # Test targets as cargo selectors: "lib" or "test <name>".
-mapfile -t targets < <(
-  cargo metadata --manifest-path "$manifest" --locked --no-deps --format-version 1 |
-    jq -r '.packages[0].targets[]
-      | if any(.kind[]; . == "lib") then "lib"
-        elif any(.kind[]; . == "test") then "test " + .name
-        else empty end' |
-    LC_ALL=C sort
-)
+# Each command is checked on its own: a failure inside a pipe or a command
+# substitution must stop the script, never shrink the list of tests.
+metadata=$(cargo metadata --manifest-path "$manifest" --locked --no-deps --format-version 1)
+target_list=$(printf '%s\n' "$metadata" | jq -r '.packages[0].targets[]
+  | if any(.kind[]; . == "lib") then "lib"
+    elif any(.kind[]; . == "test") then "test " + .name
+    else empty end')
+mapfile -t targets < <(printf '%s\n' "$target_list" | LC_ALL=C sort | grep .)
 
 if [ "${#targets[@]}" -eq 0 ]; then
   echo "no test targets found" >&2
@@ -48,14 +48,15 @@ selector_for() {
 }
 
 # One line per test: "<target><TAB><test name>", in a fixed order.
-all_tests=$(
-  for target in "${targets[@]}"; do
-    selector_for "$target"
-    cargo test --manifest-path "$manifest" --locked "${selector[@]}" -- --list --format terse |
-      sed -n 's/: test$//p' |
-      while IFS= read -r name; do printf '%s\t%s\n' "$target" "$name"; done
-  done | LC_ALL=C sort
-)
+all_tests=""
+for target in "${targets[@]}"; do
+  selector_for "$target"
+  listing=$(cargo test --manifest-path "$manifest" --locked "${selector[@]}" -- --list --format terse)
+  while IFS= read -r name; do
+    all_tests+="$target"$'\t'"$name"$'\n'
+  done < <(printf '%s\n' "$listing" | sed -n 's/: test$//p')
+done
+all_tests=$(printf '%s' "$all_tests" | LC_ALL=C sort)
 
 if [ -z "$all_tests" ]; then
   echo "no tests found" >&2
@@ -64,7 +65,11 @@ fi
 
 total=$(printf '%s\n' "$all_tests" | wc -l)
 mine=$(printf '%s\n' "$all_tests" | awk -F '\t' -v i="$index" -v n="$count" '(NR - 1) % n == i')
-echo "==> shard $index of $count: $(printf '%s' "$mine" | grep -c . || true) of $total tests"
+if [ -z "$mine" ]; then
+  echo "shard $index of $count has no tests (only $total in all); use fewer shards" >&2
+  exit 1
+fi
+echo "==> shard $index of $count: $(printf '%s\n' "$mine" | wc -l) of $total tests"
 
 for target in "${targets[@]}"; do
   mapfile -t names < <(printf '%s\n' "$mine" | awk -F '\t' -v t="$target" '$1 == t { print $2 }')
