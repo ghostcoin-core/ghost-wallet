@@ -1,17 +1,21 @@
 // 3. Check words (docs/mockups/backup-check.html): three of the 24 words, typed
 // from paper. The native core compares them with the words it holds and, once
-// all three match, saves the account to the Keychain.
+// all three match, saves the account to the Keychain. The person may tick
+// "Skip the check" instead (unticked every time): the core then saves the
+// account unchecked, and Settings says the backup is not checked.
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { Screen, useScreenLayout } from '../components/screen';
 import { Body, Button, Title } from '../components/onboarding-ui';
+import { SkipCheckBox } from '../components/skip-check';
 import { WordField } from '../components/word-field';
+import { backupStatusStore } from '../lib/onboarding/backup-status';
 import { allTyped, checkTypedWords, pickCheckPositions, WORD_COUNT } from '../lib/onboarding/word-check';
 import { useSession } from '../lib/session';
 import { colours, fonts } from '../lib/theme';
-import { checkNewAccountWord, saveNewAccount } from '../modules/ghost-core';
+import { checkNewAccountWord, saveNewAccount, saveNewAccountUnchecked } from '../modules/ghost-core';
 
 function checkMessage(wrong: number[]): string {
   return wrong.length === 1
@@ -27,8 +31,14 @@ export default function CheckScreen() {
   const [typed, setTyped] = useState<Record<number, string>>({});
   const [wrong, setWrong] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [skip, setSkip] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-  function confirm() {
+  async function confirm() {
+    if (skip) {
+      await saveUnchecked();
+      return;
+    }
     let result;
     try {
       result = checkTypedWords(positions, typed, checkNewAccountWord);
@@ -47,16 +57,54 @@ export default function CheckScreen() {
       setError('Your account could not be saved on this phone. Go back and try again.');
       return;
     }
+    if (backupStatusStore.unchecked()) {
+      // Left over from an account that was never saved.
+      backupStatusStore.setChecked(true).catch(() => {});
+    }
     setError(null);
     // The onboarding screens close now and the router opens Home.
     session.accountSaved();
   }
 
+  /** The person ticked "Skip the check": the backup is marked not checked first, so the mark is never lost. */
+  async function saveUnchecked() {
+    setSaving(true);
+    try {
+      await backupStatusStore.setChecked(false);
+    } catch {
+      setSaving(false);
+      setError('Your account could not be saved on this phone. Go back and try again.');
+      return;
+    }
+    try {
+      saveNewAccountUnchecked();
+    } catch {
+      backupStatusStore.setChecked(true).catch(() => {});
+      setSaving(false);
+      setError('Your account could not be saved on this phone. Go back and try again.');
+      return;
+    }
+    setError(null);
+    session.accountSaved();
+  }
+
+  const skipBox = (
+    <SkipCheckBox
+      checked={skip}
+      onChange={(checked) => {
+        setSkip(checked);
+        setError(null);
+        setWrong([]);
+      }}
+      testID="check-skip"
+    />
+  );
+
   const confirmButton = (
     <Button
-      disabled={!allTyped(positions, typed)}
+      disabled={saving || (!skip && !allTyped(positions, typed))}
       label="Confirm and open my account"
-      onPress={confirm}
+      onPress={() => void confirm()}
       testID="check-confirm"
     />
   );
@@ -113,6 +161,7 @@ export default function CheckScreen() {
           {error}
         </Text>
       ) : null}
+      {skipBox}
       {twoColumn ? (
         <>
           <View style={styles.grow} />

@@ -8,7 +8,9 @@
 //! written down before anything is sent: it is held in native memory only
 //! while [`take_phantom_key_words`] hands its 24 words to the screen that
 //! shows them (once) and [`check_phantom_key_word`] checks three of them typed
-//! back; [`confirm_phantom_key_saved`] then drops it. It is never saved, so a
+//! back; [`confirm_phantom_key_saved`] then drops it. A key put on a card
+//! needs no word check, and a person who ticks "Skip the check" has it
+//! dropped by [`confirm_phantom_key_saved_unchecked`]. It is never saved, so a
 //! kill before then leaves nothing signed and nothing lost. [`sign_vanish`] signs the
 //! account transaction (`0x52`, rescue-key scheme `0x0003`, hedged ML-DSA-44)
 //! that pays the amount to the coin commit entry with that data. It needs no
@@ -261,11 +263,14 @@ pub struct VanishCommit {
 /// Vanish is sent, as in Ghost's web app.
 pub const CHECKED_KEY_WORDS: u32 = 3;
 
-/// A new Phantom Key, held until three of its words are typed back.
+/// A new Phantom Key, held until three of its words are typed back, it is put
+/// on a card, or the person skips the check.
 struct HeldKey {
     key: PhantomKey,
     shown: bool,
     checked: [bool; 24],
+    /// Its words were copied out for a card.
+    on_card: bool,
 }
 
 /// A new Phantom Key: its words handed out once, then three of them typed
@@ -295,7 +300,7 @@ impl KeyVault {
     ) -> Result<VanishCommit, VanishError> {
         let key = PhantomKey::generate(KeyFormat::Words, rng);
         let commit = vanish_commit_with(&key, chain_id, amount_wei, rng)?;
-        *self.lock() = Some(HeldKey { key, shown: false, checked: [false; 24] });
+        *self.lock() = Some(HeldKey { key, shown: false, checked: [false; 24], on_card: false });
         Ok(commit)
     }
 
@@ -329,13 +334,29 @@ impl KeyVault {
         Ok(matches)
     }
 
-    /// Once [`CHECKED_KEY_WORDS`] different words were typed back, drops the
-    /// key: the person has it, and the phone keeps nothing.
+    /// Once [`CHECKED_KEY_WORDS`] different words were typed back, or the
+    /// words were copied out for a card (a card needs no word check), drops
+    /// the key: the person has it, and the phone keeps nothing.
     pub fn confirm_saved(&self) -> Result<(), VanishError> {
         let mut held = self.lock();
         let key = held.as_ref().ok_or(VanishError::NoKeyHeld)?;
         let checked = key.checked.iter().filter(|checked| **checked).count() as u32;
-        if !key.shown || checked < CHECKED_KEY_WORDS {
+        if !key.shown || (checked < CHECKED_KEY_WORDS && !key.on_card) {
+            return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
+        }
+        *held = None;
+        Ok(())
+    }
+
+    /// Drops the key once its words were shown, with none typed back: only
+    /// for a person who ticked "Skip the check" and accepted that a mistake
+    /// in what they wrote down loses the coins. Words never shown are still
+    /// refused, so a key is never dropped unseen.
+    pub fn confirm_saved_unchecked(&self) -> Result<(), VanishError> {
+        let mut held = self.lock();
+        let key = held.as_ref().ok_or(VanishError::NoKeyHeld)?;
+        if !key.shown {
+            let checked = key.checked.iter().filter(|checked| **checked).count() as u32;
             return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
         }
         *held = None;
@@ -352,18 +373,23 @@ impl KeyVault {
         self.lock().is_some()
     }
 
-    /// Runs `use_words` on the held key's words once they were shown and
-    /// [`CHECKED_KEY_WORDS`] of them typed back, so a card never holds the
-    /// only copy of a key. The key stays held.
-    pub fn with_checked_words<T>(&self, use_words: impl FnOnce(&str) -> T) -> Result<T, VanishError> {
-        let guard = self.lock();
-        let held = guard.as_ref().ok_or(VanishError::NoKeyHeld)?;
-        let checked = held.checked.iter().filter(|checked| **checked).count() as u32;
-        if !held.shown || checked < CHECKED_KEY_WORDS {
+    /// Runs `use_words` on the held key's words for a card, once they were
+    /// shown (so a card never holds the only copy of a key); no word needs
+    /// typing back. The key stays held, and is marked as on a card when
+    /// `use_words` took the words (returned `Some`).
+    pub fn with_card_words<T>(&self, use_words: impl FnOnce(&str) -> Option<T>) -> Result<Option<T>, VanishError> {
+        let mut guard = self.lock();
+        let held = guard.as_mut().ok_or(VanishError::NoKeyHeld)?;
+        if !held.shown {
+            let checked = held.checked.iter().filter(|checked| **checked).count() as u32;
             return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
         }
         let words = held.key.format_words().ok_or_else(|| malformed("the key has no words view"))?;
-        Ok(use_words(words.as_str()))
+        let result = use_words(words.as_str());
+        if result.is_some() {
+            held.on_card = true;
+        }
+        Ok(result)
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<HeldKey>> {
@@ -436,11 +462,18 @@ pub fn check_phantom_key_word(position: u32, word: String) -> Result<bool, Vanis
     result
 }
 
-/// Drops the held key once three of its words were typed back; the Vanish
-/// is then backed up and may be signed.
+/// Drops the held key once three of its words were typed back (or it was put
+/// on a card); the Vanish is then backed up and may be signed.
 #[uniffi::export]
 pub fn confirm_phantom_key_saved() -> Result<(), VanishError> {
     NEW_KEY.confirm_saved()
+}
+
+/// Drops the held key once its words were shown, with none typed back. The
+/// app calls this only when the person ticked "Skip the check".
+#[uniffi::export]
+pub fn confirm_phantom_key_saved_unchecked() -> Result<(), VanishError> {
+    NEW_KEY.confirm_saved_unchecked()
 }
 
 /// Forgets the held Phantom Key without showing it.

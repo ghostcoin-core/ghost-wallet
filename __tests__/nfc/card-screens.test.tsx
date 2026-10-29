@@ -118,7 +118,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(screen.getByTestId('payment-progress')).toBeOnTheScreen();
   });
 
-  it('does not put a key on a card before its words are checked', async () => {
+  it('does not put a key on a card when the words typed for it are wrong', async () => {
     renderOn(device, VanishScreen);
     await reachCheck();
     for (const field of screen.getAllByTestId(/^vanish-check-\d+$/)) fireEvent.changeText(field, 'zoo');

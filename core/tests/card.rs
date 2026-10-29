@@ -1,5 +1,5 @@
-//! The card bridge: a card gets the new key only once its words were
-//! checked, and the key a card hands back finds its coin like a typed key.
+//! The card bridge: a card gets the new key once its words were shown (no
+//! word check), and the key a card hands back finds its coin like a typed key.
 
 use ghost_client::account::WalletSeed;
 use ghost_client::{KeyFormat, PhantomKey};
@@ -36,19 +36,34 @@ fn tree_with(key: &PhantomKey, wei: u128) -> Vec<CoinLeaf> {
     ]
 }
 
+fn copy(words: &str) -> Option<String> {
+    Some(words.to_owned())
+}
+
 #[test]
-fn a_card_gets_the_new_key_only_after_its_words_were_shown_and_checked() {
+fn a_card_gets_the_new_key_once_its_words_were_shown_with_no_word_check() {
     let vault = KeyVault::new();
-    assert!(matches!(vault.with_checked_words(str::to_owned), Err(VanishError::NoKeyHeld)));
+    assert!(matches!(vault.with_card_words(copy), Err(VanishError::NoKeyHeld)));
     vault.prepare_with(TEST_CHAIN_ID, ONE_GHOST, &mut rng(30)).unwrap();
-    assert!(matches!(vault.with_checked_words(str::to_owned), Err(VanishError::NotChecked { checked: 0, .. })));
+    // Never before the words were shown: the card is never the only copy.
+    assert!(matches!(vault.with_card_words(copy), Err(VanishError::NotChecked { checked: 0, .. })));
     let words = vault.take_words().unwrap();
-    for position in 1..=CHECKED_KEY_WORDS {
-        assert!(matches!(vault.with_checked_words(str::to_owned), Err(VanishError::NotChecked { .. })));
-        assert!(vault.check_word(position, &words[position as usize - 1]).unwrap());
-    }
-    assert_eq!(vault.with_checked_words(str::to_owned).unwrap(), words.join(" "));
-    // The key stays held for the Vanish to go on.
+    // Not one word typed back, and the confirm is still refused.
+    assert_eq!(vault.confirm_saved(), Err(VanishError::NotChecked { checked: 0, needed: CHECKED_KEY_WORDS }));
+    assert_eq!(vault.with_card_words(copy).unwrap(), Some(words.join(" ")));
+    // The key stays held for the Vanish to go on, and once on a card it may be dropped.
+    assert!(vault.holds_key());
+    vault.confirm_saved().unwrap();
+    assert!(!vault.holds_key());
+}
+
+#[test]
+fn a_card_copy_that_did_not_fit_does_not_count_as_on_a_card() {
+    let vault = KeyVault::new();
+    vault.prepare_with(TEST_CHAIN_ID, ONE_GHOST, &mut rng(34)).unwrap();
+    vault.take_words().unwrap();
+    assert_eq!(vault.with_card_words(|_| None::<isize>).unwrap(), None);
+    assert!(matches!(vault.confirm_saved(), Err(VanishError::NotChecked { checked: 0, .. })));
     assert!(vault.holds_key());
 }
 
