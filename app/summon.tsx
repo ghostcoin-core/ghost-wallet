@@ -16,6 +16,7 @@ import { CoinsBack, PaymentProgress } from '../components/vanish-ui';
 import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
 import { formatGhost } from '../lib/home/balance-format';
+import { failureReason } from '../lib/node/failure-reason';
 import { useSettings } from '../lib/settings/settings';
 import { CARD_KEY, lookUpKey, proveRevealAgain, startReveal, type KeyLookup, type KeySource } from '../lib/vanish/actions';
 import { parseGhostAmount } from '../lib/vanish/amount';
@@ -101,7 +102,7 @@ export default function SummonScreen() {
     try {
       setLookup(await lookUpKey(kit, source));
     } catch (failure) {
-      setError(failure instanceof Error ? `The coins could not be looked up: ${failure.message}` : 'The coins could not be looked up.');
+      setError(`The coins could not be looked up. ${failureReason(failure, kit.nodeUrl)}`);
     }
   }
 
@@ -151,7 +152,7 @@ export default function SummonScreen() {
         },
         (failure) => {
           setProving(false);
-          setError(failure instanceof Error ? `The coins could not be summoned: ${failure.message}` : 'The coins could not be summoned.');
+          setError(`The coins could not be summoned. ${failureReason(failure, kit.nodeUrl)}`);
         },
       );
     }, 50);

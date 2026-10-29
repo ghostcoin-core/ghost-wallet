@@ -52,6 +52,7 @@ jest.mock('../lib/storage', () => ({
 jest.mock('../lib/home/read-account', () => ({
   readAccountZero: () => new Promise(() => {}),
 }));
+jest.mock('../lib/node/test-network', () => ({ useTestNetwork: () => false }));
 
 const mockAuthenticate = jest.fn();
 jest.mock('../lib/device-auth', () => ({
@@ -178,7 +179,7 @@ describe('SettingsScreen', () => {
     expect(screen.getByText('App lock')).toBeOnTheScreen();
     // The badge in the top bar and the network row.
     expect(screen.getAllByText('Test network')).toHaveLength(2);
-    expect(screen.getByText('http://127.0.0.1:8547')).toBeOnTheScreen();
+    expect(screen.getByText('http://192.168.1.36:8547')).toBeOnTheScreen();
     expect(screen.getByTestId('settings-version-detail')).toHaveTextContent(/^Version .+, experimental$/);
   });
 

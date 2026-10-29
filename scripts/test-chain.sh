@@ -10,6 +10,7 @@
 #   bash scripts/test-chain.sh height          # print the node's tip height
 #   bash scripts/test-chain.sh checkpoint <h>  # print the checkpoint JSON for block <h>
 #   bash scripts/test-chain.sh fund-late <h>   # at height <h>, fund the test accounts again
+#   bash scripts/test-chain.sh faucet          # serve test GHOST to the app on port 8548
 #
 # `checkpoint` prints the JSON the benchmarks take in the test-only override
 # benchTestChain.checkpoint: the header RLP of block <h> (the 19 fields in the
@@ -22,6 +23,12 @@
 # `fund-late` sends 1 GHOST to accounts 0, 3 and 7 again, every time it runs,
 # once the chain reaches <h>, and prints the lowest block holding them: recent
 # activity on the test accounts, on top of the first funding near block 0.
+#
+# `faucet` serves the app's "Get test GHOST" on port 8548 on every interface,
+# in the foreground: POST {"address": "0x…"} to /faucet and the miner sends
+# 10 test GHOST there, at most once a minute per address. The miner key is
+# the public test key below, so the faucet gives away nothing of value. It
+# needs Node.
 #
 # Runs on macOS only (Go 1.26+, git, make, curl and rustup installed; the Rust
 # toolchain is the one pinned in ghost-node's rust-toolchain.toml). The node
@@ -40,6 +47,7 @@ HOME_DIR="${GHOST_TESTCHAIN_HOME:-$HOME/.ghost-wallet-testchain}"
 NODE_REPO="${GHOST_NODE_REPO:-https://github.com/ghostcoin-core/ghost-node.git}"
 NODE_COMMIT="${GHOST_NODE_COMMIT:-9d46dfcba9149260db8a40116d0309d647d90439}"
 PORT=8547
+FAUCET_PORT=8548
 CHAIN_ID=6777971
 
 SRC="$HOME_DIR/ghost-node"
@@ -70,7 +78,7 @@ say() {
 
 usage() {
   echo "usage: bash scripts/test-chain.sh start | wait <height> | stop | genesis | height" \
-    "| checkpoint <height> | fund-late <height>" >&2
+    "| checkpoint <height> | fund-late <height> | faucet" >&2
   exit 2
 }
 
@@ -542,6 +550,130 @@ if (mainAt >= 0) {
 JS
 }
 
+cmd_faucet() {
+  [ "$#" -eq 0 ] || usage
+  running || fail "the node is not running; run: bash scripts/test-chain.sh start"
+  command -v node >/dev/null 2>&1 || fail "node is not installed"
+  local miner
+  miner="$(miner_address)"
+  [ -n "$miner" ] || fail "no miner account in $DATA"
+  say "sending 10 test GHOST from $miner to each address POSTed to http://0.0.0.0:$FAUCET_PORT/faucet"
+  node -e "$(faucet_js)" faucet-main "$RPC" "$miner" "$FAUCET_PORT"
+}
+
+# The faucet of `faucet`, in Node: POST {"address": "0x…"} to /faucet and the
+# miner (the internal net's public test account, already unlocked in the
+# node) sends 10 test GHOST there, at most once a minute per address. It
+# answers once the transfer is in a block: {"transactionHash": "0x…"}, or
+# {"error": "…"} with 400, 429 or 502. The app never holds the miner's key.
+# __tests__/test-network/faucet-endpoint.test.ts loads this same text.
+faucet_js() {
+  cat <<'FAUCET'
+'use strict';
+
+const FAUCET_WEI = 10n * 10n ** 18n;
+const ONCE_EVERY_MS = 60000;
+const MAX_BODY_BYTES = 1024;
+
+// One JSON-RPC call to the node; the node's error message on a refusal.
+function nodeRpc(url) {
+  let id = 0;
+  return async (method, params) => {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }),
+    });
+    if (!response.ok) throw new Error(`the node answered HTTP ${response.status}`);
+    const answer = await response.json();
+    if (answer.error) throw new Error(String(answer.error.message || 'the node refused the call'));
+    return answer.result;
+  };
+}
+
+// The faucet's requests. `rpc(method, params)` asks the node, `now()` is the
+// time in ms, `sleep(ms)` waits between receipt checks.
+function createFaucet({ from, rpc, now = Date.now, sleep = (ms) => new Promise((done) => setTimeout(done, ms)), receiptTries = 120 }) {
+  const lastSent = new Map();
+
+  async function send(to) {
+    const hash = await rpc('eth_sendTransaction', [{ from, to, value: '0x' + FAUCET_WEI.toString(16) }]);
+    for (let tries = 0; tries < receiptTries; tries++) {
+      const receipt = await rpc('eth_getTransactionReceipt', [hash]);
+      if (receipt && receipt.blockNumber) {
+        if (BigInt(receipt.status) !== 1n) throw new Error('the transfer failed in its block');
+        return hash;
+      }
+      await sleep(1000);
+    }
+    throw new Error('the transfer is not in a block yet');
+  }
+
+  // A request: its method, path and body text; the answer's status and JSON.
+  async function handle(method, path, text) {
+    if (path !== '/faucet') return { status: 404, json: { error: 'not found' } };
+    if (method !== 'POST') return { status: 405, json: { error: 'POST an address to /faucet' } };
+    let address;
+    try {
+      address = JSON.parse(text).address;
+    } catch {
+      address = undefined;
+    }
+    if (typeof address !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+      return { status: 400, json: { error: 'that is not a Ghost address' } };
+    }
+    const key = address.toLowerCase();
+    const last = lastSent.get(key);
+    if (last !== undefined && now() - last < ONCE_EVERY_MS) {
+      return { status: 429, json: { error: 'test GHOST goes to each address at most once a minute' } };
+    }
+    lastSent.set(key, now());
+    try {
+      const transactionHash = await send(key);
+      return { status: 200, json: { transactionHash } };
+    } catch (error) {
+      // Nothing was sent: the address may ask again at once.
+      lastSent.delete(key);
+      return { status: 502, json: { error: error.message } };
+    }
+  }
+
+  return { handle };
+}
+
+if (typeof exports === 'object' && exports !== null) {
+  Object.assign(exports, { FAUCET_WEI, ONCE_EVERY_MS, createFaucet });
+}
+
+const mainAt = process.argv.indexOf('faucet-main');
+if (mainAt >= 0) {
+  const http = require('http');
+  const [url, from, port] = process.argv.slice(mainAt + 1);
+  const faucet = createFaucet({ from, rpc: nodeRpc(url) });
+  const server = http.createServer((request, response) => {
+    let text = '';
+    let tooBig = false;
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => {
+      text += chunk;
+      if (text.length > MAX_BODY_BYTES) {
+        tooBig = true;
+        request.destroy();
+      }
+    });
+    request.on('end', async () => {
+      if (tooBig) return;
+      const { status, json } = await faucet.handle(request.method, request.url, text);
+      process.stderr.write(`test-chain: faucet ${status} ${json.transactionHash || json.error}\n`);
+      response.writeHead(status, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(json));
+    });
+  });
+  server.listen(Number(port), '0.0.0.0');
+}
+FAUCET
+}
+
 [ "$#" -ge 1 ] || usage
 command="$1"
 shift
@@ -553,5 +685,6 @@ case "$command" in
   height) cmd_height ;;
   checkpoint) cmd_checkpoint "$@" ;;
   fund-late) cmd_fund_late "$@" ;;
+  faucet) cmd_faucet "$@" ;;
   *) usage ;;
 esac

@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { vanishCore, type CorePaymentSequence, type CorePaymentStore, type VanishBindings } from '../../modules/ghost-core';
+import { failureReason } from '../node/failure-reason';
 import { coinTreeAt, type CoinTree } from './coin-tree';
 import { vanishNode, type VanishNode } from './node';
 import { advance, type Rebuild } from './payments';
@@ -89,7 +90,7 @@ export function usePayment(
           return;
         }
         // The payment is saved; the next move tries again.
-        const message = error instanceof Error ? error.message : 'the node could not be asked';
+        const message = failureReason(error, tools.nodeUrl);
         const step = payment.step();
         setMoved((current) => ({
           of: payment,

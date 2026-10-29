@@ -33,6 +33,9 @@ jest.mock('../lib/home/read-account', () => ({
   readAccountZero: () => mockAnswer(),
 }));
 
+// The node's chain is not asked here: __tests__/test-network/ covers it.
+jest.mock('../lib/node/test-network', () => ({ useTestNetwork: () => false }));
+
 beforeEach(() => {
   mockFiles.clear();
   mockPush.mockClear();
@@ -44,7 +47,7 @@ describe('HomeScreen', () => {
   it('shows the cached balance and its age before the node answers', () => {
     mockFiles.set('home-cache.json', {
       version: 1,
-      nodeUrl: 'http://127.0.0.1:8547',
+      nodeUrl: 'http://192.168.1.36:8547',
       address: ADDRESS,
       balanceWei: (1284n * GHOST + GHOST / 2n).toString(),
       nonce: 0,
@@ -85,7 +88,7 @@ describe('HomeScreen', () => {
   it('says the node is not reachable without hiding the cached balance', async () => {
     mockFiles.set('home-cache.json', {
       version: 1,
-      nodeUrl: 'http://127.0.0.1:8547',
+      nodeUrl: 'http://192.168.1.36:8547',
       address: ADDRESS,
       balanceWei: GHOST.toString(),
       nonce: 0,

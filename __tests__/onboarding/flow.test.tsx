@@ -74,6 +74,7 @@ jest.mock('../../lib/storage', () => ({
 jest.mock('../../lib/home/read-account', () => ({
   readAccountZero: () => new Promise(() => {}),
 }));
+jest.mock('../../lib/node/test-network', () => ({ useTestNetwork: () => false }));
 jest.mock('expo-clipboard', () => ({ setStringAsync: jest.fn(async () => true) }));
 jest.mock('react-native-qrcode-svg', () => {
   const { Text } = jest.requireActual('react-native');

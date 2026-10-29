@@ -25,7 +25,7 @@ import { accountZeroAddress } from '../lib/account';
 import { authenticate, authFailureMessage } from '../lib/device-auth';
 import { shortAddress } from '../lib/home/balance-format';
 import { createTapCounter } from '../lib/settings/developer-entry';
-import { normaliseNodeUrl, settingsStore, useSettings } from '../lib/settings/settings';
+import { DEFAULT_NODE_URL, normaliseNodeUrl, settingsStore, useSettings } from '../lib/settings/settings';
 
 function appVersion(): string {
   return Constants.expoConfig?.version ?? 'unknown';
@@ -57,7 +57,7 @@ function NodeEditor({ nodeUrl, onDone }: { nodeUrl: string; onDone: () => void }
         autoCapitalize="none"
         autoCorrect={false}
         keyboardType="url"
-        placeholder="http://127.0.0.1:8547"
+        placeholder={DEFAULT_NODE_URL}
         placeholderTextColor={colors.quiet}
         style={styles.input}
         testID="node-url-input"

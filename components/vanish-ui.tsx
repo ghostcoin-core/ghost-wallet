@@ -67,7 +67,7 @@ export function PaymentProgress({
       </Text>
       {error ? (
         <Text style={[textStyles.quiet, styles.progressDetail]} testID="payment-error">
-          Trying again: {error}
+          {error} Trying again.
         </Text>
       ) : null}
     </Panel>

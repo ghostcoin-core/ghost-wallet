@@ -17,6 +17,7 @@ import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
 import { formatGhost } from '../lib/home/balance-format';
 import { useLayout } from '../lib/layout';
+import { failureReason } from '../lib/node/failure-reason';
 import { pickCheckPositions } from '../lib/onboarding/word-check';
 import { useSettings } from '../lib/settings/settings';
 import { minimumVanish, signVanishAgain, startVanish } from '../lib/vanish/actions';
@@ -76,7 +77,10 @@ export default function VanishScreen() {
     if (!kit) {
       return;
     }
-    minimumVanish(kit).then(setMinimum, () => setMinimum(null));
+    minimumVanish(kit).then(setMinimum, (failure) => {
+      setMinimum(null);
+      setError(failureReason(failure, kit.nodeUrl));
+    });
   }, [kit]);
 
   const rebuild = useMemo(() => (kit && sequence ? signVanishAgain(kit, sequence) : null), [kit, sequence]);
@@ -96,7 +100,7 @@ export default function VanishScreen() {
       setSequence(started.sequence);
       setPhase({ name: 'save', words: started.words });
     } catch (failure) {
-      setError(failure instanceof Error ? `The Vanish could not start: ${failure.message}` : 'The Vanish could not start.');
+      setError(`The Vanish could not start. ${failureReason(failure, nodeUrl)}`);
     } finally {
       setBusy(false);
     }
