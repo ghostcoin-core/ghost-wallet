@@ -3,8 +3,11 @@
 // public Ghost nodes over TLS. Anything else (unset, as in tests and dev
 // builds) selects the Mac Studio test chain of scripts/test-chain.sh.
 
-/** The Ghost public test network, and the internal net of scripts/test-chain.sh. */
-export const GHOST_TEST_CHAIN_ID = 6777971n;
+/** The internal net of scripts/test-chain.sh: the chain of dev builds. */
+export const GHOST_DEV_CHAIN_ID = 6777971n;
+
+/** The Ghost public test network (the internal net's id plus one): the chain of release builds. */
+export const GHOST_PUBLIC_TEST_CHAIN_ID = 6777972n;
 
 /** A block the header sync starts from instead of block 0. */
 export type NetworkCheckpoint = {
@@ -45,7 +48,7 @@ export const RELEASE_NODE_URLS: readonly string[] = [
 
 export const DEV_NETWORK: BuildNetwork = {
   name: 'dev',
-  chainId: GHOST_TEST_CHAIN_ID,
+  chainId: GHOST_DEV_CHAIN_ID,
   nodeUrls: [DEV_NODE_URL],
   // The test chain is short: the sync starts at block 0.
   checkpoint: null,
@@ -62,11 +65,12 @@ export const DEV_NETWORK: BuildNetwork = {
  */
 export const RELEASE_NETWORK: BuildNetwork = {
   name: 'release',
-  chainId: GHOST_TEST_CHAIN_ID,
+  chainId: GHOST_PUBLIC_TEST_CHAIN_ID,
   nodeUrls: RELEASE_NODE_URLS,
   // Pinned once the public test network's checkpoint block is published.
   checkpoint: null,
-  minimumDifficulty: 1n,
+  // The public test network's floor (ghost-node docs/public-testnet.md).
+  minimumDifficulty: 4096n,
   realValue: false,
 };
 

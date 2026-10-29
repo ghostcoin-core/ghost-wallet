@@ -1,7 +1,7 @@
 // The app's settings: which node to ask, and whether the app locks.
 import { useSyncExternalStore } from 'react';
 
-import { buildNetwork, GHOST_TEST_CHAIN_ID, type BuildNetwork } from '../network/build-network';
+import { buildNetwork, type BuildNetwork } from '../network/build-network';
 import { jsonFile, type JsonFile } from '../storage';
 
 export type Settings = {
@@ -19,8 +19,12 @@ export type Settings = {
  */
 export const DEFAULT_NODE_URL = 'http://192.168.1.36:8547';
 
-/** The Ghost test network (the internal net of scripts/test-chain.sh). */
-export const TEST_CHAIN_ID = GHOST_TEST_CHAIN_ID;
+/**
+ * The test chain this build's nodes must report: the internal net of
+ * scripts/test-chain.sh in dev builds, the Ghost public test network in
+ * release builds.
+ */
+export const TEST_CHAIN_ID = buildNetwork.chainId;
 
 /** The node a build asks until settings name another. */
 export function defaultNodeUrlFor(network: BuildNetwork): string {

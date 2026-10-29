@@ -102,6 +102,10 @@ export type VanishBindings = {
   feeWindow(tip: bigint): { referenceHeight: bigint; validUntil: bigint };
   commitEntryAddress(): string;
   vanishGasLimit(): bigint;
+  /**
+   * The local test chain's id, the only chain of a test-words send. The app checks a node
+   * against its build's chain (lib/network/build-network.ts) and passes that chain on.
+   */
   testChainId(): bigint;
   transactionHash(signed: ArrayBuffer): ArrayBuffer;
   encodePaymentRecord(record: CorePaymentRecord): ArrayBuffer;

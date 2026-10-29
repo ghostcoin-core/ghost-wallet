@@ -32,8 +32,23 @@ use rand::{CryptoRng, TryCryptoRng, TryRng};
 use crate::accounts::saved_seed;
 use crate::to_hex_address;
 
-/// The chain identifier of the local test chain (`scripts/test-chain.sh`).
+/// The chain identifier of the local test chain (`scripts/test-chain.sh`):
+/// the chain of dev builds, and the only chain a test-words send is signed for.
 pub const TEST_CHAIN_ID: u64 = 6_777_971;
+
+/// The chain identifier of the Ghost public test network (the internal
+/// net's plus one): the chain of release builds.
+pub const PUBLIC_TEST_CHAIN_ID: u64 = 6_777_972;
+
+/// The chains a send from the saved account, a Vanish, a Summon or a Claim is
+/// signed or proved for: the app passes the chain of its build, checked
+/// against the node's `eth_chainId`. A chain with real value is not here.
+pub const WALLET_CHAIN_IDS: [u64; 2] = [TEST_CHAIN_ID, PUBLIC_TEST_CHAIN_ID];
+
+/// Whether the wallet signs and proves for `chain_id` ([`WALLET_CHAIN_IDS`]).
+pub fn is_wallet_chain(chain_id: u64) -> bool {
+    WALLET_CHAIN_IDS.contains(&chain_id)
+}
 
 /// The gas of a plain transfer from a rescue-key account (`0x0003`): 21,000,
 /// plus 16 for each byte of the scheme, the 1,344-byte public key and the
@@ -47,6 +62,7 @@ pub const RESCUE_TRANSFER_GAS: u64 =
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct TestSend {
     /// Must be [`TEST_CHAIN_ID`], checked against the node's `eth_chainId`.
+    /// The public test network is refused: this send is for the benchmark.
     pub chain_id: u64,
     /// The hash of block 0, 32 bytes.
     pub genesis_hash: Vec<u8>,
@@ -89,7 +105,9 @@ impl fmt::Debug for SignedTestSend {
 /// signature.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum SendError {
-    /// The chain identifier is not the test chain's.
+    /// The chain identifier is not one the send is signed for. `expected` is
+    /// [`TEST_CHAIN_ID`]; a send from the saved account also takes
+    /// [`PUBLIC_TEST_CHAIN_ID`].
     WrongChain { expected: u64, found: u64 },
     /// The words are not a valid account phrase.
     Words { reason: String },
@@ -105,7 +123,7 @@ impl fmt::Display for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WrongChain { expected, found } => {
-                write!(f, "a test send is signed for chain {expected} only, not {found}")
+                write!(f, "a send is not signed for chain {found} (the test chain is {expected})")
             }
             Self::Words { reason } => write!(f, "invalid account words: {reason}"),
             Self::Malformed { reason } => write!(f, "the test send is malformed: {reason}"),
@@ -149,7 +167,7 @@ pub fn sign_test_send_with<R: CryptoRng + ?Sized>(
         max_fee_per_gas: send.max_fee_per_gas,
         gas_limit: send.gas_limit,
     };
-    let (tx, genesis) = transfer.checked()?;
+    let (tx, genesis) = transfer.checked(&[TEST_CHAIN_ID])?;
     let seed = WalletSeed::from_words(test_words).map_err(|error| SendError::Words { reason: error.to_string() })?;
     let account = seed.rescue_account(account_index);
     drop(seed);
@@ -174,9 +192,10 @@ struct Transfer<'a> {
 }
 
 impl Transfer<'_> {
-    /// The account transaction and the genesis hash it is signed against.
-    fn checked(&self) -> Result<(AccountTx, [u8; 32]), SendError> {
-        if self.chain_id != TEST_CHAIN_ID {
+    /// The account transaction and the genesis hash it is signed against,
+    /// when the transfer is on one of `chains`.
+    fn checked(&self, chains: &[u64]) -> Result<(AccountTx, [u8; 32]), SendError> {
+        if !chains.contains(&self.chain_id) {
             return Err(SendError::WrongChain { expected: TEST_CHAIN_ID, found: self.chain_id });
         }
         let malformed = |reason: &str| SendError::Malformed { reason: reason.to_owned() };
@@ -208,7 +227,8 @@ impl Transfer<'_> {
 /// against. Nothing here is secret.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct AccountSend {
-    /// Must be [`TEST_CHAIN_ID`], checked against the node's `eth_chainId`.
+    /// The chain of the app's build, one of [`WALLET_CHAIN_IDS`], checked
+    /// against the node's `eth_chainId`.
     pub chain_id: u64,
     /// The hash of block 0, 32 bytes.
     pub genesis_hash: Vec<u8>,
@@ -266,7 +286,7 @@ pub fn sign_send_with<R: CryptoRng + ?Sized>(
         max_fee_per_gas: send.max_fee_per_gas,
         gas_limit: send.gas_limit,
     };
-    let (tx, genesis) = transfer.checked()?;
+    let (tx, genesis) = transfer.checked(&WALLET_CHAIN_IDS)?;
     let signed = seed.rescue_account(account_index).sign(&tx, &genesis, rng);
     Ok(SignedSend { transaction_hash: signed.hash.to_vec(), sender: signed.sender.to_vec(), envelope: signed.envelope })
 }
@@ -315,7 +335,8 @@ pub fn test_send_gas_limit() -> u64 {
     RESCUE_TRANSFER_GAS
 }
 
-/// The test chain's identifier, [`TEST_CHAIN_ID`].
+/// The local test chain's identifier, [`TEST_CHAIN_ID`]: the chain of a
+/// test-words send. The app checks a node against its build's chain instead.
 #[uniffi::export]
 pub fn test_chain_id() -> u64 {
     TEST_CHAIN_ID

@@ -1,5 +1,7 @@
 import {
   DEV_NETWORK,
+  GHOST_DEV_CHAIN_ID,
+  GHOST_PUBLIC_TEST_CHAIN_ID,
   RELEASE_NETWORK,
   RELEASE_NODE_URLS,
   offersTestGhost,
@@ -41,9 +43,12 @@ describe('the release network', () => {
 
   it('targets the Ghost public test network, which has no value', () => {
     const network = resolveBuildNetwork('release');
-    expect(network.chainId).toBe(6777971n);
+    // The public test network is the internal net's 6777971 plus one.
+    expect(network.chainId).toBe(6777972n);
+    expect(network.chainId).toBe(GHOST_PUBLIC_TEST_CHAIN_ID);
+    expect(network.chainId).not.toBe(DEV_NETWORK.chainId);
     expect(network.realValue).toBe(false);
-    expect(network.minimumDifficulty).toBeGreaterThanOrEqual(1n);
+    expect(network.minimumDifficulty).toBe(4096n);
   });
 
 });
@@ -56,6 +61,8 @@ describe('the dev network', () => {
   it('is the Mac Studio test chain', () => {
     expect(DEV_NETWORK.nodeUrls).toEqual(['http://192.168.1.36:8547']);
     expect(DEV_NETWORK.chainId).toBe(6777971n);
+    expect(DEV_NETWORK.chainId).toBe(GHOST_DEV_CHAIN_ID);
+    expect(DEV_NETWORK.minimumDifficulty).toBe(1n);
     expect(DEV_NETWORK.realValue).toBe(false);
   });
 
