@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { DEV_NETWORK } from '../../lib/network/build-network';
 import { faucetUrlFor } from '../../lib/node/faucet';
 import { DEFAULT_NODE_URL, DEFAULT_SETTINGS, TEST_CHAIN_ID, createSettingsStore, parseSettings } from '../../lib/settings/settings';
 
@@ -23,8 +24,9 @@ describe('the default node', () => {
     expect(store.get().nodeUrl).toBe('http://10.0.0.7:8547');
   });
 
-  it('is on the test network, chain 6777971', () => {
+  it('is on the test network, chain 6777971, the chain of a dev build', () => {
     expect(TEST_CHAIN_ID).toBe(6777971n);
+    expect(TEST_CHAIN_ID).toBe(DEV_NETWORK.chainId);
     const script = fs.readFileSync(path.join(ROOT, 'scripts/test-chain.sh'), 'utf8');
     expect(script).toMatch(/^CHAIN_ID=6777971$/m);
     expect(script).toMatch(/^PORT=8547$/m);

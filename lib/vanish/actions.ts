@@ -3,15 +3,20 @@
 // coins and proving a reveal (again, when its fee window passed).
 import type { CorePaymentSequence } from '../../modules/ghost-core';
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
+import { buildNetwork } from '../network/build-network';
 import { spentBuffers, type CoinTree } from './coin-tree';
 import { buffer, decodeDetails, newPaymentId, revealIntent, vanishIntent, type PaymentDetails, type Rebuild } from './payments';
 import type { PaymentKit } from './use-payment';
 import { treeAtTip } from './use-payment';
 
-/** The node must be the test chain the core signs and proves for. */
-export async function checkedChainId(kit: PaymentKit): Promise<bigint> {
+/**
+ * The node must be this build's test chain (`expected`): the internal net in
+ * dev builds, the public test network in release builds. The core signs and
+ * proves for the chain id passed on from here.
+ */
+export async function checkedChainId(kit: PaymentKit, expected: bigint = buildNetwork.chainId): Promise<bigint> {
   const chainId = await kit.node.chainId();
-  if (chainId !== kit.core.testChainId()) {
+  if (chainId !== expected) {
     throw new Error('the node is not the Ghost test network');
   }
   return chainId;

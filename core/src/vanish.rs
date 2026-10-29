@@ -45,7 +45,7 @@ use ghost_proofs::PROTOCOL_VERSION_1;
 use rand::CryptoRng;
 
 use crate::accounts::{saved_seed, wipe_string};
-use crate::send::{OsRandom, RESCUE_TRANSFER_GAS, TEST_CHAIN_ID};
+use crate::send::{OsRandom, RESCUE_TRANSFER_GAS, TEST_CHAIN_ID, is_wallet_chain};
 use crate::summon::root_and_path;
 
 /// The coin commit entry a Vanish pays: `ghost` then zeros then `0x05`, the
@@ -86,7 +86,8 @@ const NOTE_AT: usize = ENVELOPE_BYTES - NOTE_BYTES;
 /// its words or a signature.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum VanishError {
-    /// The chain identifier is not the test chain's.
+    /// The chain identifier is neither the local test chain's (`expected`)
+    /// nor the public test network's.
     WrongChain { expected: u64, found: u64 },
     /// The text is not a Phantom Key.
     NotAKey { reason: String },
@@ -115,7 +116,7 @@ pub enum VanishError {
 impl fmt::Display for VanishError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WrongChain { expected, found } => write!(f, "Vanish is for chain {expected} only, not {found}"),
+            Self::WrongChain { found, .. } => write!(f, "Vanish is for the Ghost test chains only, not {found}"),
             Self::NotAKey { reason } => write!(f, "not a Phantom Key: {reason}"),
             Self::Amount { reason } => write!(f, "the amount is refused: {reason}"),
             Self::Malformed { reason } => write!(f, "malformed input: {reason}"),
@@ -432,7 +433,7 @@ pub(crate) fn new_key() -> &'static KeyVault {
 
 /// Makes a fresh Phantom Key from the operating system's random source,
 /// holds it in native memory, and returns its Vanish commit for
-/// `amount_wei` (decimal digits) on the test chain.
+/// `amount_wei` (decimal digits) on `chain_id`, the build's test chain.
 #[uniffi::export]
 pub fn prepare_vanish(chain_id: u64, amount_wei: String) -> Result<VanishCommit, VanishError> {
     check_chain(chain_id)?;
@@ -486,7 +487,7 @@ pub fn forget_phantom_key() {
 /// is secret.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct VanishSend {
-    /// Must be the test chain's.
+    /// Must be a Ghost test chain's: the local one or the public test network.
     pub chain_id: u64,
     /// The hash of block 0, 32 bytes.
     pub genesis_hash: Vec<u8>,
@@ -742,7 +743,7 @@ pub fn find_key_coins(
 /// What a reveal pays and the chain data it is proved against.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RevealRequest {
-    /// Must be the test chain's.
+    /// Must be a Ghost test chain's: the local one or the public test network.
     pub chain_id: u64,
     /// The hash of block 0: the proof's domain.
     pub genesis_hash: Vec<u8>,
@@ -903,8 +904,10 @@ pub fn prove_key_reveal(
 
 // ---------------------------------------------------------------------------
 
+/// The app passes its build's chain: the local test chain or the public test
+/// network. Any other chain is refused.
 fn check_chain(chain_id: u64) -> Result<(), VanishError> {
-    if chain_id == TEST_CHAIN_ID {
+    if is_wallet_chain(chain_id) {
         Ok(())
     } else {
         Err(VanishError::WrongChain { expected: TEST_CHAIN_ID, found: chain_id })
