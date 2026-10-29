@@ -6,13 +6,29 @@
 // payment is saved at every step, so it survives the app being killed.
 // Once the three words are checked the key can also be put on a blank NTAG
 // 424 card before the core drops it: the card is never the only copy.
+// Done shows only once the Vanish is settled or failed; until then the person
+// may leave, and Home lists it as pending. Leaving before the key is written
+// down (or on its card) keeps the key: opening the Vanish again returns there.
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { colors, monoFont } from '../components/theme';
-import { Button, ButtonRow, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { PaymentProgress, PhantomKeyWords } from '../components/vanish-ui';
+import {
+  Button,
+  ButtonRow,
+  Column,
+  IconButton,
+  Logo,
+  NetworkBadge,
+  Panel,
+  Screen,
+  Spacer,
+  TextButton,
+  textStyles,
+  Title,
+} from '../components/ui';
+import { PaymentExit, PaymentProgress, PhantomKeyWords } from '../components/vanish-ui';
 import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
 import { formatGhost } from '../lib/home/balance-format';
@@ -22,31 +38,60 @@ import { pickCheckPositions } from '../lib/onboarding/word-check';
 import { useSettings } from '../lib/settings/settings';
 import { minimumVanish, signVanishAgain, startVanish } from '../lib/vanish/actions';
 import { parseGhostAmount } from '../lib/vanish/amount';
-import { newestPayment } from '../lib/vanish/payments';
+import {
+  forgetShared,
+  heldKey,
+  heldVanish,
+  holdVanish,
+  newestShared,
+  openShared,
+  paymentAmountWei,
+  releaseHeldVanish,
+  shared,
+  takeReopened,
+  type HeldVanish,
+} from '../lib/vanish/pending';
 import { isFinal, statusOfStep, stepName } from '../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import type { CorePaymentSequence } from '../modules/ghost-core';
 import { CardCancelled, cardsSupported, putPhantomKeyOnCard } from '../modules/ghost-nfc';
 
+function isPrepared(sequence: CorePaymentSequence | null): boolean {
+  return sequence !== null && stepName(sequence.step()) === 'Prepared';
+}
+
 /**
- * The Vanish the app was closed in, to show again. One still waiting for
- * its key to be written down cannot go on (the key was never saved) and
- * nothing of it was signed: it is dropped, with any key still held.
+ * The Vanish to show again: the one Home asked for, or the newest. One left
+ * while the core still holds its new key returns to the step it was at (the
+ * words, the check or the card). One still waiting for its key after the
+ * app was closed cannot go on (the key was never saved) and nothing of it
+ * was signed: it is dropped. A key no Vanish waits for is forgotten.
  */
-function resumeVanish(kit: PaymentKit | null): CorePaymentSequence | null {
+function resumeVanish(kit: PaymentKit | null): { sequence: CorePaymentSequence; held: HeldVanish | null } | null {
   if (!kit) {
     return null;
   }
-  kit.core.forgetPhantomKey();
-  const saved = newestPayment(kit.core, kit.store, ['vanish']);
+  const holding = heldKey();
+  if (!holding || !isPrepared(openShared(kit, holding.id))) {
+    releaseHeldVanish();
+    kit.core.forgetPhantomKey();
+  }
+  const wanted = takeReopened(['vanish']);
+  const saved = wanted ? openShared(kit, wanted) : newestShared(kit, ['vanish']);
   if (!saved) {
     return null;
   }
-  if (stepName(saved.step()) === 'Prepared') {
-    kit.store.remove(saved.record().id);
+  const id = saved.record().id;
+  if (isPrepared(saved)) {
+    const held = heldVanish(id);
+    if (held) {
+      return { sequence: saved, held };
+    }
+    kit.store.remove(id);
+    forgetShared(id);
     return null;
   }
-  return isFinal(statusOfStep(saved.step())) ? null : saved;
+  return wanted || !isFinal(statusOfStep(saved.step())) ? { sequence: saved, held: null } : null;
 }
 
 type Phase =
@@ -56,6 +101,23 @@ type Phase =
   | { name: 'card' }
   | { name: 'sending' };
 
+function resumedPhase(resumed: ReturnType<typeof resumeVanish>): Phase {
+  if (!resumed) {
+    return { name: 'amount' };
+  }
+  const { held } = resumed;
+  switch (held?.step) {
+    case 'save':
+      return { name: 'save', words: held.words };
+    case 'check':
+      return { name: 'check', words: held.words, positions: held.positions ?? pickCheckPositions() };
+    case 'card':
+      return { name: 'card' };
+    default:
+      return { name: 'sending' };
+  }
+}
+
 export default function VanishScreen() {
   const router = useRouter();
   const { twoColumns } = useLayout();
@@ -63,8 +125,8 @@ export default function VanishScreen() {
   const [address] = useState(accountZeroAddress);
   const kit = useMemo(() => paymentKit(nodeUrl), [nodeUrl]);
   const [resumed] = useState(() => resumeVanish(kit));
-  const [phase, setPhase] = useState<Phase>(resumed ? { name: 'sending' } : { name: 'amount' });
-  const [sequence, setSequence] = useState<CorePaymentSequence | null>(resumed);
+  const [phase, setPhase] = useState<Phase>(() => resumedPhase(resumed));
+  const [sequence, setSequence] = useState<CorePaymentSequence | null>(resumed?.sequence ?? null);
   const [amountText, setAmountText] = useState('');
   const [minimum, setMinimum] = useState<bigint | null>(null);
   const [typed, setTyped] = useState<Record<number, string>>({});
@@ -88,6 +150,28 @@ export default function VanishScreen() {
 
   const amount = parseGhostAmount(amountText);
   const tooSmall = amount !== null && minimum !== null && amount < minimum;
+  // A Vanish opened again has no amount typed: its saved one is shown.
+  const vanishAmount = amount ?? (sequence ? paymentAmountWei(sequence) : null);
+
+  /**
+   * Moves to a step before the key is dropped, and keeps which one it is, so
+   * leaving now and opening the Vanish again comes back to it.
+   */
+  function keyStep(next: Extract<Phase, { name: 'save' | 'check' | 'card' }>, of: CorePaymentSequence | null = sequence) {
+    setPhase(next);
+    if (!of) {
+      return;
+    }
+    const id = of.record().id;
+    if (next.name === 'save') {
+      holdVanish({ id, step: 'save', words: next.words, positions: null });
+    } else if (next.name === 'check') {
+      holdVanish({ id, step: 'check', words: next.words, positions: next.positions });
+    } else {
+      // The words were checked: the card step needs only the key the core holds.
+      holdVanish({ id, step: 'card', words: [], positions: null });
+    }
+  }
 
   async function makeKey() {
     if (!kit || !address || amount === null || tooSmall) {
@@ -97,8 +181,9 @@ export default function VanishScreen() {
     setError(null);
     try {
       const started = await startVanish(kit, address, amount);
-      setSequence(started.sequence);
-      setPhase({ name: 'save', words: started.words });
+      const made = shared(started.sequence);
+      setSequence(made);
+      keyStep({ name: 'save', words: started.words }, made);
     } catch (failure) {
       setError(`The Vanish could not start. ${failureReason(failure, nodeUrl)}`);
     } finally {
@@ -144,6 +229,7 @@ export default function VanishScreen() {
       setError('The Vanish could not be saved. Nothing was sent.');
       return;
     }
+    releaseHeldVanish();
     setTyped({});
     setError(null);
     // The words leave the screen's memory here.
@@ -156,7 +242,7 @@ export default function VanishScreen() {
       return;
     }
     setTyped({});
-    setPhase({ name: 'card' });
+    keyStep({ name: 'card' });
     void writeCard();
   }
 
@@ -180,10 +266,14 @@ export default function VanishScreen() {
     send();
   }
 
+  /** Drops a Vanish not signed yet, with its key. Leaving (Back) keeps both. */
   function cancel() {
-    if (kit && sequence && stepName(sequence.step()) === 'Prepared') {
+    if (kit && sequence && isPrepared(sequence)) {
+      const id = sequence.record().id;
       kit.core.forgetPhantomKey();
-      kit.store.remove(sequence.record().id);
+      kit.store.remove(id);
+      forgetShared(id);
+      releaseHeldVanish();
     }
     router.back();
   }
@@ -196,7 +286,7 @@ export default function VanishScreen() {
       wide="columns"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={cancel} testID="back" />
+          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />
@@ -249,9 +339,10 @@ export default function VanishScreen() {
             <PhantomKeyWords words={phase.words} twoColumns={twoColumns} />
             <Button
               label="I wrote it down"
-              onPress={() => setPhase({ name: 'check', words: phase.words, positions: pickCheckPositions() })}
+              onPress={() => keyStep({ name: 'check', words: phase.words, positions: pickCheckPositions() })}
               testID="vanish-saved"
             />
+            <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" />
           </>
         ) : null}
         {phase.name === 'check' ? (
@@ -272,7 +363,7 @@ export default function VanishScreen() {
               ))}
             </Panel>
             <Button
-              label={amount !== null ? `Vanish ${formatGhost(amount)} GHOST` : 'Vanish'}
+              label={vanishAmount !== null ? `Vanish ${formatGhost(vanishAmount)} GHOST` : 'Vanish'}
               disabled={phase.positions.some((position) => (typed[position] ?? '').trim() === '')}
               onPress={confirm}
               testID="vanish-send"
@@ -287,7 +378,13 @@ export default function VanishScreen() {
                 testID="vanish-card"
               />
             ) : null}
-            <Button label="Show the key again" secondary onPress={() => setPhase({ name: 'save', words: phase.words })} />
+            <Button
+              label="Show the key again"
+              secondary
+              onPress={() => keyStep({ name: 'save', words: phase.words })}
+              testID="vanish-show-again"
+            />
+            <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" />
           </>
         ) : null}
         {phase.name === 'card' ? (
@@ -301,13 +398,14 @@ export default function VanishScreen() {
               <ButtonRow>
                 <Button label="Try the card again" icon="key" onPress={() => void writeCard()} testID="vanish-card-retry" />
                 <Button
-                  label={amount !== null ? `Vanish ${formatGhost(amount)} GHOST` : 'Vanish'}
+                  label={vanishAmount !== null ? `Vanish ${formatGhost(vanishAmount)} GHOST` : 'Vanish'}
                   secondary
                   onPress={send}
                   testID="vanish-without-card"
                 />
               </ButtonRow>
             ) : null}
+            {!writing ? <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" /> : null}
           </>
         ) : null}
         {error ? (
@@ -341,7 +439,7 @@ export default function VanishScreen() {
           </Panel>
         )}
         {phase.name === 'sending' ? (
-          <Button label="Done" secondary onPress={() => router.back()} testID="vanish-done" />
+          <PaymentExit final={payment ? isFinal(payment.status) : false} onLeave={() => router.back()} testPrefix="vanish" />
         ) : null}
       </Column>
     </Screen>

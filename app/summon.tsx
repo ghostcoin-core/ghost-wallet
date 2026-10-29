@@ -5,14 +5,16 @@
 // less the fee; Claim brings part of it, and the rest stays with the key. A
 // key this phone cannot find shows as not found yet, never as zero. Or the
 // person taps a card this iPhone wrote: the card's key goes straight to the
-// native core, and the same lookup and proof run on it there.
+// native core, and the same lookup and proof run on it there. Done shows only
+// once the payment is settled or failed; until then the person may leave, and
+// Home lists it as pending.
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { colors, monoFont } from '../components/theme';
 import { Button, ButtonRow, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { CoinsBack, PaymentProgress } from '../components/vanish-ui';
+import { CoinsBack, PaymentExit, PaymentProgress } from '../components/vanish-ui';
 import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
 import { formatGhost } from '../lib/home/balance-format';
@@ -21,7 +23,8 @@ import { useSettings } from '../lib/settings/settings';
 import { CARD_KEY, lookUpKey, proveRevealAgain, startReveal, type KeyLookup, type KeySource } from '../lib/vanish/actions';
 import { parseGhostAmount } from '../lib/vanish/amount';
 import { keyFieldRule } from '../lib/vanish/field-rules';
-import { decodeDetails, newestPayment } from '../lib/vanish/payments';
+import { decodeDetails } from '../lib/vanish/payments';
+import { newestShared, openShared, paymentsChanged, shared, takeReopened } from '../lib/vanish/pending';
 import { isFinal, lookupMessage, statusOfStep, type RevealKind } from '../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import { normaliseKeyText, parseWordsCheck } from '../lib/vanish/word-validation';
@@ -40,13 +43,14 @@ function forgetCardKey(kit: PaymentKit | null) {
   }
 }
 
-/** The Summon or Claim the app was closed in, to show again. */
+/** The Summon or Claim to show again: the one Home asked for, or the newest one still going. */
 function resumeReveal(kit: PaymentKit | null): { sequence: CorePaymentSequence; kind: RevealKind } | null {
   if (!kit) {
     return null;
   }
-  const saved = newestPayment(kit.core, kit.store, ['summon', 'claim']);
-  if (!saved || isFinal(statusOfStep(saved.step()))) {
+  const wanted = takeReopened(['summon', 'claim']);
+  const saved = wanted ? openShared(kit, wanted) : newestShared(kit, ['summon', 'claim']);
+  if (!saved || (!wanted && isFinal(statusOfStep(saved.step())))) {
     return null;
   }
   const details = decodeDetails(saved.record().intent.details);
@@ -148,7 +152,8 @@ export default function SummonScreen() {
       startReveal(kit, key, address, out).then(
         (started) => {
           setProving(false);
-          setSequence(started);
+          setSequence(shared(started));
+          paymentsChanged();
         },
         (failure) => {
           setProving(false);
@@ -245,9 +250,7 @@ export default function SummonScreen() {
           <>
             <PaymentProgress status={status} kind={kind} step={payment?.step} error={payment?.error} />
             {status === 'settled' ? <CoinsBack text="The coins are back in your account." /> : null}
-            {status !== 'proving' ? (
-              <Button label="Done" secondary onPress={() => router.back()} testID="summon-done" />
-            ) : null}
+            <PaymentExit final={isFinal(status)} onLeave={() => router.back()} testPrefix="summon" />
           </>
         ) : lookup ? (
           <Panel style={styles.form} testID="summon-lookup">

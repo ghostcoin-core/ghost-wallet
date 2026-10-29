@@ -139,6 +139,21 @@ export function Button({
   );
 }
 
+/** A quiet action in words only, for leaving or cancelling; never the main step. */
+export function TextButton({ label, onPress, testID }: { label: string; onPress: () => void; testID?: string }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      hitSlop={4}
+      style={({ pressed }) => [styles.textButton, pressed && styles.buttonDimmed]}
+      testID={testID}
+    >
+      <Text style={styles.textButtonText}>{label}</Text>
+    </Pressable>
+  );
+}
+
 export function ButtonRow({ children }: { children: ReactNode }) {
   return <View style={styles.buttonRow}>{children}</View>;
 }
@@ -335,6 +350,17 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   buttonText: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  textButton: {
+    alignSelf: 'flex-start',
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: 4,
+  },
+  textButtonText: {
+    color: colors.violet,
     fontSize: 16,
     fontWeight: '600',
   },

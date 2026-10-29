@@ -1,6 +1,7 @@
 // A payment on screen: the core's step sequence moved one step every few
-// seconds until it is settled or failed. Leaving the screen stops the moves,
-// not the payment: it is saved, and reopening the screen resumes it.
+// seconds until it is settled or failed. Leaving the screen stops its moves,
+// not the payment: it is saved, Home goes on moving it (lib/home/use-pending.ts)
+// and reopening the screen resumes it.
 import { useEffect, useRef, useState } from 'react';
 
 import { vanishCore, type CorePaymentSequence, type CorePaymentStore, type VanishBindings } from '../../modules/ghost-core';
@@ -9,6 +10,7 @@ import { coinTreeAt, type CoinTree } from './coin-tree';
 import { vanishNode, type VanishNode } from './node';
 import { advance, type Rebuild } from './payments';
 import { documentPaymentFiles, paymentStore } from './payment-store';
+import { moveAlone } from './pending';
 import { isFinal, statusOfStep, type PaymentStatus } from './status-mapping';
 
 export const MOVE_EVERY_MS = 3_000;
@@ -76,14 +78,25 @@ export function usePayment(
 
     async function move(payment: CorePaymentSequence, tools: PaymentKit) {
       try {
-        const tree = withTree ? (await treeAtTip(tools)).tree : null;
-        const next = await advance(tools.node, payment, rebuildRef.current, tree);
+        // Home may be moving this payment right now: then this move waits for the next.
+        const next = await moveAlone(payment.record().id, async () => {
+          const tree = withTree ? (await treeAtTip(tools)).tree : null;
+          return advance(tools.node, payment, rebuildRef.current, tree);
+        });
         if (stopped) {
           return;
         }
-        setMoved({ of: payment, view: { ...next, error: null } });
-        if (isFinal(next.status)) {
-          return;
+        if (next) {
+          setMoved({ of: payment, view: { ...next, error: null } });
+          if (isFinal(next.status)) {
+            return;
+          }
+        } else {
+          const step = payment.step();
+          setMoved((current) => (current?.of === payment && current.view.step === step ? current : { of: payment, view: initialView(step) }));
+          if (isFinal(statusOfStep(step))) {
+            return;
+          }
         }
       } catch (error) {
         if (stopped) {
