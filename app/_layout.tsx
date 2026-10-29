@@ -26,6 +26,8 @@ function GuardedStack() {
       </Stack.Protected>
       <Stack.Protected guard={open.wallet}>
         <Stack.Screen name="home" options={{ gestureEnabled: false }} />
+        <Stack.Screen name="send" />
+        <Stack.Screen name="payment" />
         <Stack.Screen name="receive" />
         <Stack.Screen name="settings" />
         <Stack.Screen name="recovery-words" />

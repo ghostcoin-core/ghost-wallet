@@ -19,7 +19,14 @@ import type {
 import { bytesToHex, hexToBytes } from '../../modules/ghost-core/account-lookup';
 import type { CoinTree } from './coin-tree';
 import type { NodeReceipt, VanishNode } from './node';
-import { statusOfRecovery, statusOfStep, type PaymentStatus, type RecoveryTag, type RevealKind } from './status-mapping';
+import {
+  statusOfRecovery,
+  statusOfStep,
+  type PaymentStatus,
+  type RecoveryTag,
+  type RevealKind,
+  type SavedKind,
+} from './status-mapping';
 
 /** `PaymentKind` and `ReceiptStatus` as the generated bindings number them. */
 export const PAYMENT_KIND = { send: 0, vanish: 1, summon: 2, claim: 3 } as const;
@@ -34,7 +41,23 @@ export function buffer(hex: string): ArrayBuffer {
 /** What a payment needs to be rebuilt, saved in its intent. Public data only. */
 export type PaymentDetails =
   | { kind: 'vanish'; commitData: string; amountWei: string; nonce: string; at: number }
-  | { kind: 'summon' | 'claim'; amountWei: string; feeWei: string; marker: string; at: number };
+  | { kind: 'summon' | 'claim'; amountWei: string; feeWei: string; marker: string; at: number }
+  | SendDetails;
+
+/**
+ * A plain send. `maxFeePerGas` is the fee rate the person reviewed, never
+ * exceeded when it is signed; null when it was saved with the node out of
+ * reach. `fromHeight` is the tip known when it was saved.
+ */
+export type SendDetails = {
+  kind: 'send';
+  to: string;
+  amountWei: string;
+  nonce: string;
+  maxFeePerGas: string | null;
+  fromHeight: number;
+  at: number;
+};
 
 export function encodeDetails(details: PaymentDetails): ArrayBuffer {
   const bytes = new TextEncoder().encode(JSON.stringify(details));
@@ -44,7 +67,9 @@ export function encodeDetails(details: PaymentDetails): ArrayBuffer {
 export function decodeDetails(bytes: ArrayBuffer): PaymentDetails | null {
   try {
     const raw = JSON.parse(new TextDecoder().decode(new Uint8Array(bytes))) as PaymentDetails;
-    return raw && (raw.kind === 'vanish' || raw.kind === 'summon' || raw.kind === 'claim') ? raw : null;
+    return raw && (raw.kind === 'vanish' || raw.kind === 'summon' || raw.kind === 'claim' || raw.kind === 'send')
+      ? raw
+      : null;
   } catch {
     return null;
   }
@@ -66,7 +91,7 @@ export function revealIntent(kind: 'summon' | 'claim', marker: string, details: 
   };
 }
 
-function coreReceipt(receipt: NodeReceipt): CoreReceipt {
+export function coreReceipt(receipt: NodeReceipt): CoreReceipt {
   return {
     status: receipt.success ? RECEIPT_SUCCESS : RECEIPT_FAILED,
     blockHash: buffer(receipt.blockHash),
@@ -140,7 +165,7 @@ export type Advance = {
   needsBackup: boolean;
 };
 
-function recoveryTag(tag: string): RecoveryTag {
+export function recoveryTag(tag: string): RecoveryTag {
   const known: RecoveryTag[] = ['BackUp', 'Sign', 'Send', 'Rebuild', 'Wait', 'Done'];
   const found = known.find((name) => name.toLowerCase() === tag.replace(/[\s_-]/g, '').toLowerCase());
   if (!found) {
@@ -189,7 +214,7 @@ export async function advance(
 }
 
 /** Payment ids are the kind and the time: letters, digits and hyphens. */
-export function newPaymentId(kind: RevealKind, now: number = Date.now()): string {
+export function newPaymentId(kind: SavedKind, now: number = Date.now()): string {
   return `${kind}-${now.toString(36)}`;
 }
 

@@ -10,7 +10,9 @@
 //!
 //! It is test-only by name and by rule: it takes the public test words and
 //! signs for the test chain's identifier only. A real wallet's seed never
-//! crosses into the app; its send path stays inside native code.
+//! crosses into the app; its send path stays inside native code:
+//! [`sign_send`] signs a plain send from account 0 of the account saved on
+//! this phone, reading the seed from the Keychain and dropping it at once.
 //!
 //! The randomness of the hedged signature comes from the operating system on
 //! every signing ([`sign_test_send`]); only the tests pass their own
@@ -27,6 +29,7 @@ use ghost_client::account::{
 use rand::rngs::SysRng;
 use rand::{CryptoRng, TryCryptoRng, TryRng};
 
+use crate::accounts::saved_seed;
 use crate::to_hex_address;
 
 /// The chain identifier of the local test chain (`scripts/test-chain.sh`).
@@ -94,6 +97,8 @@ pub enum SendError {
     Malformed { reason: String },
     /// The operating system gave no randomness for the signature.
     Randomness,
+    /// The account saved on this phone cannot be read.
+    Account { reason: String },
 }
 
 impl fmt::Display for SendError {
@@ -105,6 +110,7 @@ impl fmt::Display for SendError {
             Self::Words { reason } => write!(f, "invalid account words: {reason}"),
             Self::Malformed { reason } => write!(f, "the test send is malformed: {reason}"),
             Self::Randomness => f.write_str("the operating system gave no randomness for the signature"),
+            Self::Account { reason } => write!(f, "the account cannot be read: {reason}"),
         }
     }
 }
@@ -133,40 +139,166 @@ pub fn sign_test_send_with<R: CryptoRng + ?Sized>(
     send: &TestSend,
     rng: &mut R,
 ) -> Result<SignedTestSend, SendError> {
-    if send.chain_id != TEST_CHAIN_ID {
-        return Err(SendError::WrongChain { expected: TEST_CHAIN_ID, found: send.chain_id });
-    }
-    let malformed = |reason: &str| SendError::Malformed { reason: reason.to_owned() };
-    let genesis: [u8; 32] =
-        send.genesis_hash.as_slice().try_into().map_err(|_| malformed("the genesis hash is not 32 bytes"))?;
-    let recipient: [u8; 20] =
-        send.recipient.as_slice().try_into().map_err(|_| malformed("the recipient is not 20 bytes"))?;
-    if send.gas_limit < RESCUE_TRANSFER_GAS {
-        return Err(malformed("the gas limit is below the gas of a plain transfer"));
-    }
-    if send.max_fee_per_gas < send.max_priority_fee_per_gas {
-        return Err(malformed("the fee cap is below the priority fee"));
-    }
+    let transfer = Transfer {
+        chain_id: send.chain_id,
+        genesis_hash: &send.genesis_hash,
+        nonce: send.nonce,
+        recipient: &send.recipient,
+        value: u128::from(send.value),
+        max_priority_fee_per_gas: send.max_priority_fee_per_gas,
+        max_fee_per_gas: send.max_fee_per_gas,
+        gas_limit: send.gas_limit,
+    };
+    let (tx, genesis) = transfer.checked()?;
     let seed = WalletSeed::from_words(test_words).map_err(|error| SendError::Words { reason: error.to_string() })?;
     let account = seed.rescue_account(account_index);
     drop(seed);
-    let tx = AccountTx {
-        chain_id: send.chain_id,
-        nonce: send.nonce,
-        max_priority_fee_per_gas: u128::from(send.max_priority_fee_per_gas),
-        max_fee_per_gas: u128::from(send.max_fee_per_gas),
-        gas_limit: send.gas_limit,
-        to: Some(recipient),
-        value: u128::from(send.value),
-        data: Vec::new(),
-        access_list: Vec::new(),
-    };
     let signed = account.sign(&tx, &genesis, rng);
     Ok(SignedTestSend {
         transaction_hash: signed.hash.to_vec(),
         sender: signed.sender.to_vec(),
         envelope: signed.envelope,
     })
+}
+
+/// A plain transfer's fields, checked once for both kinds of send.
+struct Transfer<'a> {
+    chain_id: u64,
+    genesis_hash: &'a [u8],
+    nonce: u64,
+    recipient: &'a [u8],
+    value: u128,
+    max_priority_fee_per_gas: u64,
+    max_fee_per_gas: u64,
+    gas_limit: u64,
+}
+
+impl Transfer<'_> {
+    /// The account transaction and the genesis hash it is signed against.
+    fn checked(&self) -> Result<(AccountTx, [u8; 32]), SendError> {
+        if self.chain_id != TEST_CHAIN_ID {
+            return Err(SendError::WrongChain { expected: TEST_CHAIN_ID, found: self.chain_id });
+        }
+        let malformed = |reason: &str| SendError::Malformed { reason: reason.to_owned() };
+        let genesis: [u8; 32] =
+            self.genesis_hash.try_into().map_err(|_| malformed("the genesis hash is not 32 bytes"))?;
+        let recipient: [u8; 20] = self.recipient.try_into().map_err(|_| malformed("the recipient is not 20 bytes"))?;
+        if self.gas_limit < RESCUE_TRANSFER_GAS {
+            return Err(malformed("the gas limit is below the gas of a plain transfer"));
+        }
+        if self.max_fee_per_gas < self.max_priority_fee_per_gas {
+            return Err(malformed("the fee cap is below the priority fee"));
+        }
+        let tx = AccountTx {
+            chain_id: self.chain_id,
+            nonce: self.nonce,
+            max_priority_fee_per_gas: u128::from(self.max_priority_fee_per_gas),
+            max_fee_per_gas: u128::from(self.max_fee_per_gas),
+            gas_limit: self.gas_limit,
+            to: Some(recipient),
+            value: self.value,
+            data: Vec::new(),
+            access_list: Vec::new(),
+        };
+        Ok((tx, genesis))
+    }
+}
+
+/// What a send from the saved account pays and the chain data it is signed
+/// against. Nothing here is secret.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AccountSend {
+    /// Must be [`TEST_CHAIN_ID`], checked against the node's `eth_chainId`.
+    pub chain_id: u64,
+    /// The hash of block 0, 32 bytes.
+    pub genesis_hash: Vec<u8>,
+    /// The account's nonce: the payment's identity.
+    pub nonce: u64,
+    /// The recipient's 20-byte address.
+    pub recipient: Vec<u8>,
+    /// In wei, as decimal digits: more than nothing.
+    pub amount_wei: String,
+    pub max_priority_fee_per_gas: u64,
+    pub max_fee_per_gas: u64,
+    /// At least [`RESCUE_TRANSFER_GAS`].
+    pub gas_limit: u64,
+}
+
+/// A signed send: what the payment saves and broadcasts. No key material is
+/// in here.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SignedSend {
+    /// `keccak256(envelope)`.
+    pub transaction_hash: Vec<u8>,
+    /// The sender's 20-byte address.
+    pub sender: Vec<u8>,
+    /// `0x52 || rlp([...])`, the bytes sent with `eth_sendRawTransaction`.
+    pub envelope: Vec<u8>,
+}
+
+impl fmt::Debug for SignedSend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The envelope holds the signature: only its length is shown.
+        f.debug_struct("SignedSend")
+            .field("transaction_hash", &hex(&self.transaction_hash))
+            .field("sender", &hex(&self.sender))
+            .field("envelope_len", &self.envelope.len())
+            .finish()
+    }
+}
+
+/// Signs a send from account `account_index` of `seed` with `rng`. The app
+/// calls [`sign_send`]; this is for the tests.
+pub fn sign_send_with<R: CryptoRng + ?Sized>(
+    seed: &WalletSeed,
+    account_index: u32,
+    send: &AccountSend,
+    rng: &mut R,
+) -> Result<SignedSend, SendError> {
+    let value = parse_amount(&send.amount_wei)?;
+    let transfer = Transfer {
+        chain_id: send.chain_id,
+        genesis_hash: &send.genesis_hash,
+        nonce: send.nonce,
+        recipient: &send.recipient,
+        value,
+        max_priority_fee_per_gas: send.max_priority_fee_per_gas,
+        max_fee_per_gas: send.max_fee_per_gas,
+        gas_limit: send.gas_limit,
+    };
+    let (tx, genesis) = transfer.checked()?;
+    let signed = seed.rescue_account(account_index).sign(&tx, &genesis, rng);
+    Ok(SignedSend { transaction_hash: signed.hash.to_vec(), sender: signed.sender.to_vec(), envelope: signed.envelope })
+}
+
+/// Signs a send from account 0 of the account saved on this phone (ML-DSA-44,
+/// hedged with fresh randomness from the operating system). The words stay in
+/// native code; only the hash, the sender and the envelope come back.
+#[uniffi::export]
+pub fn sign_send(send: AccountSend) -> Result<SignedSend, SendError> {
+    let seed = saved_seed().map_err(|error| SendError::Account { reason: error.to_string() })?;
+    let mut rng = OsRandom { failed: false };
+    let signed = sign_send_with(&seed, 0, &send, &mut rng);
+    drop(seed);
+    let signed = signed?;
+    if rng.failed {
+        // Signed with missing randomness: never hand it out.
+        return Err(SendError::Randomness);
+    }
+    Ok(signed)
+}
+
+/// Decimal digits of wei, more than nothing.
+fn parse_amount(text: &str) -> Result<u128, SendError> {
+    let bad = |reason: &str| SendError::Malformed { reason: reason.to_owned() };
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(bad("the amount is not a whole number of wei"));
+    }
+    match text.parse::<u128>() {
+        Ok(0) => Err(bad("a send moves more than nothing")),
+        Ok(value) => Ok(value),
+        Err(_) => Err(bad("the amount is too large")),
+    }
 }
 
 /// The address of account `account_index` of the public test words, as `0x`

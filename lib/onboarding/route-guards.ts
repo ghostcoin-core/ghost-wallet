@@ -19,6 +19,8 @@ export const ROUTE_GROUPS = {
   import: 'onboarding',
   lock: 'lock',
   home: 'wallet',
+  send: 'wallet',
+  payment: 'wallet',
   receive: 'wallet',
   settings: 'wallet',
   'recovery-words': 'wallet',

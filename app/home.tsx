@@ -1,8 +1,8 @@
 // Home: the balance and the activity, after docs/mockups/home.html. The
 // balance shows at once from the cache with its age, then the node is asked in
-// the background; nothing waits for it. A Vanish, Summon or Claim still going
-// heads the activity as pending, with the step it is at; tapping it opens its
-// progress again.
+// the background; nothing waits for it. A send, Vanish, Summon or Claim still
+// going heads the activity as pending, with the step it is at; tapping it
+// opens its progress again.
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
@@ -46,9 +46,12 @@ function ActivityRowView({ row, first }: { row: ActivityRow; first: boolean }) {
   );
 }
 
-const PENDING_TITLES = { vanish: 'Vanish', summon: 'Summon', claim: 'Claim' } as const;
+const PENDING_TITLES = { send: 'Send', vanish: 'Vanish', summon: 'Summon', claim: 'Claim' } as const;
 
-/** A Vanish, Summon or Claim still going: tapping it opens its progress again. */
+/** Where each kind of payment shows its progress. */
+const PROGRESS_ROUTES = { send: '/payment', vanish: '/vanish', summon: '/summon', claim: '/summon' } as const;
+
+/** A send, Vanish, Summon or Claim still going: tapping it opens its progress again. */
 function PendingRowView({ payment, first, onOpen }: { payment: PendingPayment; first: boolean; onOpen: () => void }) {
   const title = PENDING_TITLES[payment.kind];
   const detail = `Pending: ${payment.stepText}`;
@@ -65,7 +68,7 @@ function PendingRowView({ payment, first, onOpen }: { payment: PendingPayment; f
       end={
         payment.amountWei !== null ? (
           <Text style={styles.amount}>
-            {formatSignedGhost(payment.amountWei, payment.kind === 'vanish' ? 'sent' : 'received')}
+            {formatSignedGhost(payment.amountWei, payment.kind === 'vanish' || payment.kind === 'send' ? 'sent' : 'received')}
           </Text>
         ) : undefined
       }
@@ -125,6 +128,13 @@ export default function HomeScreen() {
           )}
           <View style={styles.actions}>
             <ButtonRow>
+              <Button
+                label="Send"
+                icon="send"
+                disabled={address === null}
+                onPress={() => router.push('/send')}
+                testID="open-send"
+              />
               <Button
                 label="Receive"
                 icon="receive"
@@ -186,7 +196,7 @@ export default function HomeScreen() {
               first={i === 0}
               onOpen={() => {
                 reopenPayment(payment.id);
-                router.push(payment.kind === 'vanish' ? '/vanish' : '/summon');
+                router.push(PROGRESS_ROUTES[payment.kind]);
               }}
             />
           ))}

@@ -54,7 +54,27 @@ type GhostCoreBindings = RestoreBindings &
   savedAccountZeroAddress(): string;
   /** The 24 words of the saved account, for the recovery words screen only. */
   savedAccountWords(): string[];
-} & Partial<VanishBindings>;
+} & Partial<VanishBindings> &
+  Partial<SendBindings>;
+
+/** The plain send calls of core/src/send.rs, as generated. */
+export type SendBindings = {
+  /** Signs a send from account 0 of the saved account (ML-DSA-44); the words stay in native code. */
+  signSend(send: CoreAccountSend): CoreSigned;
+  /** The gas of a plain transfer from a rescue-key account. */
+  testSendGasLimit(): bigint;
+};
+
+export type CoreAccountSend = {
+  chainId: bigint;
+  genesisHash: ArrayBuffer;
+  nonce: bigint;
+  recipient: ArrayBuffer;
+  amountWei: string;
+  maxPriorityFeePerGas: bigint;
+  maxFeePerGas: bigint;
+  gasLimit: bigint;
+};
 
 /** The Vanish, Summon and Claim calls of core/src/vanish.rs, as generated. */
 export type VanishBindings = {
@@ -274,6 +294,15 @@ export function vanishCore(): VanishBindings {
     throw new Error('this build has no Vanish in its native core');
   }
   return core as GhostCoreBindings & VanishBindings;
+}
+
+/** The send calls with the payment calls they go through; throws when this build has no send in its native core. */
+export function sendCore(): VanishBindings & SendBindings {
+  const core = vanishCore();
+  if (typeof (core as unknown as Partial<SendBindings>).signSend !== 'function') {
+    throw new Error('this build has no send in its native core');
+  }
+  return core as unknown as VanishBindings & SendBindings;
 }
 
 /**

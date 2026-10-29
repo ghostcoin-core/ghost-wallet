@@ -170,7 +170,7 @@ export async function startReveal(
 export function proveRevealAgain(kit: PaymentKit, sequence: CorePaymentSequence, key: KeySource, account: string): Rebuild {
   return async () => {
     const details = decodeDetails(sequence.record().intent.details);
-    if (!details || details.kind === 'vanish') {
+    if (!details || (details.kind !== 'summon' && details.kind !== 'claim')) {
       throw new Error('the saved Summon cannot be read');
     }
     const proved = await proveReveal(kit, key, account, details.kind === 'claim' ? BigInt(details.amountWei) : null);
