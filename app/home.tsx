@@ -1,6 +1,8 @@
 // Home: the balance and the activity, after docs/mockups/home.html. The
 // balance shows at once from the cache with its age, then the node is asked in
-// the background; nothing waits for it.
+// the background; nothing waits for it. A Vanish, Summon or Claim still going
+// heads the activity as pending, with the step it is at; tapping it opens its
+// progress again.
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
@@ -22,12 +24,14 @@ import {
 } from '../components/ui';
 import { accountZeroAddress } from '../lib/account';
 import { describeActivity, sortActivity, type ActivityRow } from '../lib/home/activity';
-import { formatGhost } from '../lib/home/balance-format';
+import { formatGhost, formatSignedGhost } from '../lib/home/balance-format';
 import { balanceStatus } from '../lib/home/cache-refresh';
 import { useFaucet } from '../lib/home/use-faucet';
 import { useHome, useNow } from '../lib/home/use-home';
+import { usePendingPayments } from '../lib/home/use-pending';
 import { useTestNetwork } from '../lib/node/test-network';
 import { useSettings } from '../lib/settings/settings';
+import { reopenPayment, type PendingPayment } from '../lib/vanish/pending';
 
 function ActivityRowView({ row, first }: { row: ActivityRow; first: boolean }) {
   return (
@@ -42,11 +46,39 @@ function ActivityRowView({ row, first }: { row: ActivityRow; first: boolean }) {
   );
 }
 
+const PENDING_TITLES = { vanish: 'Vanish', summon: 'Summon', claim: 'Claim' } as const;
+
+/** A Vanish, Summon or Claim still going: tapping it opens its progress again. */
+function PendingRowView({ payment, first, onOpen }: { payment: PendingPayment; first: boolean; onOpen: () => void }) {
+  const title = PENDING_TITLES[payment.kind];
+  const detail = `Pending: ${payment.stepText}`;
+  return (
+    <Row
+      icon="clock"
+      title={title}
+      detail={detail}
+      first={first}
+      opens
+      onPress={onOpen}
+      accessibilityLabel={`${title}, ${detail}. Opens its progress.`}
+      testID={`pending-${payment.id}`}
+      end={
+        payment.amountWei !== null ? (
+          <Text style={styles.amount}>
+            {formatSignedGhost(payment.amountWei, payment.kind === 'vanish' ? 'sent' : 'received')}
+          </Text>
+        ) : undefined
+      }
+    />
+  );
+}
+
 export default function HomeScreen() {
   const router = useRouter();
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
   const { view, refresh } = useHome(nodeUrl, address);
+  const pending = usePendingPayments(nodeUrl);
   const testNetwork = useTestNetwork(nodeUrl);
   const faucet = useFaucet(nodeUrl, address, refresh);
   const now = useNow();
@@ -147,12 +179,23 @@ export default function HomeScreen() {
       <Column>
         <SectionTitle>Activity</SectionTitle>
         <Panel testID="activity">
-          {rows.length === 0 ? (
+          {pending.map((payment, i) => (
+            <PendingRowView
+              key={payment.id}
+              payment={payment}
+              first={i === 0}
+              onOpen={() => {
+                reopenPayment(payment.id);
+                router.push(payment.kind === 'vanish' ? '/vanish' : '/summon');
+              }}
+            />
+          ))}
+          {rows.length === 0 && pending.length === 0 ? (
             <Text style={[textStyles.quiet, styles.empty]}>
               No activity yet. Payments to and from this account show here.
             </Text>
           ) : (
-            rows.map((row, i) => <ActivityRowView key={row.id} row={row} first={i === 0} />)
+            rows.map((row, i) => <ActivityRowView key={row.id} row={row} first={i === 0 && pending.length === 0} />)
           )}
         </Panel>
       </Column>

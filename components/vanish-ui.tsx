@@ -6,7 +6,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { progressRows, statusDetail, type PaymentStatus, type RevealKind } from '../lib/vanish/status-mapping';
 import { Icon } from './icons';
 import { colors, monoFont } from './theme';
-import { Panel, textStyles } from './ui';
+import { Button, Panel, TextButton, textStyles } from './ui';
 
 export const PHANTOM_KEY_LABEL = 'Phantom Key: holds coins, not your wallet.';
 
@@ -71,6 +71,32 @@ export function PaymentProgress({
         </Text>
       ) : null}
     </Panel>
+  );
+}
+
+export const LEAVE_NOTE = 'You can leave this screen. The payment keeps going.';
+
+/**
+ * Under the progress: Done once the payment is settled or failed. Until then
+ * the screen says the payment goes on without it, with a quiet Leave.
+ */
+export function PaymentExit({
+  final,
+  onLeave,
+  testPrefix,
+}: {
+  final: boolean;
+  onLeave: () => void;
+  testPrefix: string;
+}) {
+  if (final) {
+    return <Button label="Done" secondary onPress={onLeave} testID={`${testPrefix}-done`} />;
+  }
+  return (
+    <View style={styles.leave} testID={`${testPrefix}-leave-note`}>
+      <Text style={textStyles.body}>{LEAVE_NOTE}</Text>
+      <TextButton label="Leave" onPress={onLeave} testID={`${testPrefix}-leave`} />
+    </View>
   );
 }
 
@@ -147,6 +173,9 @@ const styles = StyleSheet.create({
   progressDetail: {
     paddingHorizontal: 16,
     paddingVertical: 8,
+  },
+  leave: {
+    gap: 4,
   },
   back: {
     padding: 14,
