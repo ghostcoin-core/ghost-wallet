@@ -7,6 +7,12 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "backgroundColor": "#FFFFFF",
+    "icon": "./brand/app-icon/ghost-app-icon-violet-1024.png",
+    "splash": {
+      "image": "./brand/png/ghost-logo-on-violet-1024.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#6B4CFF"
+    },
     "platforms": ["ios"],
     "newArchEnabled": true,
     "ios": {
