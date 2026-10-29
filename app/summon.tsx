@@ -5,16 +5,18 @@
 // less the fee; Claim brings part of it, and the rest stays with the key. A
 // key this phone cannot find shows as not found yet, never as zero. Or the
 // person taps a card this iPhone wrote: the card's key goes straight to the
-// native core, and the same lookup and proof run on it there. Done shows only
+// native core, and the same lookup and proof run on it there. While the lookup
+// runs the screen says so, notes when it is slow, and offers Try again if it
+// fails. Done shows only
 // once the payment is settled or failed; until then the person may leave, and
 // Home lists it as pending.
 import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { colors, monoFont } from '../components/theme';
 import { Button, ButtonRow, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { CoinsBack, PaymentExit, PaymentProgress } from '../components/vanish-ui';
+import { CoinsBack, KeyLookupProgress, PaymentExit, PaymentProgress } from '../components/vanish-ui';
 import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
 import { formatGhost } from '../lib/home/balance-format';
@@ -64,6 +66,10 @@ export default function SummonScreen() {
   const kit = useMemo(() => paymentKit(nodeUrl), [nodeUrl]);
   const [keyText, setKeyText] = useState('');
   const [lookup, setLookup] = useState<KeyLookup | null>(null);
+  // The key being looked up (or whose lookup failed), and why it failed.
+  const [lookingUp, setLookingUp] = useState<KeySource | null>(null);
+  const [lookupFailure, setLookupFailure] = useState<string | null>(null);
+  const lookupRun = useRef(0);
   const [claimText, setClaimText] = useState('');
   const [claiming, setClaiming] = useState(false);
   const [resumed] = useState(() => resumeReveal(kit));
@@ -101,13 +107,30 @@ export default function SummonScreen() {
     if (!kit || !source) {
       return;
     }
+    const run = ++lookupRun.current;
     setError(null);
     setLookup(null);
+    setLookupFailure(null);
+    setLookingUp(source);
     try {
-      setLookup(await lookUpKey(kit, source));
+      const found = await lookUpKey(kit, source);
+      if (run === lookupRun.current) {
+        setLookingUp(null);
+        setLookup(found);
+      }
     } catch (failure) {
-      setError(`The coins could not be looked up. ${failureReason(failure, kit.nodeUrl)}`);
+      if (run === lookupRun.current) {
+        setLookupFailure(`The coins could not be looked up. ${failureReason(failure, kit.nodeUrl)}`);
+      }
     }
+  }
+
+  /** Drops the lookup shown, and any answer still on its way, when the key changes. */
+  function forgetLookup() {
+    lookupRun.current += 1;
+    setLookingUp(null);
+    setLookupFailure(null);
+    setLookup(null);
   }
 
   /** Reads a card this iPhone wrote into the native core, then looks its key up. */
@@ -117,7 +140,7 @@ export default function SummonScreen() {
     }
     setTapping(true);
     setError(null);
-    setLookup(null);
+    forgetLookup();
     try {
       await readPhantomKeyFromCard();
     } catch (failure) {
@@ -136,7 +159,7 @@ export default function SummonScreen() {
   function typeKeyInstead() {
     forgetCardKey(kit);
     setFromCard(false);
-    setLookup(null);
+    forgetLookup();
   }
 
   function reveal() {
@@ -205,7 +228,7 @@ export default function SummonScreen() {
                 multiline
                 onChangeText={(text) => {
                   setKeyText(text);
-                  setLookup(null);
+                  forgetLookup();
                 }}
                 placeholder="24 words"
                 style={styles.keyField}
@@ -220,7 +243,7 @@ export default function SummonScreen() {
               </Text>
             ) : null}
             {!sequence ? (
-              <Button label="Find its coins" disabled={!rule.accept || unavailable} onPress={() => void find()} testID="summon-find" />
+              <Button label="Find its coins" disabled={!rule.accept || unavailable || (lookingUp !== null && lookupFailure === null)} onPress={() => void find()} testID="summon-find" />
             ) : null}
             {cards ? (
               <Button
@@ -252,6 +275,8 @@ export default function SummonScreen() {
             {status === 'settled' ? <CoinsBack text="The coins are back in your account." /> : null}
             <PaymentExit final={isFinal(status)} onLeave={() => router.back()} testPrefix="summon" />
           </>
+        ) : lookingUp ? (
+          <KeyLookupProgress failure={lookupFailure} onRetry={() => void find(lookingUp)} />
         ) : lookup ? (
           <Panel style={styles.form} testID="summon-lookup">
             {lookup.status === 'found' ? (
