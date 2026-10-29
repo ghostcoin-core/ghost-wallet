@@ -24,6 +24,7 @@ export const ROUTE_GROUPS = {
   'recovery-words': 'wallet',
   vanish: 'wallet',
   summon: 'wallet',
+  'wipe-card': 'wallet',
   // The feasibility bench holds only the public test words, and the device and
   // simulator scripts open it by link (ghostwallet://bench), so it stays
   // reachable without an account or unlock. Seven taps on the version in

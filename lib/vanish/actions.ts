@@ -89,11 +89,20 @@ export type KeyLookup = {
   tip: number;
 };
 
-/** Looks the typed key up in the coin tree at the tip, with the fee a reveal pays now. */
-export async function lookUpKey(kit: PaymentKit, keyText: string): Promise<KeyLookup> {
+/** The key a tapped card handed to the native core; JavaScript never holds it. */
+export const CARD_KEY = { card: true } as const;
+
+/** The key of a Summon or Claim: the typed text, or the card key the core holds. */
+export type KeySource = string | typeof CARD_KEY;
+
+/** Looks the key up in the coin tree at the tip, with the fee a reveal pays now. */
+export async function lookUpKey(kit: PaymentKit, key: KeySource): Promise<KeyLookup> {
   const chainId = await checkedChainId(kit);
   const { tree, tip } = await treeAtTip(kit);
-  const coins = kit.core.findKeyCoins(keyText, chainId, tree.leaves, spentBuffers(tree));
+  const coins =
+    typeof key === 'string'
+      ? kit.core.findKeyCoins(key, chainId, tree.leaves, spentBuffers(tree))
+      : kit.core.findCardKeyCoins(chainId, tree.leaves, spentBuffers(tree));
   const window = kit.core.feeWindow(BigInt(tip));
   const reference = await kit.node.block(Number(window.referenceHeight));
   return { ...coins, feeWei: kit.core.revealFeeWei(reference.baseFeePerGas.toString()), tree, tip };
@@ -105,7 +114,7 @@ export async function lookUpKey(kit: PaymentKit, keyText: string): Promise<KeyLo
  */
 export async function proveReveal(
   kit: PaymentKit,
-  keyText: string,
+  key: KeySource,
   account: string,
   outWei: bigint | null,
 ): Promise<{ envelope: ArrayBuffer; validUntil: bigint; marker: string; feeWei: string; outWei: string }> {
@@ -113,18 +122,17 @@ export async function proveReveal(
   const { tree, tip } = await treeAtTip(kit);
   const window = kit.core.feeWindow(BigInt(tip));
   const [genesis, reference] = await Promise.all([kit.node.block(0), kit.node.block(Number(window.referenceHeight))]);
-  const proved = kit.core.proveKeyReveal(
-    keyText,
-    {
-      chainId,
-      genesisHash: buffer(genesis.hash),
-      recipient: buffer(account),
-      baseFeeRefWei: reference.baseFeePerGas.toString(),
-      outWei: outWei === null ? undefined : outWei.toString(),
-    },
-    tree.leaves,
-    spentBuffers(tree),
-  );
+  const request = {
+    chainId,
+    genesisHash: buffer(genesis.hash),
+    recipient: buffer(account),
+    baseFeeRefWei: reference.baseFeePerGas.toString(),
+    outWei: outWei === null ? undefined : outWei.toString(),
+  };
+  const proved =
+    typeof key === 'string'
+      ? kit.core.proveKeyReveal(key, request, tree.leaves, spentBuffers(tree))
+      : kit.core.proveCardKeyReveal(request, tree.leaves, spentBuffers(tree));
   return {
     envelope: proved.envelope,
     validUntil: window.validUntil,
@@ -137,12 +145,12 @@ export async function proveReveal(
 /** Proves the reveal, saves it with its marker as identity, and sends it. */
 export async function startReveal(
   kit: PaymentKit,
-  keyText: string,
+  key: KeySource,
   account: string,
   outWei: bigint | null,
 ): Promise<CorePaymentSequence> {
   const kind = outWei === null ? 'summon' : 'claim';
-  const proved = await proveReveal(kit, keyText, account, outWei);
+  const proved = await proveReveal(kit, key, account, outWei);
   const details: PaymentDetails = {
     kind,
     amountWei: proved.outWei,
@@ -151,21 +159,21 @@ export async function startReveal(
     at: Date.now(),
   };
   const sequence = kit.core.PaymentSequence.start(kit.store, newPaymentId(kind), revealIntent(kind, proved.marker, details));
-  // The typed key is the backup: nothing more to save before sending.
+  // The key (typed, or on its card) is the backup: nothing more to save before sending.
   sequence.markBackedUp();
   sequence.addAttempt(proved.envelope, proved.validUntil);
   await kit.node.sendRaw(bytesToHex(sequence.markSent()));
   return sequence;
 }
 
-/** A new proof of the same coin, for a fee window that moved. Needs the key typed again after a restart. */
-export function proveRevealAgain(kit: PaymentKit, sequence: CorePaymentSequence, keyText: string, account: string): Rebuild {
+/** A new proof of the same coin, for a fee window that moved. Needs the key typed (or its card tapped) again after a restart. */
+export function proveRevealAgain(kit: PaymentKit, sequence: CorePaymentSequence, key: KeySource, account: string): Rebuild {
   return async () => {
     const details = decodeDetails(sequence.record().intent.details);
     if (!details || details.kind === 'vanish') {
       throw new Error('the saved Summon cannot be read');
     }
-    const proved = await proveReveal(kit, keyText, account, details.kind === 'claim' ? BigInt(details.amountWei) : null);
+    const proved = await proveReveal(kit, key, account, details.kind === 'claim' ? BigInt(details.amountWei) : null);
     if (proved.marker !== details.marker) {
       throw new Error('this key does not hold the coin of this Summon');
     }
