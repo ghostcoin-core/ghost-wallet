@@ -89,6 +89,7 @@ export type VanishNode = {
   tipHeight(): Promise<number>;
   /** Blocks `from` to `to`, with their transactions, and every receipt of them. */
   blocks(from: number, to: number): Promise<{ block: NodeBlock; receipts: NodeReceipt[] }[]>;
+  /** Block `height`'s header: its height, hash and base fee, with no transactions. */
   block(height: number): Promise<NodeBlock>;
   receipts(hashes: string[]): Promise<(NodeReceipt | null)[]>;
   /** Whether the node holds each transaction, in a block or not. */
@@ -128,7 +129,9 @@ export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
     },
     async block(height) {
       const [block] = await call([['eth_getBlockByNumber', [hexQuantity(height), false]]]);
-      return parseBlock(block);
+      // Asked without its transactions, the node lists only their hashes:
+      // the header is read, and the block holds no transactions here.
+      return parseBlock({ ...((block ?? {}) as Record<string, unknown>), transactions: [] });
     },
     async receipts(hashes) {
       if (hashes.length === 0) {
