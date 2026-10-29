@@ -1,4 +1,4 @@
-// Home's list of Vanish, Summon and Claim payments still going. A payment
+// Home's list of sends, Vanishes, Summons and Claims still going. A payment
 // left mid-way keeps going here: every few seconds Home moves each one the
 // screen is not moving (lib/vanish/pending.ts keeps two from moving the same
 // payment at once), so its row shows the step it is at until it settles or
@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AppState } from 'react-native';
 
+import { advanceSend, asSendKit } from '../send/send-payment';
 import { signVanishAgain } from '../vanish/actions';
 import { advance } from '../vanish/payments';
 import { moveAlone, openShared, pendingPayments, subscribePending, type PendingPayment } from '../vanish/pending';
@@ -27,6 +28,11 @@ async function movePending(kit: PaymentKit, pending: readonly PendingPayment[]) 
     }
     try {
       await moveAlone(payment.id, async () => {
+        if (payment.kind === 'send') {
+          // A queued send goes out from here too, once the node can be reached.
+          const sends = asSendKit(kit);
+          return sends ? advanceSend(sends, sequence) : null;
+        }
         if (payment.kind === 'vanish') {
           return advance(kit.node, sequence, signVanishAgain(kit, sequence), null);
         }

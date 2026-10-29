@@ -36,8 +36,8 @@ pub use restore_scan::{
     RestoredAccount, UNVERIFIED_NOTE,
 };
 pub use send::{
-    RESCUE_TRANSFER_GAS, SendError, SignedTestSend, TEST_CHAIN_ID, TestSend, sign_test_send, sign_test_send_with,
-    test_chain_id, test_send_gas_limit, test_send_sender,
+    AccountSend, RESCUE_TRANSFER_GAS, SendError, SignedSend, SignedTestSend, TEST_CHAIN_ID, TestSend, sign_send,
+    sign_send_with, sign_test_send, sign_test_send_with, test_chain_id, test_send_gas_limit, test_send_sender,
 };
 pub use spot_check::{SpotCheckError, SpotCheckKey, SpotCheckReport, spot_check_header, spot_check_seed_height};
 pub use step_sequence::{

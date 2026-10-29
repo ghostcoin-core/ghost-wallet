@@ -12,7 +12,9 @@
 // key is confirmed written down or the Vanish is cancelled, and with the app.
 import type { CorePaymentSequence, CorePaymentStore, VanishBindings } from '../../modules/ghost-core';
 import { decodeDetails } from './payments';
-import { isFinal, statusLabel, statusOfStep, stepName, type PaymentStatus, type RevealKind } from './status-mapping';
+import { sendStatusLabel, sendStatusOf } from '../send/payment-status';
+import { hasReached } from '../send/reached';
+import { isFinal, statusLabel, statusOfStep, stepName, type PaymentStatus, type SavedKind } from './status-mapping';
 
 /** Where a Vanish stood while the core still held its new key. */
 export type HeldStep = 'save' | 'check' | 'card';
@@ -107,7 +109,7 @@ export function openShared(kit: Kit, id: string): CorePaymentSequence | null {
 }
 
 /** The newest saved payment of these kinds, opened once. */
-export function newestShared(kit: Kit, kinds: readonly RevealKind[]): CorePaymentSequence | null {
+export function newestShared(kit: Kit, kinds: readonly SavedKind[]): CorePaymentSequence | null {
   const [newest] = kit.store
     .list()
     .filter((id) => kinds.some((kind) => id.startsWith(`${kind}-`)))
@@ -132,7 +134,7 @@ export function reopenPayment(id: string) {
 }
 
 /** The payment Home asked to open, if it is of one of these kinds. */
-export function takeReopened(kinds: readonly RevealKind[]): string | null {
+export function takeReopened(kinds: readonly SavedKind[]): string | null {
   const id = reopened;
   if (id && kinds.some((kind) => id.startsWith(`${kind}-`))) {
     reopened = null;
@@ -158,9 +160,9 @@ export async function moveAlone<T>(id: string, move: () => Promise<T>): Promise<
   }
 }
 
-export function kindOfId(id: string): RevealKind | null {
+export function kindOfId(id: string): SavedKind | null {
   const kind = id.split('-')[0];
-  return kind === 'vanish' || kind === 'summon' || kind === 'claim' ? kind : null;
+  return kind === 'vanish' || kind === 'summon' || kind === 'claim' || kind === 'send' ? kind : null;
 }
 
 /** The amount the payment moves, from its saved details. */
@@ -188,7 +190,7 @@ function paymentAt(sequence: CorePaymentSequence, id: string): number {
 /** A payment still going, as Home lists it. */
 export type PendingPayment = {
   id: string;
-  kind: RevealKind;
+  kind: SavedKind;
   amountWei: string | null;
   at: number;
   status: PaymentStatus;
@@ -203,9 +205,9 @@ export function heldStepText(step: HeldStep): string {
 }
 
 /**
- * Every saved Vanish, Summon and Claim not settled or failed yet, newest
+ * Every saved send, Vanish, Summon and Claim not settled or failed yet, newest
  * first. A Vanish still waiting for its key to be written down shows only
- * while the core holds that key.
+ * while the core holds that key. A send reads queued until the node holds it.
  */
 export function pendingPayments(kit: Kit | null): PendingPayment[] {
   if (!kit) {
@@ -244,7 +246,11 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
       at: paymentAt(sequence, id),
       status,
       held: keyStep,
-      stepText: keyStep ? heldStepText(keyStep) : statusLabel(status, kind),
+      stepText: keyStep
+        ? heldStepText(keyStep)
+        : kind === 'send'
+          ? sendStatusLabel(sendStatusOf(step, hasReached(id)))
+          : statusLabel(status, kind),
     });
   }
   return pending.sort((a, b) => b.at - a.at);

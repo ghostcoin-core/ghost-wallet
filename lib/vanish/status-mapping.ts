@@ -5,6 +5,9 @@
 
 export type RevealKind = 'vanish' | 'summon' | 'claim';
 
+/** Every kind of payment this phone saves: these and plain sends (lib/send/). */
+export type SavedKind = RevealKind | 'send';
+
 export type PaymentStatus = 'proving' | 'sent' | 'in-block' | 'settled' | 'failed';
 
 /** The core's `Step`, in its declared order. */
