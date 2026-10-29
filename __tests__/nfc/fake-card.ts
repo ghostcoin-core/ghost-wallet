@@ -64,7 +64,7 @@ export function cmac(key: Uint8Array, message: Uint8Array): Uint8Array {
     padded[tail.length] = 0x80;
     last = xor(padded, k2);
   }
-  let state = new Uint8Array(16);
+  let state: Uint8Array = new Uint8Array(16);
   for (let i = 0; i < blocks - 1; i += 1) {
     state = ecb(key, xor(state, message.slice(i * 16, i * 16 + 16)));
   }
