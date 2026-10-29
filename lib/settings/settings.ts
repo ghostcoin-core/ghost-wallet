@@ -10,8 +10,15 @@ export type Settings = {
   appLock: boolean;
 };
 
-/** The local test chain (scripts/test-chain.sh), as the simulator reaches it. */
-export const DEFAULT_NODE_URL = 'http://127.0.0.1:8547';
+/**
+ * The test chain (scripts/test-chain.sh) on the Mac Studio, as a phone on the
+ * same network reaches it. 127.0.0.1 would be the phone itself, where no node
+ * runs. Settings can point at another node.
+ */
+export const DEFAULT_NODE_URL = 'http://192.168.1.36:8547';
+
+/** The Ghost test network (the internal net of scripts/test-chain.sh). */
+export const TEST_CHAIN_ID = 6777971n;
 
 export const DEFAULT_SETTINGS: Settings = { nodeUrl: DEFAULT_NODE_URL, appLock: false };
 

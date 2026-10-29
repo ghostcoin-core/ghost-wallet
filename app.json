@@ -15,7 +15,11 @@
       "supportsTablet": false,
       "infoPlist": {
         "NFCReaderUsageDescription": "Ghost Wallet uses NFC to write a Phantom Key to your NTAG 424 card, read it back to Summon or Claim, and wipe the card.",
-        "com.apple.developer.nfc.readersession.iso7816.select-identifiers": ["D2760000850101"]
+        "com.apple.developer.nfc.readersession.iso7816.select-identifiers": ["D2760000850101"],
+        "NSLocalNetworkUsageDescription": "Ghost Wallet connects to the Ghost test node on your network.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
       },
       "entitlements": {
         "com.apple.developer.nfc.readersession.formats": ["TAG"]

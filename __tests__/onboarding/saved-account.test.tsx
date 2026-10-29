@@ -115,6 +115,7 @@ jest.mock('../../lib/node/rpc', () => ({
   getTip: () => mockNode.getTip(),
   getAccountState: (url: string, address: string) => mockNode.getAccountState(url, address),
 }));
+jest.mock('../../lib/node/test-network', () => ({ useTestNetwork: () => false }));
 
 const APP = {
   _layout: RootLayout,

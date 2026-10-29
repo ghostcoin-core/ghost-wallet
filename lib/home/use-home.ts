@@ -19,7 +19,7 @@ export function useHome(
   nodeUrl: string,
   address: string | null,
   options: { cache?: SnapshotCache; readAccount?: ReadAccount } = {},
-): { view: HomeView; refresh: () => void } {
+): { view: HomeView; refresh: () => Promise<void> } {
   const cache = options.cache ?? homeCache;
   const readAccount = options.readAccount ?? readAccountZero;
   // One loader per node and account: it reads the cache as it is made, so the
@@ -53,7 +53,7 @@ export function useHome(
     [loader],
   );
   const view = useSyncExternalStore(store.subscribe, store.get);
-  return { view, refresh: () => void loader?.refresh() };
+  return { view, refresh: async () => loader?.refresh() };
 }
 
 /** The current time, ticking every `everyMs` so ages on screen stay right. */

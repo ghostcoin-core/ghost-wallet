@@ -24,7 +24,9 @@ import { accountZeroAddress } from '../lib/account';
 import { describeActivity, sortActivity, type ActivityRow } from '../lib/home/activity';
 import { formatGhost } from '../lib/home/balance-format';
 import { balanceStatus } from '../lib/home/cache-refresh';
+import { useFaucet } from '../lib/home/use-faucet';
 import { useHome, useNow } from '../lib/home/use-home';
+import { useTestNetwork } from '../lib/node/test-network';
 import { useSettings } from '../lib/settings/settings';
 
 function ActivityRowView({ row, first }: { row: ActivityRow; first: boolean }) {
@@ -44,7 +46,9 @@ export default function HomeScreen() {
   const router = useRouter();
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
-  const { view } = useHome(nodeUrl, address);
+  const { view, refresh } = useHome(nodeUrl, address);
+  const testNetwork = useTestNetwork(nodeUrl);
+  const faucet = useFaucet(nodeUrl, address, refresh);
   const now = useNow();
   const snapshot = view.snapshot;
   const rows = sortActivity(snapshot?.activity ?? []).map((item) => describeActivity(item, now));
@@ -115,6 +119,28 @@ export default function HomeScreen() {
                 testID="open-summon"
               />
             </ButtonRow>
+            {testNetwork && address !== null ? (
+              <>
+                <Button
+                  label={faucet.state.name === 'asking' ? 'Getting test GHOST…' : 'Get test GHOST'}
+                  icon="receive"
+                  secondary
+                  disabled={faucet.state.name === 'asking'}
+                  onPress={() => void faucet.ask()}
+                  testID="get-test-ghost"
+                />
+                {faucet.state.name === 'sent' ? (
+                  <Text accessibilityLiveRegion="polite" style={textStyles.quiet} testID="faucet-status">
+                    10 test GHOST arrived. Test GHOST has no value.
+                  </Text>
+                ) : null}
+                {faucet.state.name === 'failed' ? (
+                  <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.faucetError]} testID="faucet-status">
+                    {faucet.state.message}
+                  </Text>
+                ) : null}
+              </>
+            ) : null}
           </View>
         </Panel>
       </Column>
@@ -159,6 +185,9 @@ const styles = StyleSheet.create({
   },
   empty: {
     padding: 16,
+  },
+  faucetError: {
+    color: colors.danger,
   },
   amount: {
     color: colors.ink,

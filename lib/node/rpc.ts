@@ -68,6 +68,12 @@ export async function rpcBatch(
   });
 }
 
+/** The node's chain id (`eth_chainId`). */
+export async function getChainId(url: string, fetchImpl?: FetchLike): Promise<bigint> {
+  const [id] = await rpcBatch(url, [['eth_chainId', []]], fetchImpl);
+  return quantity(id, 'chain id');
+}
+
 /** The node's latest block: its height and hash. */
 export async function getTip(url: string, fetchImpl?: FetchLike): Promise<Tip> {
   const [block] = await rpcBatch(url, [['eth_getBlockByNumber', ['latest', false]]], fetchImpl);
