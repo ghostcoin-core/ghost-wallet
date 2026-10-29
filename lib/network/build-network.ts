@@ -37,13 +37,14 @@ export type BuildNetwork = {
 export const DEV_NODE_URL = 'http://192.168.1.36:8547';
 
 /**
- * The independent public nodes of the Ghost public test network. These host
- * names are provisional: replace this list when the operators confirm theirs.
+ * The public nodes of the Ghost public test network, reached over TLS through
+ * Tailscale Funnel. Both are run by the Ghost team today, so they count as one
+ * operator, not the several independent ones release needs: add other
+ * operators' nodes here as they come up.
  */
 export const RELEASE_NODE_URLS: readonly string[] = [
-  'https://testnet-1.ghostcoin.com',
-  'https://testnet-2.ghostcoin.com',
-  'https://testnet-3.ghostcoin.com',
+  'https://spark-2912.tail11407b.ts.net/ghost-rpc',
+  'https://kipp-vm.tail11407b.ts.net/ghost-rpc',
 ];
 
 export const DEV_NETWORK: BuildNetwork = {

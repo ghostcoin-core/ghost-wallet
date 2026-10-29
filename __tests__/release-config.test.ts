@@ -57,6 +57,26 @@ describe('release configuration', () => {
     expect(JSON.stringify(release())).not.toContain('NSAllowsLocalNetworking');
   });
 
+  it('strips the local-networking keys that prebuild and plugins add to the generated Info.plist', async () => {
+    const mod = release().mods?.ios?.infoPlist;
+    expect(typeof mod).toBe('function');
+    // What prebuild's template and the dev client write before the mod runs.
+    const generated = {
+      NSAppTransportSecurity: { NSAllowsArbitraryLoads: false, NSAllowsLocalNetworking: true },
+      NSLocalNetworkUsageDescription: 'Expo Dev Launcher uses the local network.',
+      NFCReaderUsageDescription: 'nfc',
+    };
+    const result = await mod({
+      modResults: generated,
+      modRequest: { nextMod: async (config: Config) => config, platform: 'ios', modName: 'infoPlist' },
+    });
+    expect(result.modResults).toEqual({
+      NSAppTransportSecurity: { NSAllowsArbitraryLoads: false },
+      NFCReaderUsageDescription: 'nfc',
+      ITSAppUsesNonExemptEncryption: false,
+    });
+  });
+
   it('marks the app as exempt from export encryption rules', () => {
     const config = release();
     expect(config.ios.infoPlist.ITSAppUsesNonExemptEncryption).toBe(false);

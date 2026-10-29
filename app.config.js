@@ -1,6 +1,7 @@
 // Wraps app.json. app.json is the dev/test configuration (dev client, local
 // network access to the test node). With EXPO_PUBLIC_GHOST_BUILD=release the
 // same project is configured for a store build. See docs/release.md.
+const { withInfoPlist } = require('expo/config-plugins');
 const pkg = require('./package.json');
 
 // Required-reason APIs used by React Native, Expo modules and their pods.
@@ -42,20 +43,35 @@ function buildNumber(env) {
   return value;
 }
 
-function releaseConfig(config, env) {
-  const ios = config.ios ?? {};
-  const infoPlist = { ...ios.infoPlist };
+/** Removes the local-network keys from an Info.plist object, in place. */
+function stripLocalNetworking(infoPlist) {
   delete infoPlist.NSLocalNetworkUsageDescription;
-
   const ats = { ...infoPlist.NSAppTransportSecurity };
   delete ats.NSAllowsLocalNetworking;
   if (Object.keys(ats).length === 0) delete infoPlist.NSAppTransportSecurity;
   else infoPlist.NSAppTransportSecurity = ats;
+  return infoPlist;
+}
+
+function releaseConfig(config, env) {
+  const ios = config.ios ?? {};
+  const infoPlist = stripLocalNetworking({ ...ios.infoPlist });
 
   infoPlist.ITSAppUsesNonExemptEncryption = false;
 
+  // Prebuild's template and the dev client put NSAllowsLocalNetworking back
+  // into the generated Info.plist. A mod added here runs after every plugin's
+  // mod, so it has the last word.
+  // withInfoPlist writes into config.mods, so give it copies.
+  const mods = { ...config.mods, ios: { ...config.mods?.ios } };
+  const withMods = withInfoPlist({ ...config, mods }, (modConfig) => {
+    stripLocalNetworking(modConfig.modResults);
+    modConfig.modResults.ITSAppUsesNonExemptEncryption = false;
+    return modConfig;
+  });
+
   return {
-    ...config,
+    ...withMods,
     version: pkg.version,
     ios: {
       ...ios,
