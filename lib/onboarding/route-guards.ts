@@ -22,6 +22,7 @@ export const ROUTE_GROUPS = {
   receive: 'wallet',
   settings: 'wallet',
   'recovery-words': 'wallet',
+  'check-words': 'wallet',
   vanish: 'wallet',
   summon: 'wallet',
   'wipe-card': 'wallet',
