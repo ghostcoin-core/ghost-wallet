@@ -29,6 +29,7 @@ import { balanceStatus } from '../lib/home/cache-refresh';
 import { useFaucet } from '../lib/home/use-faucet';
 import { useHome, useNow } from '../lib/home/use-home';
 import { usePendingPayments } from '../lib/home/use-pending';
+import { buildNetwork, offersTestGhost } from '../lib/network/build-network';
 import { useTestNetwork } from '../lib/node/test-network';
 import { useSettings } from '../lib/settings/settings';
 import { reopenPayment, type PendingPayment } from '../lib/vanish/pending';
@@ -82,7 +83,7 @@ export default function HomeScreen() {
   const [address] = useState(accountZeroAddress);
   const { view, refresh } = useHome(nodeUrl, address);
   const pending = usePendingPayments(nodeUrl);
-  const testNetwork = useTestNetwork(nodeUrl);
+  const testNetwork = offersTestGhost(buildNetwork, useTestNetwork(nodeUrl));
   const faucet = useFaucet(nodeUrl, address, refresh);
   const now = useNow();
   const snapshot = view.snapshot;

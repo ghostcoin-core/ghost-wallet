@@ -27,7 +27,7 @@ import { authenticate, authFailureMessage } from '../lib/device-auth';
 import { shortAddress } from '../lib/home/balance-format';
 import { useBackupUnchecked } from '../lib/onboarding/backup-status';
 import { createTapCounter } from '../lib/settings/developer-entry';
-import { DEFAULT_NODE_URL, normaliseNodeUrl, settingsStore, useSettings } from '../lib/settings/settings';
+import { DEFAULT_SETTINGS, normaliseNodeUrl, settingsStore, useSettings } from '../lib/settings/settings';
 
 function appVersion(): string {
   return Constants.expoConfig?.version ?? 'unknown';
@@ -59,7 +59,7 @@ function NodeEditor({ nodeUrl, onDone }: { nodeUrl: string; onDone: () => void }
         autoCapitalize="none"
         autoCorrect={false}
         keyboardType="url"
-        placeholder={DEFAULT_NODE_URL}
+        placeholder={DEFAULT_SETTINGS.nodeUrl}
         placeholderTextColor={colors.quiet}
         style={styles.input}
         testID="node-url-input"
