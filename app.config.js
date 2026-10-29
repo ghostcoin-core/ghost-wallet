@@ -43,13 +43,15 @@ function buildNumber(env) {
   return value;
 }
 
-/** Removes the local-network keys from an Info.plist object, in place. */
+/**
+ * Removes the local-network usage text and sets App Transport Security to the
+ * default with no exceptions, in place. ATS is set rather than deleted: with no
+ * NSAppTransportSecurity key prebuild keeps the React Native template's own,
+ * which allows local networking.
+ */
 function stripLocalNetworking(infoPlist) {
   delete infoPlist.NSLocalNetworkUsageDescription;
-  const ats = { ...infoPlist.NSAppTransportSecurity };
-  delete ats.NSAllowsLocalNetworking;
-  if (Object.keys(ats).length === 0) delete infoPlist.NSAppTransportSecurity;
-  else infoPlist.NSAppTransportSecurity = ats;
+  infoPlist.NSAppTransportSecurity = { NSAllowsArbitraryLoads: false };
   return infoPlist;
 }
 
