@@ -44,10 +44,24 @@ jobs:
       - name: Unit tests
         run: pnpm exec jest --ci --passWithNoTests=false
 
+  # The Rust tests take about 9 minutes in one job, nearly all of it in four
+  # long chain tests in header_budget. Those four run in two jobs of their own,
+  # and "rest" runs every other test (skipping only those four by name), so a
+  # new test file is always picked up and each job stays under the limit.
   rust:
-    name: rust
+    name: rust (${{ matrix.group }})
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: chain-a
+            args: --test header_budget -- reorgs_are_reported saved_progress_resumes
+          - group: chain-b
+            args: --test header_budget -- only_recent_headers_are_saved releasing_the_caches_drops
+          - group: rest
+            args: -- --skip reorgs_are_reported --skip saved_progress_resumes --skip only_recent_headers_are_saved --skip releasing_the_caches_drops
     steps:
       - uses: actions/checkout@v4
 
@@ -65,4 +79,4 @@ jobs:
             cargo-${{ runner.os }}-
 
       - name: Rust core tests
-        run: cargo test --manifest-path core/Cargo.toml --locked
+        run: cargo test --manifest-path core/Cargo.toml --locked ${{ matrix.args }}
