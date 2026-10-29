@@ -46,8 +46,27 @@ jobs:
 
   rust:
     name: rust
+    needs: rust-shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: All Rust test shards passed
+        run: |
+          echo "shards: ${{ needs.rust-shard.result }}"
+          test "${{ needs.rust-shard.result }}" = success
+
+  # The Rust core tests take longer than one 10-minute job, mostly in the
+  # header tests (each builds a 256 MiB RandomX cache, one at a time), so
+  # they are split by test across parallel jobs.
+  rust-shard:
+    name: rust (shard ${{ matrix.shard }} of 4)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -65,4 +84,4 @@ jobs:
             cargo-${{ runner.os }}-
 
       - name: Rust core tests
-        run: cargo test --manifest-path core/Cargo.toml --locked
+        run: scripts/rust-test-shard.sh ${{ matrix.shard }} 4
