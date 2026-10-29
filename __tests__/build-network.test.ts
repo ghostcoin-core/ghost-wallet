@@ -29,15 +29,17 @@ describe('the release network', () => {
     expect(RELEASE_NETWORK.nodeUrls).toBe(RELEASE_NODE_URLS);
   });
 
-  it('lists at least three distinct public nodes over TLS', () => {
+  it('lists only real, distinct public nodes over TLS', () => {
     const urls = resolveBuildNetwork('release').nodeUrls;
-    expect(urls.length).toBeGreaterThanOrEqual(3);
+    // Two nodes today; more come with other operators.
+    expect(urls.length).toBeGreaterThanOrEqual(2);
     const hosts = urls.map((url) => new URL(url).hostname);
     expect(new Set(hosts).size).toBe(urls.length);
     for (const url of urls) {
       const parsed = new URL(url);
       expect(parsed.protocol).toBe('https:');
       expect(isLocalOrLiteral(parsed.hostname)).toBe(false);
+      expect(parsed.hostname).not.toMatch(/^testnet-\d\.ghostcoin\.com$/);
     }
   });
 
