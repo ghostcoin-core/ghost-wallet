@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DEV_NETWORK } from '../../lib/network/build-network';
+import { DEV_NETWORK, RELEASE_NODE_URLS } from '../../lib/network/build-network';
 import { faucetUrlFor } from '../../lib/node/faucet';
 import { DEFAULT_NODE_URL, DEFAULT_SETTINGS, TEST_CHAIN_ID, createSettingsStore, parseSettings } from '../../lib/settings/settings';
 
@@ -39,6 +39,20 @@ describe('the faucet address', () => {
     expect(faucetUrlFor('HTTPS://node.example/rpc')).toBe('https://node.example:8548/faucet');
     expect(faucetUrlFor('http://[fe80::1]:8547')).toBe('http://[fe80::1]:8548/faucet');
     expect(faucetUrlFor('not a url')).toBeNull();
+  });
+
+  it('is /ghost-faucet on the same host for a public node published at /ghost-rpc', () => {
+    expect(RELEASE_NODE_URLS.map(faucetUrlFor)).toEqual([
+      'https://spark-2912.tail11407b.ts.net/ghost-faucet',
+      'https://kipp-vm.tail11407b.ts.net/ghost-faucet',
+    ]);
+    expect(faucetUrlFor('HTTPS://Node.Example/ghost-rpc/')).toBe('https://Node.Example/ghost-faucet');
+    expect(faucetUrlFor('https://node.example:8443/ghost-rpc?x=1')).toBe('https://node.example:8443/ghost-faucet');
+    expect(faucetUrlFor('https://node.example/other/ghost-rpc')).toBe('https://node.example:8548/faucet');
+  });
+
+  it('keeps port 8548 for the dev chain', () => {
+    expect(faucetUrlFor(DEV_NETWORK.nodeUrls[0])).toBe('http://192.168.1.36:8548/faucet');
   });
 });
 
