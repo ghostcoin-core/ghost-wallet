@@ -30,6 +30,17 @@ API_PRIVATE_KEYS_DIR="$ASC_DIR" xcrun altool --list-apps --apiKey "$ASC_KEY_ID" 
 
 It should list "Ghost Wallet App" with bundle ID `com.ghostcoin.wallet`.
 
+To upload with `scripts/release-testflight.sh`, pass the same key through the
+variables it reads:
+
+```sh
+set -a; . "$ASC_DIR/asc-api-key.env"; set +a
+GHOST_ASC_KEY_PATH="$ASC_DIR/AuthKey_$ASC_KEY_ID.p8" \
+GHOST_ASC_KEY_ID="$ASC_KEY_ID" \
+GHOST_ASC_ISSUER_ID="$ASC_ISSUER_ID" \
+bash scripts/release-testflight.sh
+```
+
 Over plain `ssh`, the login keychain is locked, so signing (archive, export)
 must run in the logged-in GUI session, for example through `gui-run` on the
 Mac Studio.
