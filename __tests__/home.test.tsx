@@ -33,6 +33,9 @@ jest.mock('../lib/home/read-account', () => ({
   readAccountZero: () => mockAnswer(),
 }));
 
+// The history lookup is covered in __tests__/home/activity-restore.test.ts.
+jest.mock('../lib/home/history', () => ({ scanHistory: async () => [] }));
+
 // The node's chain is not asked here: __tests__/test-network/ covers it.
 jest.mock('../lib/node/test-network', () => ({ useTestNetwork: () => false }));
 

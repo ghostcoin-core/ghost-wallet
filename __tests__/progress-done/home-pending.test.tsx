@@ -106,7 +106,7 @@ describe.each(Object.keys(DEVICES) as Device[])('Home on the %s', (device) => {
     expect(screen.queryByText(/No activity yet/)).toBeNull();
   });
 
-  it('does not list a settled or failed payment, nor a Vanish whose key was never kept', async () => {
+  it('lists a settled or failed payment with its final state, not as pending, and never a Vanish whose key was never kept', async () => {
     mockPayments = [
       vanish('vanish-done', 5, NOW),
       reveal('claim-failed', 'claim', 6, NOW),
@@ -115,7 +115,10 @@ describe.each(Object.keys(DEVICES) as Device[])('Home on the %s', (device) => {
     ];
     await renderOn(device);
     expect(screen.queryByTestId(/^pending-/)).toBeNull();
-    expect(screen.getByText(/No activity yet/)).toBeOnTheScreen();
+    expect(screen.getByTestId('activity-vanish-done')).toHaveTextContent(/Vanished/);
+    expect(screen.getByTestId('activity-claim-failed')).toHaveTextContent(/Claim/);
+    expect(screen.queryByTestId('activity-vanish-lost')).toBeNull();
+    expect(screen.queryByText(/No activity yet/)).toBeNull();
   });
 
   it('lists a Vanish left before its key was written down, at that step', async () => {
@@ -153,5 +156,6 @@ describe.each(Object.keys(DEVICES) as Device[])('Home on the %s', (device) => {
     // A Vanish is signed again without its key; it reads no coin tree.
     expect(mockAdvance).toHaveBeenCalledWith(expect.anything(), mockOpened['vanish-a'], expect.any(Function), null);
     expect(screen.queryByTestId('pending-vanish-a')).toBeNull();
+    expect(screen.getByTestId('activity-vanish-a')).toHaveTextContent(/Vanished/);
   });
 });
