@@ -113,17 +113,60 @@ export function savedHashes(kit: Kit | null): Set<string> {
 }
 
 /**
+ * What each saved Summon and Claim may have put in the account, by payment
+ * id: its amount, and its amount less its fee. Home sees such a credit only
+ * as the balance going up.
+ */
+export function savedCredits(kit: Kit | null): Map<string, string[]> {
+  const credits = new Map<string, string[]>();
+  for (const id of savedIds(kit)) {
+    const record = kit ? recordOf(kit, id) : null;
+    const details = record ? decodeDetails(record.intent.details) : null;
+    if (!details || (details.kind !== 'summon' && details.kind !== 'claim') || !/^[0-9]+$/.test(details.amountWei)) {
+      continue;
+    }
+    const amounts = [details.amountWei];
+    if (/^[0-9]+$/.test(details.feeWei) && BigInt(details.amountWei) > BigInt(details.feeWei)) {
+      amounts.push((BigInt(details.amountWei) - BigInt(details.feeWei)).toString());
+    }
+    credits.set(id, amounts);
+  }
+  return credits;
+}
+
+/** A received payment Home saw only as the balance going up: no transaction, no sender, no saved payment. */
+function balanceCredit(item: ActivityItem): boolean {
+  return item.direction === 'received' && item.hash === undefined && item.counterparty === null && item.kind === undefined;
+}
+
+/**
  * What Activity lists besides the pending rows: the saved payments, and what
  * Home keeps (received payments and those found on chain) less any saved
- * payment's own transaction. Pending first, then the newest; at most `limit`.
+ * payment's own transaction. A settled Summon or Claim also stands for the
+ * balance going up by what it credited, once it settled: that credit is not
+ * listed again. Pending first, then the newest; at most `limit`.
  */
 export function activityWithSaved(
   kept: readonly ActivityItem[],
   saved: readonly ActivityItem[],
   hashes: ReadonlySet<string>,
   limit: number,
+  credits: ReadonlyMap<string, readonly string[]> = new Map(),
 ): ActivityItem[] {
-  const others = kept.filter((item) => item.hash === undefined || !hashes.has(item.hash));
+  let others = kept.filter((item) => item.hash === undefined || !hashes.has(item.hash));
+  const incoming = saved
+    .filter((item) => item.direction === 'received' && item.state === 'done')
+    .sort((a, b) => a.at - b.at);
+  for (const payment of incoming) {
+    const amounts = credits.get(payment.id) ?? [payment.amountWei];
+    // The oldest credit at or after the payment, of what it may have credited.
+    const match = others
+      .filter((item) => balanceCredit(item) && item.at >= payment.at && amounts.includes(item.amountWei))
+      .sort((a, b) => a.at - b.at)[0];
+    if (match) {
+      others = others.filter((item) => item !== match);
+    }
+  }
   const savedIdSet = new Set(saved.map((item) => item.id));
   return sortActivity([...saved, ...others.filter((item) => !savedIdSet.has(item.id))]).slice(0, limit);
 }
