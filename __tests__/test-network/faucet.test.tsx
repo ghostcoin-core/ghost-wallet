@@ -42,6 +42,19 @@ describe('requestTestGhost', () => {
     );
   });
 
+  it('asks a public node’s faucet at /ghost-faucet and says to check the internet when it cannot reach it', async () => {
+    const ok = jest.fn(async () => answer(200, { transactionHash: TX }));
+    await expect(requestTestGhost('https://kipp-vm.tail11407b.ts.net/ghost-rpc', ADDRESS, ok)).resolves.toEqual({ transactionHash: TX });
+    expect((ok.mock.calls[0] as unknown as [string])[0]).toBe('https://kipp-vm.tail11407b.ts.net/ghost-faucet');
+
+    const down = jest.fn(async () => {
+      throw new TypeError('Network request failed');
+    });
+    await expect(requestTestGhost('https://kipp-vm.tail11407b.ts.net/ghost-rpc', ADDRESS, down)).rejects.toThrow(
+      "Can't reach the test GHOST faucet at kipp-vm.tail11407b.ts.net. Check this phone's internet connection",
+    );
+  });
+
   it('says to wait a minute when the address asked already', async () => {
     const fetchImpl = jest.fn(async () => answer(429, { error: 'once a minute' }));
     await expect(requestTestGhost(NODE, ADDRESS, fetchImpl)).rejects.toThrow('Try again in a minute.');
