@@ -12,7 +12,7 @@ import type { ActivityItem } from './activity';
 import { ACTIVITY_LIMIT, HomeLoader, type HomeView, type ReadAccount, type SnapshotCache } from './cache-refresh';
 import { scanHistory as scanRecentBlocks, type ScanHistory } from './history';
 import { readAccountZero } from './read-account';
-import { activityWithSaved, savedActivity, savedHashes } from './saved-activity';
+import { activityWithSaved, savedActivity, savedCredits, savedHashes } from './saved-activity';
 
 export const REFRESH_EVERY_MS = 20_000;
 
@@ -70,7 +70,7 @@ export function useHome(
 }
 
 function readSaved(kit: ReturnType<typeof paymentKit>) {
-  return { items: savedActivity(kit), hashes: savedHashes(kit) };
+  return { items: savedActivity(kit), hashes: savedHashes(kit), credits: savedCredits(kit) };
 }
 
 /**
@@ -88,7 +88,7 @@ export function useActivity(nodeUrl: string, kept: readonly ActivityItem[]): Act
     return subscribePending(update);
   }, [kit]);
 
-  return useMemo(() => activityWithSaved(kept, saved.items, saved.hashes, ACTIVITY_LIMIT), [kept, saved]);
+  return useMemo(() => activityWithSaved(kept, saved.items, saved.hashes, ACTIVITY_LIMIT, saved.credits), [kept, saved]);
 }
 
 /** The current time, ticking every `everyMs` so ages on screen stay right. */

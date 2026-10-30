@@ -1,5 +1,5 @@
 import { describeActivity, type ActivityItem } from '../../lib/home/activity';
-import { activityWithSaved, savedActivity, savedHashes } from '../../lib/home/saved-activity';
+import { activityWithSaved, savedActivity, savedCredits, savedHashes } from '../../lib/home/saved-activity';
 import { buffer, encodeDetails, type PaymentDetails } from '../../lib/vanish/payments';
 import { pendingPayments, resetPending } from '../../lib/vanish/pending';
 
@@ -157,6 +157,36 @@ describe('activityWithSaved', () => {
     const other = found(9);
     const list = activityWithSaved([found(1), found(2), other], savedActivity(kit), savedHashes(kit), 50);
     expect(list.map((item) => item.id)).toEqual(['send-a', other.id]);
+  });
+
+  it('shows a settled Summon or Claim once, not again as the balance going up', () => {
+    // Summon of 1 GHOST paying a fee of 1000 wei; Claim of 1 GHOST.
+    saved = [reveal('summon-c', 'summon', 5, NOW - 10_000, 3), reveal('claim-d', 'claim', 5, NOW - 5_000, 4)];
+    const grew = (id: string, amountWei: string, at: number): ActivityItem => ({
+      id,
+      direction: 'received',
+      counterparty: null,
+      amountWei,
+      state: 'done',
+      at,
+    });
+    const kept = [
+      grew('received-summon', (GHOST - 1000n).toString(), NOW - 9_000),
+      grew('received-claim', GHOST.toString(), NOW - 4_000),
+      // Came in before either payment: another payment, kept.
+      grew('received-before', GHOST.toString(), NOW - 60_000),
+      // A second credit of the same amount: only one is the Claim's.
+      grew('received-again', GHOST.toString(), NOW - 1_000),
+    ];
+    const list = activityWithSaved(kept, savedActivity(kit), savedHashes(kit), 50, savedCredits(kit));
+    expect(list.map((item) => item.id)).toEqual(['received-again', 'claim-d', 'summon-c', 'received-before']);
+  });
+
+  it('keeps the balance credit when the Summon has not settled', () => {
+    saved = [reveal('summon-f', 'summon', 6, NOW - 10_000, 3)];
+    const credit: ActivityItem = { id: 'received-x', direction: 'received', counterparty: null, amountWei: GHOST.toString(), state: 'done', at: NOW };
+    const list = activityWithSaved([credit], savedActivity(kit), savedHashes(kit), 50, savedCredits(kit));
+    expect(list.map((item) => item.id)).toEqual(['received-x', 'summon-f']);
   });
 
   it('keeps pending first, then the newest, and at most the limit', () => {

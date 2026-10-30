@@ -3,7 +3,7 @@ import { act, render, screen, within } from '@testing-library/react-native';
 import HomeScreen from '../../app/home';
 import type { ActivityItem } from '../../lib/home/activity';
 import type { AccountReading } from '../../lib/home/cache-refresh';
-import { HISTORY_DELAY_MS } from '../../lib/home/use-home';
+import { HISTORY_DELAY_MS, REFRESH_EVERY_MS } from '../../lib/home/use-home';
 import { buffer, encodeDetails } from '../../lib/vanish/payments';
 import { resetPending } from '../../lib/vanish/pending';
 
@@ -168,6 +168,26 @@ describe('Home activity', () => {
     expect(screen.getByTestId(`activity-tx-${txHash(7)}`)).toHaveTextContent(/Received from 0x81d0…c7a4/);
     expect(screen.getByTestId(`activity-tx-${txHash(8)}-detail`)).toHaveTextContent(/^Pending, /);
     expect(screen.queryByText(EMPTY_TEXT)).toBeNull();
+  });
+
+  it('shows a settled Summon once when the balance refresh sees what it credited', async () => {
+    mockPayments = [
+      { id: 'summon-s', step: 5, hash: 3, details: { kind: 'summon', amountWei: GHOST.toString(), feeWei: '1000', marker: '0x01', at: NOW - 30_000 } },
+    ];
+    mockReading = async () => ({ balanceWei: GHOST.toString(), nonce: 1, tipHeight: 9 });
+    render(<HomeScreen />);
+    await act(async () => {});
+
+    // The Summon's coins came in: the balance went up with the nonce unchanged.
+    mockReading = async () => ({ balanceWei: (2n * GHOST - 1000n).toString(), nonce: 1, tipHeight: 10 });
+    await act(async () => {
+      jest.advanceTimersByTime(REFRESH_EVERY_MS);
+    });
+    await act(async () => {});
+
+    expect(screen.getByTestId('balance-amount')).toHaveTextContent('1.999999 GHOST');
+    expect(screen.getByTestId('activity-summon-s')).toHaveTextContent(/Summoned/);
+    expect(screen.queryAllByTestId(/^activity-received-/)).toHaveLength(0);
   });
 
   it('says there is no activity only when there is truly nothing', async () => {
