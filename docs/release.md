@@ -26,6 +26,9 @@ lives under `lib/` and is not part of this configuration.
 the Mac Studio (Xcode, CocoaPods, Node 22 and rustup installed) and uploads it
 to App Store Connect, from where it reaches TestFlight.
 
+The Apple team, App ID, certificate, profile, App Store Connect app and API
+key it relies on are recorded in [app-store-connect.md](app-store-connect.md).
+
 Signing needs no Apple account signed in to Xcode. The export signs manually
 with the Apple Distribution certificate for the team in the login keychain and
 the installed App Store provisioning profile for the bundle id, named by
