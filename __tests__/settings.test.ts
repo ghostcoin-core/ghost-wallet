@@ -41,7 +41,7 @@ describe('settings', () => {
     await store.update({ nodeUrl: 'http://10.0.0.2:8547' });
 
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(saved).toEqual([{ nodeUrl: 'http://10.0.0.2:8547', appLock: true }]);
+    expect(saved).toEqual([{ nodeUrl: 'http://10.0.0.2:8547', appLock: true, nodeChainId: '6777971' }]);
     expect(store.get().nodeUrl).toBe('http://10.0.0.2:8547');
   });
 });
