@@ -87,6 +87,41 @@ The build then shows in App Store Connect under TestFlight once Apple has
 processed it. Run prebuild again with `--clean` before going back to a dev
 build (the install script does).
 
+## TestFlight builds
+
+Testers are in the internal group "Internal" of the App Store Connect app
+(every build, testers notified automatically). Nathan is its tester as
+`hello@ghostcoin.com`, the account holder.
+
+### Build 58 (version 0.1.0, commit `f164c04`), 2026-10-30
+
+- Uploaded with `scripts/release-testflight.sh` on the Mac Studio, through
+  `gui-run`. Processing: valid. Export compliance: answered by the build
+  (`ITSAppUsesNonExemptEncryption = false`), so App Store Connect asked
+  nothing. The upload warned that the archive has no dSYMs for React,
+  ReactNativeDependencies and hermesvm; that only affects crash symbols.
+- In the "Internal" group, internal testing state "in beta testing".
+
+Checks of the same commit built in the release configuration for the iOS
+simulator (Release, `EXPO_PUBLIC_GHOST_BUILD=release`, build number 58), on the
+public test network through the release node list, driven with Maestro:
+
+| Check | Result |
+| --- | --- |
+| Create an account (24 words shown, three typed back) | Pass |
+| Balance from the public nodes | Pass: 0.00 at once, then 50.00 after 50 test GHOST were sent to it, "Up to date" |
+| Send 5 test GHOST (Face ID, native confirmation) | Pass: sent, in a block, settled |
+| Vanish 3 test GHOST to a Phantom Key (key shown, three words typed back) | Pass: signed, sent, in a block, settled |
+| Summon that Phantom Key | Fail: found the key's 3.00 GHOST and proved the Summon on the device, and both public nodes accepted it into their pools, but no block can include it: the reveal needs about 21.1 million gas and the public test network's block gas limit has fallen to under 1 million. The app keeps it pending and retries. |
+| Restore from the 24 words after deleting the app and its keychain | Pass: balance 41.999828 GHOST shown at once |
+| Activity list | Fail: only the received 50 shows; the send and the Vanish never appear, and it is empty after the restore |
+| Get test GHOST | Not offered a working faucet on the public test network; test GHOST was sent from a test miner instead |
+
+Still to do on Nathan's iPhone: install build 58 from TestFlight, then write a
+Phantom Key to an NTAG 424 card during a Vanish, tap the card to Summon, and
+wipe it once that claim has settled. The card Summon and the wipe wait on the
+block gas limit fix above.
+
 ## Building by hand
 
 On the Mac Studio:
