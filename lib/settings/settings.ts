@@ -1,7 +1,7 @@
 // The app's settings: which node to ask, and whether the app locks.
 import { useSyncExternalStore } from 'react';
 
-import { buildNetwork, type BuildNetwork } from '../network/build-network';
+import { DEV_NETWORK, RELEASE_NETWORK, buildNetwork, type BuildNetwork } from '../network/build-network';
 import { jsonFile, type JsonFile } from '../storage';
 
 export type Settings = {
@@ -44,13 +44,49 @@ export function normaliseNodeUrl(text: string): string | null {
   return `${scheme.toLowerCase()}://${host}${path.replace(/\/+$/, '')}`;
 }
 
-export function parseSettings(raw: unknown): Settings {
+/** Settings as saved: the node is kept with the chain of the build that saved it. */
+export type StoredSettings = Settings & {
+  /** The chain id, in decimal, of the build network the node was saved on. */
+  nodeChainId: string;
+};
+
+const KNOWN_NETWORKS: readonly BuildNetwork[] = [DEV_NETWORK, RELEASE_NETWORK];
+
+/**
+ * Whether a saved node may be used on `network`. A node saved with a chain id
+ * applies to that chain only. One saved before chain ids were kept is refused
+ * when it is another network's own node, as a dev build's saved test chain is
+ * for a release build installed over it; one typed in by hand stays.
+ */
+function nodeFitsNetwork(nodeUrl: string, nodeChainId: unknown, network: BuildNetwork): boolean {
+  if (typeof nodeChainId === 'string') {
+    return nodeChainId === network.chainId.toString();
+  }
+  if (network.nodeUrls.includes(nodeUrl)) {
+    return true;
+  }
+  return !KNOWN_NETWORKS.some((other) => other.chainId !== network.chainId && other.nodeUrls.includes(nodeUrl));
+}
+
+/** A saved node `raw` names that `network` must not use, or null. */
+function foreignNode(raw: unknown, network: BuildNetwork): string | null {
+  const value = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  const nodeUrl = typeof value.nodeUrl === 'string' ? normaliseNodeUrl(value.nodeUrl) : null;
+  return nodeUrl !== null && !nodeFitsNetwork(nodeUrl, value.nodeChainId, network) ? nodeUrl : null;
+}
+
+export function parseSettings(raw: unknown, network: BuildNetwork = buildNetwork): Settings {
   const value = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   const nodeUrl = typeof value.nodeUrl === 'string' ? normaliseNodeUrl(value.nodeUrl) : null;
   return {
-    nodeUrl: nodeUrl ?? DEFAULT_SETTINGS.nodeUrl,
+    nodeUrl: nodeUrl !== null && foreignNode(raw, network) === null ? nodeUrl : defaultNodeUrlFor(network),
     appLock: typeof value.appLock === 'boolean' ? value.appLock : DEFAULT_SETTINGS.appLock,
   };
+}
+
+/** The settings as saved by a build of `network`. */
+export function storedSettings(settings: Settings, network: BuildNetwork = buildNetwork): StoredSettings {
+  return { ...settings, nodeChainId: network.chainId.toString() };
 }
 
 export type SettingsStore = {
@@ -59,18 +95,29 @@ export type SettingsStore = {
   subscribe(listener: () => void): () => void;
 };
 
-export function createSettingsStore(file: JsonFile): SettingsStore {
+export function createSettingsStore(file: JsonFile, network: BuildNetwork = buildNetwork): SettingsStore {
   let current: Settings | null = null;
   const listeners = new Set<() => void>();
-  const get = () => (current ??= parseSettings(file.read()));
+  const get = () => {
+    if (current === null) {
+      const raw = file.read();
+      current = parseSettings(raw, network);
+      if (foreignNode(raw, network) !== null) {
+        // Another network's node: save this build's default in its place.
+        file.write(storedSettings(current, network)).catch(() => {});
+      }
+    }
+    return current;
+  };
   return {
     get,
     async update(change) {
-      current = parseSettings({ ...get(), ...change });
+      // A node set here is set on this build's network.
+      current = parseSettings({ ...storedSettings(get(), network), ...change }, network);
       for (const listener of listeners) {
         listener();
       }
-      await file.write(current);
+      await file.write(storedSettings(current, network));
     },
     subscribe(listener) {
       listeners.add(listener);
