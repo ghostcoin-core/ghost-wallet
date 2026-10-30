@@ -19,6 +19,11 @@ export type ActivityItem = {
   kind?: PaymentKind;
   /** The transaction, `0x` and 64 hex digits, when known: one payment shows once. */
   hash?: string;
+  /**
+   * For a received payment seen only as the balance going up: it came in a
+   * block after tip `after` and up to tip `upTo`, the two balance readings.
+   */
+  blocks?: { after: number; upTo: number };
 };
 
 /** The payments this phone makes and saves. */
@@ -115,6 +120,18 @@ export function sortActivity(items: readonly ActivityItem[]): ActivityItem[] {
 
 const STATES: readonly ActivityState[] = ['pending', 'done', 'failed', 'conflicted'];
 
+function isBlocks(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null) {
+    return false;
+  }
+  const { after, upTo } = raw as Record<string, unknown>;
+  return Number.isSafeInteger(after) && Number.isSafeInteger(upTo) && (after as number) >= 0 && (upTo as number) >= (after as number);
+}
+
+function blocksOf({ after, upTo }: { after: number; upTo: number }): { after: number; upTo: number } {
+  return { after, upTo };
+}
+
 /** An activity item read back from the cache, or null if it is malformed. */
 export function parseActivityItem(raw: unknown): ActivityItem | null {
   if (typeof raw !== 'object' || raw === null) {
@@ -131,7 +148,8 @@ export function parseActivityItem(raw: unknown): ActivityItem | null {
     typeof item.at === 'number' &&
     Number.isFinite(item.at) &&
     (item.kind === undefined || KINDS.includes(item.kind as PaymentKind)) &&
-    (item.hash === undefined || (typeof item.hash === 'string' && /^0x[0-9a-f]{64}$/i.test(item.hash)));
+    (item.hash === undefined || (typeof item.hash === 'string' && /^0x[0-9a-f]{64}$/i.test(item.hash))) &&
+    (item.blocks === undefined || isBlocks(item.blocks));
   if (!valid) {
     return null;
   }
@@ -144,6 +162,7 @@ export function parseActivityItem(raw: unknown): ActivityItem | null {
     at: item.at as number,
     ...(item.kind === undefined ? {} : { kind: item.kind as PaymentKind }),
     ...(item.hash === undefined ? {} : { hash: (item.hash as string).toLowerCase() }),
+    ...(item.blocks === undefined ? {} : { blocks: blocksOf(item.blocks as { after: number; upTo: number }) }),
   };
 }
 

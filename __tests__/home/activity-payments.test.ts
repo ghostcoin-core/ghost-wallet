@@ -12,7 +12,15 @@ function txHash(n: number): string {
 }
 
 // Saved payments: step numbers are the core's Step (0 Prepared … 5 Settled, 6 Failed, 7 Conflicted).
-type Saved = { id: string; step: number | string; details: PaymentDetails; attempts: string[]; included: string | null };
+type Saved = {
+  id: string;
+  step: number | string;
+  details: PaymentDetails;
+  attempts: string[];
+  included: string | null;
+  /** The block it was included in; 10 unless a test says. */
+  height?: number;
+};
 let saved: Saved[] = [];
 
 const core = {
@@ -28,7 +36,7 @@ const core = {
           intent: { kind: 0, identity: { tag: 'AccountNonce', inner: {} }, details: encodeDetails(payment.details) },
           attempts: payment.attempts.map((hash) => ({ transactionHash: buffer(hash) })),
           inclusion: payment.included
-            ? { transactionHash: buffer(payment.included), blockHash: buffer(txHash(999)), blockHeight: 10n }
+            ? { transactionHash: buffer(payment.included), blockHash: buffer(txHash(999)), blockHeight: BigInt(payment.height ?? 10) }
             : undefined,
           version: 1,
           checksum: new ArrayBuffer(0),
@@ -180,6 +188,68 @@ describe('activityWithSaved', () => {
     ];
     const list = activityWithSaved(kept, savedActivity(kit), savedHashes(kit), 50, savedCredits(kit));
     expect(list.map((item) => item.id)).toEqual(['received-again', 'claim-d', 'summon-c', 'received-before']);
+  });
+
+  it('shows two Claims crediting 1 and 2 GHOST in one refresh once, not again as 3 GHOST received', () => {
+    saved = [
+      { ...reveal('claim-one', 'claim', 5, NOW - 20_000, 3), height: 105 },
+      { ...reveal('claim-two', 'claim', 5, NOW - 15_000, 4), height: 110 },
+    ];
+    saved[1].details = { ...saved[1].details, amountWei: (2n * GHOST).toString() };
+    // One balance reading saw both: up by 3 GHOST between tips 100 and 120.
+    const grew: ActivityItem = {
+      id: 'received-120',
+      direction: 'received',
+      counterparty: null,
+      amountWei: (3n * GHOST).toString(),
+      state: 'done',
+      at: NOW,
+      blocks: { after: 100, upTo: 120 },
+    };
+    const list = activityWithSaved([grew], savedActivity(kit), savedHashes(kit), 50, savedCredits(kit));
+    expect(list.map((item) => item.id)).toEqual(['claim-two', 'claim-one']);
+  });
+
+  it('keeps what else came in with the Claims as received', () => {
+    saved = [
+      { ...reveal('claim-one', 'claim', 5, NOW - 20_000, 3), height: 105 },
+      { ...reveal('claim-two', 'claim', 5, NOW - 15_000, 4), height: 110 },
+    ];
+    // The two Claims of 1 GHOST each, and 10 GHOST from someone else.
+    const grew: ActivityItem = {
+      id: 'received-120',
+      direction: 'received',
+      counterparty: null,
+      amountWei: (12n * GHOST).toString(),
+      state: 'done',
+      at: NOW,
+      blocks: { after: 100, upTo: 120 },
+    };
+    const list = activityWithSaved([grew], savedActivity(kit), savedHashes(kit), 50, savedCredits(kit));
+    expect(list.map((item) => item.id)).toEqual(['received-120', 'claim-two', 'claim-one']);
+    expect(list[0].amountWei).toBe((10n * GHOST).toString());
+  });
+
+  it('matches a Claim only with the reading whose blocks hold it', () => {
+    saved = [{ ...reveal('claim-late', 'claim', 5, NOW - 50_000, 3), height: 130 }];
+    const grew = (id: string, after: number, upTo: number, at: number): ActivityItem => ({
+      id,
+      direction: 'received',
+      counterparty: null,
+      amountWei: GHOST.toString(),
+      state: 'done',
+      at,
+      blocks: { after, upTo },
+    });
+    // The first increase came before the Claim landed: someone else's 1 GHOST.
+    const list = activityWithSaved(
+      [grew('received-120', 100, 120, NOW - 40_000), grew('received-140', 120, 140, NOW)],
+      savedActivity(kit),
+      savedHashes(kit),
+      50,
+      savedCredits(kit),
+    );
+    expect(list.map((item) => item.id)).toEqual(['received-120', 'claim-late']);
   });
 
   it('keeps the balance credit when the Summon has not settled', () => {

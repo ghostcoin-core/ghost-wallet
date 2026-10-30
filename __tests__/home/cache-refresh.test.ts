@@ -270,6 +270,8 @@ describe('applyReading', () => {
         amountWei: (3n * GHOST).toString(),
         state: 'done',
         at: T0,
+        // Between the two readings: what a saved Summon or Claim in those blocks explains.
+        blocks: { after: 100, upTo: 120 },
       },
     ]);
   });

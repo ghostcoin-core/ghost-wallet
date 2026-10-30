@@ -190,6 +190,30 @@ describe('Home activity', () => {
     expect(screen.queryAllByTestId(/^activity-received-/)).toHaveLength(0);
   });
 
+  it('shows two Claims of 1 and 2 GHOST once when one refresh sees both', async () => {
+    const claim = (id: string, ghost: bigint, at: number, hash: number): MockPayment => ({
+      id,
+      step: 5,
+      hash,
+      details: { kind: 'claim', amountWei: (ghost * GHOST).toString(), feeWei: '1000', marker: '0x01', at },
+    });
+    mockPayments = [claim('claim-one', 1n, NOW - 30_000, 3), claim('claim-two', 2n, NOW - 25_000, 4)];
+    mockReading = async () => ({ balanceWei: GHOST.toString(), nonce: 1, tipHeight: 9 });
+    render(<HomeScreen />);
+    await act(async () => {});
+
+    mockReading = async () => ({ balanceWei: (4n * GHOST).toString(), nonce: 1, tipHeight: 12 });
+    await act(async () => {
+      jest.advanceTimersByTime(REFRESH_EVERY_MS);
+    });
+    await act(async () => {});
+
+    expect(screen.getByTestId('balance-amount')).toHaveTextContent('4.00 GHOST');
+    expect(screen.getByTestId('activity-claim-one')).toHaveTextContent(/Claimed/);
+    expect(screen.getByTestId('activity-claim-two')).toHaveTextContent(/Claimed/);
+    expect(screen.queryAllByTestId(/^activity-received-/)).toHaveLength(0);
+  });
+
   it('says there is no activity only when there is truly nothing', async () => {
     render(<HomeScreen />);
     await act(async () => {});
