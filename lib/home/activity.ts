@@ -15,7 +15,16 @@ export type ActivityItem = {
   state: ActivityState;
   /** When it was sent or first seen, in milliseconds since 1970. */
   at: number;
+  /** The payment this phone saved it as, when it is one: its row says so. */
+  kind?: PaymentKind;
+  /** The transaction, `0x` and 64 hex digits, when known: one payment shows once. */
+  hash?: string;
 };
+
+/** The payments this phone makes and saves. */
+export type PaymentKind = 'send' | 'vanish' | 'summon' | 'claim';
+
+const KINDS: readonly PaymentKind[] = ['send', 'vanish', 'summon', 'claim'];
 
 export type ActivityIcon = 'clock' | 'check' | 'cross' | 'warning';
 
@@ -52,7 +61,18 @@ function who(item: ActivityItem): string {
   return item.counterparty ? shortAddress(item.counterparty) : '';
 }
 
+/** What a Vanish, Summon or Claim is called once done, while going, and when it did not go through. */
+const REVEAL_VERBS = {
+  vanish: ['Vanished', 'Vanishing', 'Vanish'],
+  summon: ['Summoned', 'Summoning', 'Summon'],
+  claim: ['Claimed', 'Claiming', 'Claim'],
+} as const;
+
 function title(item: ActivityItem): string {
+  if (item.kind && item.kind !== 'send') {
+    const [done, going, stopped] = REVEAL_VERBS[item.kind];
+    return item.state === 'done' ? done : item.state === 'pending' ? going : stopped;
+  }
   const other = who(item);
   if (item.direction === 'received') {
     const verb = item.state === 'done' ? 'Received' : 'Receiving';
@@ -109,7 +129,9 @@ export function parseActivityItem(raw: unknown): ActivityItem | null {
     /^[0-9]+$/.test(item.amountWei) &&
     STATES.includes(item.state as ActivityState) &&
     typeof item.at === 'number' &&
-    Number.isFinite(item.at);
+    Number.isFinite(item.at) &&
+    (item.kind === undefined || KINDS.includes(item.kind as PaymentKind)) &&
+    (item.hash === undefined || (typeof item.hash === 'string' && /^0x[0-9a-f]{64}$/i.test(item.hash)));
   if (!valid) {
     return null;
   }
@@ -120,5 +142,34 @@ export function parseActivityItem(raw: unknown): ActivityItem | null {
     amountWei: item.amountWei as string,
     state: item.state as ActivityState,
     at: item.at as number,
+    ...(item.kind === undefined ? {} : { kind: item.kind as PaymentKind }),
+    ...(item.hash === undefined ? {} : { hash: (item.hash as string).toLowerCase() }),
   };
+}
+
+/**
+ * The items of `fresh` with `kept`, each payment once: an item of `kept`
+ * whose transaction `fresh` holds goes, and so does a received payment seen
+ * only as the balance going up (no transaction known) once `fresh` names one
+ * of the same amount.
+ */
+export function mergeActivity(kept: readonly ActivityItem[], fresh: readonly ActivityItem[]): ActivityItem[] {
+  const hashes = new Set(fresh.map((item) => item.hash).filter((hash): hash is string => hash !== undefined));
+  const unmatched = fresh.filter((item) => item.direction === 'received' && item.hash !== undefined);
+  const merged: ActivityItem[] = [];
+  for (const item of kept) {
+    if (item.hash !== undefined && hashes.has(item.hash)) {
+      continue;
+    }
+    if (item.hash === undefined && item.direction === 'received' && item.counterparty === null) {
+      const same = unmatched.findIndex((other) => other.amountWei === item.amountWei);
+      if (same >= 0) {
+        unmatched.splice(same, 1);
+        continue;
+      }
+    }
+    merged.push(item);
+  }
+  const ids = new Set(merged.map((item) => item.id));
+  return [...merged, ...fresh.filter((item) => !ids.has(item.id))];
 }

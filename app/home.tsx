@@ -2,7 +2,8 @@
 // balance shows at once from the cache with its age, then the node is asked in
 // the background; nothing waits for it. A send, Vanish, Summon or Claim still
 // going heads the activity as pending, with the step it is at; tapping it
-// opens its progress again.
+// opens its progress again. Once it settles, fails or conflicts it stays in
+// the activity with that state, read from its saved record.
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
@@ -23,11 +24,11 @@ import {
   textStyles,
 } from '../components/ui';
 import { accountZeroAddress } from '../lib/account';
-import { describeActivity, sortActivity, type ActivityRow } from '../lib/home/activity';
+import { describeActivity, type ActivityItem, type ActivityRow } from '../lib/home/activity';
 import { formatGhost, formatSignedGhost } from '../lib/home/balance-format';
 import { balanceStatus } from '../lib/home/cache-refresh';
 import { useFaucet } from '../lib/home/use-faucet';
-import { useHome, useNow } from '../lib/home/use-home';
+import { useActivity, useHome, useNow } from '../lib/home/use-home';
 import { usePendingPayments } from '../lib/home/use-pending';
 import { buildNetwork, offersTestGhost } from '../lib/network/build-network';
 import { useTestNetwork } from '../lib/node/test-network';
@@ -47,7 +48,9 @@ function ActivityRowView({ row, first }: { row: ActivityRow; first: boolean }) {
   );
 }
 
-const PENDING_TITLES = { send: 'Send', vanish: 'Vanish', summon: 'Summon', claim: 'Claim' } as const;
+const NO_ACTIVITY: ActivityItem[] = [];
+
+const PENDING_TITLES ={ send: 'Send', vanish: 'Vanish', summon: 'Summon', claim: 'Claim' } as const;
 
 /** Where each kind of payment shows its progress. */
 const PROGRESS_ROUTES = { send: '/payment', vanish: '/vanish', summon: '/summon', claim: '/summon' } as const;
@@ -87,7 +90,8 @@ export default function HomeScreen() {
   const faucet = useFaucet(nodeUrl, address, refresh);
   const now = useNow();
   const snapshot = view.snapshot;
-  const rows = sortActivity(snapshot?.activity ?? []).map((item) => describeActivity(item, now));
+  const activity = useActivity(nodeUrl, snapshot?.activity ?? NO_ACTIVITY);
+  const rows = activity.map((item) => describeActivity(item, now));
 
   return (
     <Screen

@@ -2,8 +2,9 @@
 // refreshed from the node in the background. Nothing waits on the node: the
 // cached view is there before the first answer, and a failed refresh keeps it
 // and says how old it is.
-import { parseActivityItem, sortActivity, type ActivityItem } from './activity';
+import { mergeActivity, parseActivityItem, sortActivity, type ActivityItem } from './activity';
 import { formatAge } from './balance-format';
+import type { ScanHistory } from './history';
 
 export const SNAPSHOT_VERSION = 1;
 
@@ -22,6 +23,11 @@ export type HomeSnapshot = {
   /** When the node gave this balance, in milliseconds since 1970. */
   checkedAt: number;
   activity: ActivityItem[];
+  /**
+   * The tip up to which the account's recent payments were looked up on
+   * chain (lib/home/history.ts); absent until then, and in older caches.
+   */
+  historyHeight?: number;
 };
 
 /** One answer of the node about the account, through the native core. */
@@ -72,7 +78,8 @@ export function readCachedSnapshot(raw: unknown, nodeUrl: string, address: strin
     !isCount(s.nonce) ||
     !isCount(s.tipHeight) ||
     !isCount(s.checkedAt) ||
-    !Array.isArray(s.activity)
+    !Array.isArray(s.activity) ||
+    (s.historyHeight !== undefined && !isCount(s.historyHeight))
   ) {
     return null;
   }
@@ -86,6 +93,7 @@ export function readCachedSnapshot(raw: unknown, nodeUrl: string, address: strin
     tipHeight: s.tipHeight,
     checkedAt: s.checkedAt,
     activity,
+    ...(s.historyHeight === undefined ? {} : { historyHeight: s.historyHeight as number }),
   };
 }
 
@@ -125,6 +133,16 @@ export function applyReading(
     tipHeight: reading.tipHeight,
     checkedAt: now,
     activity: sortActivity(activity).slice(0, ACTIVITY_LIMIT),
+    ...(previous?.historyHeight === undefined ? {} : { historyHeight: previous.historyHeight }),
+  };
+}
+
+/** The snapshot with the payments found on chain up to `height` added, each once. */
+export function applyHistory(snapshot: HomeSnapshot, found: readonly ActivityItem[], height: number): HomeSnapshot {
+  return {
+    ...snapshot,
+    activity: sortActivity(mergeActivity(snapshot.activity, found)).slice(0, ACTIVITY_LIMIT),
+    historyHeight: height,
   };
 }
 
@@ -161,6 +179,8 @@ export class HomeLoader {
   private state: HomeView;
   private readonly listeners = new Set<Listener>();
   private inFlight: Promise<void> | null = null;
+  private history: Promise<void> | null = null;
+  private historyTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
 
   constructor(
@@ -169,6 +189,10 @@ export class HomeLoader {
       address: string;
       cache: SnapshotCache;
       readAccount: ReadAccount;
+      /** Looks up the account's recent payments on chain once, after the first balance. */
+      scanHistory?: ScanHistory;
+      /** How long after the first balance the history lookup starts; 0 by default. */
+      historyDelayMs?: number;
       now?: () => number;
     },
   ) {
@@ -205,9 +229,14 @@ export class HomeLoader {
     return this.inFlight;
   }
 
-  /** Stops refreshing: a refresh still in flight is dropped. */
+  /** Stops refreshing: a refresh still in flight is dropped, and a history lookup not started yet waits for the next refresh. */
   stop(): void {
     this.stopped = true;
+    if (this.historyTimer) {
+      clearTimeout(this.historyTimer);
+      this.historyTimer = null;
+      this.history = null;
+    }
   }
 
   start(): void {
@@ -243,10 +272,70 @@ export class HomeLoader {
     }
     const snapshot = applyReading(this.state.snapshot, reading, nodeUrl, address, this.now());
     this.set({ snapshot, source: 'node', refreshing: false, error: null });
+    // Never awaited: the balance is shown and cached whatever the history does.
+    this.startHistory(snapshot);
     try {
       await cache.write(snapshot);
     } catch {
       // The view already shows the new balance; the next refresh writes again.
     }
+  }
+
+  /** Resolves once the history lookup started, if any, is in the view or failed. Never rejects. */
+  historyLoaded(): Promise<void> {
+    return this.history ?? Promise.resolve();
+  }
+
+  /**
+   * Looks up the account's recent payments on chain, in the background, when
+   * this account has never had them looked up (a restore, or a cache from
+   * before): up to the tip of the balance just shown.
+   */
+  private startHistory(snapshot: HomeSnapshot): void {
+    const scan = this.options.scanHistory;
+    if (!scan || this.history || snapshot.historyHeight !== undefined) {
+      return;
+    }
+    const loading: Promise<void> = new Promise<void>((resolve) => {
+      this.historyTimer = setTimeout(resolve, this.options.historyDelayMs ?? 0);
+    })
+      .then(() => {
+        this.historyTimer = null;
+        return this.stopped ? false : this.loadHistory(scan, snapshot.tipHeight);
+      })
+      .then((done) => {
+        if (!done && this.history === loading) {
+          // The next refresh looks again.
+          this.history = null;
+        }
+      });
+    this.history = loading;
+  }
+
+  /** Whether the history is in the view; false when it failed or came while stopped. */
+  private async loadHistory(scan: ScanHistory, height: number): Promise<boolean> {
+    const { nodeUrl, address, cache } = this.options;
+    let found: ActivityItem[];
+    try {
+      found = await scan(nodeUrl, address, height, ACTIVITY_LIMIT);
+    } catch {
+      // Activity stays as it was.
+      return false;
+    }
+    const current = this.state.snapshot;
+    if (this.stopped || !current) {
+      return false;
+    }
+    if (current.historyHeight !== undefined) {
+      return true;
+    }
+    const snapshot = applyHistory(current, found, height);
+    this.set({ snapshot });
+    try {
+      await cache.write(snapshot);
+    } catch {
+      // The view shows it; the next refresh writes the snapshot again.
+    }
+    return true;
   }
 }
