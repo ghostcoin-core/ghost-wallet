@@ -42,6 +42,11 @@ if (tool === 'xcodebuild' && args.includes('-exportArchive')) {
 if (tool === 'pnpm' && args.includes('prebuild')) {
   fs.mkdirSync('ios', { recursive: true });
 }
+if (tool === 'cargo' && after('--manifest-path')) {
+  // cargo run writes a Cargo.lock next to a manifest that has none.
+  const dir = path.dirname(after('--manifest-path'));
+  if (fs.existsSync(dir)) fs.writeFileSync(path.join(dir, 'Cargo.lock'), '# stub lock\\n');
+}
 if (tool === 'cargo' && after('--out-dir')) {
   fs.writeFileSync(path.join(after('--out-dir'), 'ghost_wallet_core.swift'), '// stub');
   fs.writeFileSync(path.join(after('--out-dir'), 'ghost_wallet_coreFFI.h'), '// stub');
@@ -161,6 +166,17 @@ const exportCall = (calls: Call[]) =>
 
 function destination(plist: string | undefined): string | undefined {
   return /<key>destination<\/key>\s*<string>([^<]*)<\/string>/.exec(plist ?? '')?.[1];
+}
+
+function plistValue(plist: string | undefined, key: string): string | undefined {
+  return new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(plist ?? '')?.[1];
+}
+
+function profiles(plist: string | undefined): Record<string, string> {
+  const dict = /<key>provisioningProfiles<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(plist ?? '')?.[1] ?? '';
+  const found: Record<string, string> = {};
+  for (const m of dict.matchAll(/<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g)) found[m[1]] = m[2];
+  return found;
 }
 
 function after(args: string[], flag: string): string | undefined {
@@ -303,11 +319,43 @@ describe('--dry-run', () => {
     expect(exp2.exportOptions).toContain('<string>app-store-connect</string>');
     expect(exp2.exportOptions).toContain('<string>TEAM123456</string>');
     expect(exp2.exportOptions).toContain('<string>com.example.wallet</string>');
-    expect(exp2.exportOptions).toContain('<string>automatic</string>');
+    expect(plistValue(exp2.exportOptions, 'signingStyle')).toBe('manual');
+    expect(plistValue(exp2.exportOptions, 'signingCertificate')).toBe('Apple Distribution');
+    expect(profiles(exp2.exportOptions)).toEqual({ 'com.example.wallet': 'Ghost Wallet App Store' });
 
     for (const call of result.calls) {
       expect(call.args.join(' ')).not.toMatch(/-authenticationKey/);
     }
+    // No Apple account or key is needed, so the export asks Apple for nothing.
+    expect(exp2.args).not.toContain('-allowProvisioningUpdates');
+  });
+
+  it('signs with the profile named by GHOST_EXPORT_PROFILE', () => {
+    const result = run(['--dry-run'], { GHOST_EXPORT_PROFILE: 'Other Store Profile' });
+    expectOk(result);
+    const plist = exportCall(result.calls)!.exportOptions;
+    expect(plistValue(plist, 'signingStyle')).toBe('manual');
+    expect(plistValue(plist, 'signingCertificate')).toBe('Apple Distribution');
+    expect(profiles(plist)).toEqual({ 'com.example.wallet': 'Other Store Profile' });
+    expect(plist).not.toContain('Ghost Wallet App Store');
+  });
+
+  it('escapes a profile name so the plist stays valid', () => {
+    const result = run(['--dry-run'], { GHOST_EXPORT_PROFILE: 'A & B <Store>' });
+    expectOk(result);
+    const plist = exportCall(result.calls)!.exportOptions;
+    expect(profiles(plist)).toEqual({ 'com.example.wallet': 'A &amp; B &lt;Store&gt;' });
+  });
+
+  it('leaves no untracked Cargo.lock with the repository .gitignore', () => {
+    commitFile('.gitignore', fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8'), 'real ignore');
+    commitFile('tools/uniffi-bindgen/Cargo.toml', '[package]\n', 'bindgen');
+    const first = run(['--dry-run']);
+    expectOk(first);
+    expect(fs.existsSync(path.join(repo, 'tools/uniffi-bindgen/Cargo.lock'))).toBe(true);
+    expect(git('status', '--porcelain')).toBe('');
+    // A second run from the same checkout passes the clean-tree check.
+    expectOk(run(['--dry-run']));
   });
 
   it('leaves the .ipa in the git-ignored ios/build folder and prints its path', () => {
@@ -336,6 +384,9 @@ describe('real run', () => {
     expectOk(result);
     const exp = exportCall(result.calls)!;
     expect(destination(exp.exportOptions)).toBe('upload');
+    expect(plistValue(exp.exportOptions, 'signingStyle')).toBe('manual');
+    expect(plistValue(exp.exportOptions, 'signingCertificate')).toBe('Apple Distribution');
+    expect(profiles(exp.exportOptions)).toEqual({ 'com.example.wallet': 'Ghost Wallet App Store' });
     expect(after(exp.args, '-authenticationKeyPath')).toBe(keyFile);
     expect(after(exp.args, '-authenticationKeyID')).toBe(FAKE_KEY_ID);
     expect(after(exp.args, '-authenticationKeyIssuerID')).toBe(FAKE_ISSUER_ID);
@@ -366,6 +417,7 @@ describe('docs/release.md', () => {
       'GHOST_ASC_KEY_PATH',
       'GHOST_ASC_KEY_ID',
       'GHOST_ASC_ISSUER_ID',
+      'GHOST_EXPORT_PROFILE',
     ]) {
       expect(text).toContain(word);
     }

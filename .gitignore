@@ -44,6 +44,8 @@ local.properties
 
 # Rust
 target/
+# Written by `cargo run` of the bindings generator during a release build
+tools/uniffi-bindgen/Cargo.lock
 
 # Simulator test screenshots (scripts/sim-test.sh)
 sim-results/
