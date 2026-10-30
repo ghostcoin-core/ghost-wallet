@@ -120,6 +120,7 @@ export function applyReading(
         amountWei: gained.toString(),
         state: 'done',
         at: now,
+        blocks: { after: previous.tipHeight, upTo: Math.max(previous.tipHeight, reading.tipHeight) },
       };
       activity = [received, ...activity];
     }
