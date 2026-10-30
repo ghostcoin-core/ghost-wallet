@@ -23,9 +23,13 @@ lives under `lib/` and is not part of this configuration.
 ## Uploading to TestFlight
 
 `scripts/release-testflight.sh` makes a store build of the current commit on
-the Mac Studio (Xcode signed in to the team, CocoaPods, Node 22 and rustup
-installed) and uploads it to App Store Connect, from where it reaches
-TestFlight.
+the Mac Studio (Xcode, CocoaPods, Node 22 and rustup installed) and uploads it
+to App Store Connect, from where it reaches TestFlight.
+
+Signing needs no Apple account signed in to Xcode. The export signs manually
+with the Apple Distribution certificate for the team in the login keychain and
+the installed App Store provisioning profile for the bundle id, named by
+`GHOST_EXPORT_PROFILE` (default `Ghost Wallet App Store`).
 
 1. Check out the commit to release, normally the tip of `main`. The script
    refuses to run with any uncommitted change or untracked file, so the build
@@ -36,8 +40,8 @@ TestFlight.
    bash scripts/release-testflight.sh --dry-run
    ```
 
-   The dry run does everything except the upload and needs no App Store
-   Connect key. It leaves a signed `GhostWallet.ipa` in
+   The dry run does everything except the upload, needs no App Store Connect
+   key and makes no call to Apple when it exports. It leaves a signed `GhostWallet.ipa` in
    `ios/build/release/export/` (git-ignored).
 3. Upload, with the App Store Connect API key:
 
@@ -69,9 +73,10 @@ What the script does, in order:
 - `xcodebuild archive` of the `Release` configuration into
   `ios/build/release/GhostWallet.xcarchive`;
 - `xcodebuild -exportArchive` with an export options plist it writes to a
-  temporary file: method `app-store-connect`, automatic signing, the team id
-  and bundle id from `app.json`, and destination `upload` (or `export` for
-  `--dry-run`). A real run passes the key with `-authenticationKeyPath`,
+  temporary file: method `app-store-connect`, manual signing with the
+  `Apple Distribution` certificate and the profile named by
+  `GHOST_EXPORT_PROFILE` for the bundle id, the team id and bundle id from
+  `app.json`, and destination `upload` (or `export` for `--dry-run`). A real run passes the key with `-authenticationKeyPath`,
   `-authenticationKeyID` and `-authenticationKeyIssuerID`;
 - prints the version and build number again, and the `.ipa` path on a dry run.
 

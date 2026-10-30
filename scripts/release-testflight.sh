@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Archive, sign and upload a store build of Ghost Wallet to TestFlight.
 #
-# Runs on the Mac Studio (macOS, Xcode signed in to the team, CocoaPods,
-# Node 22, rustup), from a clean checkout of the commit to release.
+# Runs on the Mac Studio (macOS, Xcode, CocoaPods, Node 22, rustup, the Apple
+# Distribution certificate in the login keychain and the App Store provisioning
+# profile installed), from a clean checkout of the commit to release.
 #
 #   bash scripts/release-testflight.sh --dry-run
 #   GHOST_ASC_KEY_PATH=<path to the .p8 key> GHOST_ASC_KEY_ID=<key id> \
@@ -13,6 +14,10 @@
 # the build with the App Store Connect API key named by GHOST_ASC_KEY_PATH,
 # GHOST_ASC_KEY_ID and GHOST_ASC_ISSUER_ID. Keep the key outside the
 # repository; the script never prints those values.
+#
+# The export signs manually with the "Apple Distribution" certificate and the
+# provisioning profile named by GHOST_EXPORT_PROFILE (default "Ghost Wallet App
+# Store"), so no Apple account has to be signed in to Xcode.
 #
 # The build number is GHOST_BUILD_NUMBER when set (a positive whole number),
 # otherwise the number of commits on the current branch. See docs/release.md.
@@ -175,6 +180,16 @@ else
   destination=upload
 fi
 
+# Manual signing with the Apple Distribution certificate in the keychain and the
+# installed App Store profile, so the export needs no Apple account in Xcode
+# and, on a dry run, no network call to Apple.
+export_profile="${GHOST_EXPORT_PROFILE:-Ghost Wallet App Store}"
+[ -n "$export_profile" ] || fail "GHOST_EXPORT_PROFILE is empty"
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+export_profile_xml="$(xml_escape "$export_profile")"
+
 export_options="$work/ExportOptions.plist"
 cat >"$export_options" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -190,7 +205,14 @@ cat >"$export_options" <<PLIST
   <key>distributionBundleIdentifier</key>
   <string>$bundle_id</string>
   <key>signingStyle</key>
-  <string>automatic</string>
+  <string>manual</string>
+  <key>signingCertificate</key>
+  <string>Apple Distribution</string>
+  <key>provisioningProfiles</key>
+  <dict>
+    <key>$bundle_id</key>
+    <string>$export_profile_xml</string>
+  </dict>
   <key>manageAppVersionAndBuildNumber</key>
   <false/>
   <key>uploadSymbols</key>
@@ -209,7 +231,6 @@ xcodebuild \
   -archivePath "$archive" \
   -exportPath "$export_dir" \
   -exportOptionsPlist "$export_options" \
-  -allowProvisioningUpdates \
   ${auth[@]+"${auth[@]}"}
 
 echo
