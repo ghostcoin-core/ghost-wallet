@@ -14,7 +14,23 @@ export type NodeAccountState = {
   nonce: bigint;
 };
 
-const TIMEOUT_MS = 10_000;
+/** How long a call may take: every read is small. */
+export const TIMEOUT_MS = 10_000;
+/**
+ * How long sending a transaction may take: a Summon or Claim is about 1.3 MB,
+ * and uploading it from a phone on a slow link takes far longer than a read.
+ */
+export const SEND_TIMEOUT_MS = 120_000;
+
+const REFUSED = 'the node refused a call';
+
+/**
+ * Whether `error` is the node's own refusal of a call: it answered, and said
+ * no. A timeout or a dropped connection is not one: the call may have reached it.
+ */
+export function isRefusal(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith(REFUSED);
+}
 
 function quantity(value: unknown, what: string): bigint {
   if (typeof value !== 'string' || !/^0x[0-9a-f]+$/i.test(value)) {
@@ -28,9 +44,10 @@ export async function rpcBatch(
   url: string,
   calls: [method: string, params: unknown[]][],
   fetchImpl: FetchLike = fetch,
+  timeoutMs: number = TIMEOUT_MS,
 ): Promise<unknown[]> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let body: unknown;
   try {
     const response = await fetchImpl(url, {
@@ -62,7 +79,7 @@ export async function rpcBatch(
       throw new Error('the node left a call unanswered');
     }
     if (answer.error) {
-      throw new Error(`the node refused a call: ${String(answer.error.message ?? 'no reason given')}`);
+      throw new Error(`${REFUSED}: ${String(answer.error.message ?? 'no reason given')}`);
     }
     return answer.result;
   });

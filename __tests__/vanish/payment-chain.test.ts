@@ -4,7 +4,7 @@ import { usePendingPayments } from '../../lib/home/use-pending';
 import { savedActivity, savedCredits } from '../../lib/home/saved-activity';
 import { GHOST_DEV_CHAIN_ID, GHOST_PUBLIC_TEST_CHAIN_ID, buildNetwork } from '../../lib/network/build-network';
 import { advanceSend, reservedNonce, signSend, startSend, type SendKit } from '../../lib/send/send-payment';
-import { signVanishAgain, startReveal, startVanish } from '../../lib/vanish/actions';
+import { ALREADY_SUMMONED_TEXT, signVanishAgain, startReveal, startVanish } from '../../lib/vanish/actions';
 import {
   OTHER_NETWORK_TEXT,
   advance,
@@ -54,7 +54,10 @@ function fakeSequence(id: string, intent: CorePaymentIntent, step: number, recov
     recover: jest.fn(() => ({ tag: recovery })),
     markBackedUp: jest.fn(),
     addAttempt: jest.fn(() => new ArrayBuffer(32)),
-    markSent: jest.fn(() => new Uint8Array([0x02, 0x01]).buffer),
+    markSent: jest.fn(() => {
+      record.step = 3;
+      return new Uint8Array([0x02, 0x01]).buffer;
+    }),
   };
 }
 
@@ -182,6 +185,44 @@ describe('a new payment', () => {
       cached: { nonce: 2, tipHeight: 50 },
     });
     expect(savedDetails(sequence)).toMatchObject({ kind: 'send', chainId: OWN });
+  });
+});
+
+describe('a Summon or Claim whose send may have reached the node', () => {
+  it.each([
+    ['the send timed out', new Error('the node did not answer in time')],
+    ['the connection dropped', new TypeError('Network request failed')],
+  ])('stays saved and sending when %s', async (_why, failure) => {
+    const { kit, node, saved } = fakeKit();
+    node.sendRaw.mockRejectedValueOnce(failure);
+    const sequence = await startReveal(kit, 'typed key words', ACCOUNT, null);
+    expect(saved.get(sequence.record().id)).toBe(sequence);
+    expect(sequence.addAttempt).toHaveBeenCalledTimes(1);
+    expect(sequence.markSent).toHaveBeenCalledTimes(1);
+    expect(savedDetails(sequence)).toMatchObject({ kind: 'summon', marker: MARKER });
+
+    // The payment mover takes it on: it sends the saved attempt again.
+    (sequence.recover as jest.Mock).mockReturnValue({ tag: 'Send' });
+    const moved = await advance(kit.node, sequence, null, null);
+    expect(moved.otherNetwork).toBeUndefined();
+    expect(moved.needsKey).toBe(false);
+    expect(node.sendRaw).toHaveBeenCalledTimes(2);
+    expect(node.sendRaw).toHaveBeenLastCalledWith('0x0201');
+  });
+
+  it('is listed as pending on Home after a timed-out send', async () => {
+    const { kit, node } = fakeKit();
+    node.sendRaw.mockRejectedValueOnce(new Error('the node did not answer in time'));
+    const sequence = await startReveal(kit, 'typed key words', ACCOUNT, 300n);
+    expect(pendingPayments(kit).map((payment) => payment.id)).toEqual([sequence.record().id]);
+  });
+
+  it('fails only when the node refuses it', async () => {
+    const { kit, node } = fakeKit();
+    node.sendRaw.mockRejectedValueOnce(new Error('the node refused a call: invalid sender'));
+    await expect(startReveal(kit, 'typed key words', ACCOUNT, null)).rejects.toThrow(/refused a call: invalid sender/);
+    node.sendRaw.mockRejectedValueOnce(new Error('the node refused a call: marker already spent'));
+    await expect(startReveal(kit, 'typed key words', ACCOUNT, null)).rejects.toThrow(ALREADY_SUMMONED_TEXT);
   });
 });
 
