@@ -124,21 +124,20 @@ function fakeNode(
         return { error: { code: -32601, message: `the method ${method} does not exist/is not available` } };
       }
       if (params[0] === 'coin-markers') {
-        // The marker tree's shape: pages of 32-byte markers, with no salt and no note.
+        // The marker list's shape: pages of 32-byte markers, with no page roots.
         const markers = options.markers ?? [];
-        const markerPages = Math.ceil(markers.length / PAGE);
         if (params[1] !== '0x0' || params[params.length - 1] !== anchorHash) {
           return refuse('unexpected tree or anchor');
         }
         if (method === 'ghost_getPageRoots') {
-          return { result: Array.from({ length: markerPages }, (_, p) => pageRootOf(markers.slice(p * PAGE, (p + 1) * PAGE))) };
+          return refuse('a list of spent markers has no page roots: coin-markers');
         }
         if (method === 'ghost_getTreePage') {
           const page = parseInt(params[2] as string, 16);
           const onPage = markers.slice(page * PAGE, (page + 1) * PAGE);
-          return { result: { kind: 'coin-markers', treeIndex: '0x0', page: q(page), filled: q(onPage.length), entries: onPage.map((leaf) => ({ leaf })) } };
+          return { result: { count: q(onPage.length), markers: onPage } };
         }
-        return refuse('the marker tree serves pages and page roots only');
+        return refuse('the marker list serves pages only');
       }
       if (params[0] !== 'coin' || params[1] !== '0x0' || params[params.length - 1] !== anchorHash) {
         return refuse('unexpected tree or anchor');
@@ -616,14 +615,16 @@ describe('Summon and Claim on the pages', () => {
     const leaves = treeOf(10_000, [9_500]);
     const bad = fakeNode(leaves, { tamperPage: 2 });
     const good = fakeNode(leaves);
-    const { kit: tools } = kit(bad, [good]);
+    const { kit: tools, core } = kit(bad, [good]);
     const lookup = await lookUpKey(tools, OURS);
     expect(lookup.status).toBe('found');
     expect(good.methods()).toContain('ghost_getPageSet');
 
-    // A proof's tree comes from the next node too.
+    // A proof's tree is the checked one: the first node's tampered leaf never reaches it.
     await proveReveal(tools, OURS, `0x${'55'.repeat(20)}`, null);
-    expect(good.methods().filter((method) => method === 'ghost_getPageRoots').length).toBeGreaterThanOrEqual(2);
+    const proved = core.proveKeyReveal.mock.calls[0][2];
+    expect(proved).toHaveLength(10_000);
+    expect(hexOf(proved[2 * PAGE + 5].commitment)).toBe(leaves[2 * PAGE + 5].leaf);
   });
 
   it('hints in the background, unchecked, that the coins were spent, never naming the marker or holding the lookup', async () => {
@@ -641,6 +642,9 @@ describe('Summon and Claim on the pages', () => {
     // Every marker page is read; no request names the key's marker.
     const pageReads = fake.requests.flat().filter((call) => call.method === 'ghost_getTreePage');
     expect(pageReads.map((call) => call.params.slice(0, 3))).toEqual([['coin-markers', '0x0', '0x0']]);
+    expect(fake.requests.flat().filter((call) => call.params[0] === 'coin-markers').map((call) => call.method)).toEqual([
+      'ghost_getTreePage',
+    ]);
     expect(fake.bodies()).not.toContain(OUR_MARKER);
   });
 

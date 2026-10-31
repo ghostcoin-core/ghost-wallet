@@ -171,20 +171,24 @@ export function parseBucket(raw: unknown, treeIndex: number, bits: number, prefi
   };
 }
 
-/** The markers of a `ghost_getTreePage` page of the marker tree; null when it is not laid out as one. */
-export function parseMarkerPage(raw: unknown, treeIndex: number, page: number): string[] | null {
+/** The most markers a page of the marker tree holds: a page with fewer is its last. */
+export const MARKER_PAGE_LEAVES = 4096;
+/** The most marker pages read for one hint, so a node that never ends a list cannot hold it forever. */
+const MAX_MARKER_PAGES = 4096;
+
+/**
+ * The markers of a `ghost_getTreePage` page of the marker tree, as the node
+ * serves it: `{count, markers: [hash...]}`, `count` a hex quantity of at most
+ * 4,096. Null when it is not laid out as one.
+ */
+export function parseMarkerPage(raw: unknown): string[] | null {
   const value = (raw ?? {}) as Record<string, unknown>;
   try {
-    if (value.kind !== MARKER_KIND || smallNumber(value.treeIndex, 'tree index') !== treeIndex) {
+    const count = smallNumber(value.count, 'marker count');
+    if (count > MARKER_PAGE_LEAVES || !Array.isArray(value.markers) || value.markers.length !== count) {
       return null;
     }
-    if (smallNumber(value.page, 'page number') !== page || !Array.isArray(value.entries)) {
-      return null;
-    }
-    return value.entries.map((entry: unknown) => {
-      const fields = (entry ?? {}) as Record<string, unknown>;
-      return hash(typeof entry === 'string' ? entry : (fields.marker ?? fields.leaf), 'spent marker');
-    });
+    return value.markers.map((marker: unknown) => hash(marker, 'spent marker'));
   } catch {
     return null;
   }
@@ -203,9 +207,9 @@ export type VanishNode = {
   /** The buckets of `prefixes` (`ghost_getNoteBucket`), all in one batch. */
   noteBuckets(treeIndex: number, bits: number, prefixes: number[], anchorHash: string): Promise<NodeBucket[]>;
   /**
-   * Every spent marker of tree `treeIndex` as of block `anchorHash`: the
-   * marker tree's page roots, then all its pages (`ghost_getTreePage`) in one
-   * batch, so no request names a marker. Unchecked: a hint only.
+   * Every spent marker of tree `treeIndex` as of block `anchorHash`: its pages
+   * (`ghost_getTreePage`) from 0 until one holds fewer than 4,096, so no
+   * request names a marker. Unchecked: a hint only.
    */
   markerPages(treeIndex: number, anchorHash: string): Promise<string[]>;
   tipHeight(): Promise<number>;
@@ -282,27 +286,23 @@ export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
       return answers.map((answer, i) => parseBucket(answer, treeIndex, bits, prefixes[i]));
     },
     async markerPages(treeIndex, anchorHash) {
-      const [roots] = await call([['ghost_getPageRoots', [MARKER_KIND, hexQuantity(treeIndex), anchorHash]]]);
-      if (!Array.isArray(roots)) {
-        throw new Error('the node sent malformed spent marker page roots');
-      }
-      if (roots.length === 0) {
-        return [];
-      }
-      const pages = roots.map((_, page) => page);
-      const answers = await call(
-        pages.map((page): [string, unknown[]] => [
-          'ghost_getTreePage',
-          [MARKER_KIND, hexQuantity(treeIndex), hexQuantity(page), anchorHash],
-        ]),
-      );
-      return answers.flatMap((answer, i) => {
-        const markers = parseMarkerPage(answer, treeIndex, pages[i]);
-        if (markers === null) {
+      // The marker list has no page roots (the node refuses `ghost_getPageRoots`
+      // for it): its pages are read from 0 until one holds fewer than 4,096.
+      const markers: string[] = [];
+      for (let page = 0; page < MAX_MARKER_PAGES; page++) {
+        const [answer] = await call([
+          ['ghost_getTreePage', [MARKER_KIND, hexQuantity(treeIndex), hexQuantity(page), anchorHash]],
+        ]);
+        const onPage = parseMarkerPage(answer);
+        if (onPage === null) {
           throw new Error('the node sent a malformed spent marker page');
         }
-        return markers;
-      });
+        markers.push(...onPage);
+        if (onPage.length < MARKER_PAGE_LEAVES) {
+          return markers;
+        }
+      }
+      throw new Error('the node sent more spent marker pages than a hint reads');
     },
     async blocks(from, to) {
       const heights = Array.from({ length: Math.max(0, to - from + 1) }, (_, i) => hexQuantity(from + i));
