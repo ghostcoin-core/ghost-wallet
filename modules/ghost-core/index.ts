@@ -97,6 +97,17 @@ export type VanishBindings = {
   forgetCardKey(): void;
   findCardKeyCoins(chainId: bigint, leaves: CoinLeaf[], spent: ArrayBuffer[]): KeyCoins;
   proveCardKeyReveal(request: CoreRevealRequest, leaves: CoinLeaf[], spent: ArrayBuffer[]): CoreProvedReveal;
+  /**
+   * The coin tree calls of core/src/coin_tree.rs. Checks the node's page roots against the
+   * anchor header's `coinTreeRoot` and each page's leaves against its root; throws on any mismatch.
+   */
+  checkCoinPages(pageRoots: ArrayBuffer[], pages: CoreCoinPage[], coinTreeRoot: ArrayBuffer): void;
+  /** Ghost's `bucket_bits`: 0 (the whole tree read as pages) below 8,192 notes. */
+  noteBucketBits(noteCount: bigint): number;
+  /** The typed key's note buckets in a tree of `noteCount` notes: its first 16 lookup tags, each prefix once. */
+  keyNoteBuckets(keyText: string, noteCount: bigint): { bits: number; prefixes: number[] };
+  /** The positions of the bucket notes whose lookup tag is one of the typed key's first 16. */
+  keyBucketPositions(keyText: string, notes: { position: number; note: ArrayBuffer }[]): number[];
   revealFeeWei(bRefWei: string): string;
   minVanishWei(bRefWei: string): string;
   feeWindow(tip: bigint): { referenceHeight: bigint; validUntil: bigint };
@@ -115,6 +126,8 @@ export type VanishBindings = {
 
 export type CoinLeaf = { commitment: ArrayBuffer; note: ArrayBuffer; salt?: ArrayBuffer };
 export type KeyCoins = { status: string; amountWei: string };
+/** One page of the coin tree, as `checkCoinPages` takes it: its number and its leaves in position order. */
+export type CoreCoinPage = { page: number; leaves: ArrayBuffer[] };
 export type CoreVanishCommit = { commitData: ArrayBuffer; amountWei: string; commitment: ArrayBuffer };
 export type CoreVanishSend = {
   chainId: bigint;

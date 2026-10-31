@@ -131,9 +131,10 @@ export function coreReceipt(receipt: NodeReceipt): CoreReceipt {
 }
 
 /**
- * What the chain says about `record` now, as the core's `ChainView`. A
- * reveal's marker is looked up in the coin tree this phone rebuilt: the
- * transaction that spent it, and whether it is spent at all.
+ * What the chain says about `record` now, as the core's `ChainView`. With a
+ * coin tree that knows its spent markers, a reveal's marker is looked up in
+ * it; the app moves payments with none (`tree` null), and the receipts of the
+ * saved attempts decide.
  */
 export async function chainSnapshot(node: VanishNode, record: CorePaymentRecord, tree: CoinTree | null): Promise<CoreChainView> {
   const marker =

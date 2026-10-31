@@ -84,8 +84,101 @@ export function parseReceipt(raw: unknown): NodeReceipt | null {
   };
 }
 
+/** The block the coin tree is read as of: the tip when it was asked. */
+export type NodeAnchor = { height: number; hash: string; coinTreeRoot: string };
+
+/** One leaf of a tree page: its commitment, its note, and its salt when the chain shows it. */
+export type NodePageEntry = { leaf: string; note: string; salt?: string };
+
+/** A page of the coin tree: `filled` leaves from position `4096 × page` on. */
+export type NodePage = { page: number; filled: number; entries: NodePageEntry[] };
+
+export type NodeBucketEntry = NodePageEntry & { position: number };
+
+/** The notes whose lookup tag starts with `prefix` (its first `bits` bits). */
+export type NodeBucket = { bits: number; prefix: number; entries: NodeBucketEntry[] };
+
+/** The tree kind of the coin tree, as `ghost_` calls name it. */
+export const COIN_KIND = 'coin';
+const NOTE_BYTES = 156;
+const SALT_BYTES = 16;
+
+function sized(value: unknown, bytes: number, what: string): string {
+  const hex = data(value, what);
+  if (hex.length !== 2 + 2 * bytes) {
+    throw new Error(`the node sent malformed ${what}`);
+  }
+  return hex;
+}
+
+function smallNumber(value: unknown, what: string): number {
+  const number = quantity(value, what);
+  if (number > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`the node sent a malformed ${what}`);
+  }
+  return Number(number);
+}
+
+function parseEntry(raw: unknown): NodePageEntry {
+  const entry = (raw ?? {}) as Record<string, unknown>;
+  const parsed: NodePageEntry = {
+    leaf: hash(entry.leaf, 'coin tree leaf'),
+    note: sized(entry.note, NOTE_BYTES, 'coin note'),
+  };
+  if (entry.salt !== undefined && entry.salt !== null && entry.salt !== '0x') {
+    parsed.salt = sized(entry.salt, SALT_BYTES, 'coin salt');
+  }
+  return parsed;
+}
+
+function checkTree(raw: Record<string, unknown>, treeIndex: number) {
+  if (raw.kind !== COIN_KIND || smallNumber(raw.treeIndex, 'tree index') !== treeIndex) {
+    throw new Error('the node sent a malformed coin tree page');
+  }
+}
+
+/** A page of `ghost_getPageSet`, checked to be the page asked for and laid out as one. */
+export function parsePage(raw: unknown, treeIndex: number, page: number): NodePage {
+  const value = (raw ?? {}) as Record<string, unknown>;
+  checkTree(value, treeIndex);
+  const filled = smallNumber(value.filled, 'page fill');
+  if (smallNumber(value.page, 'page number') !== page || !Array.isArray(value.entries) || value.entries.length !== filled) {
+    throw new Error('the node sent a malformed coin tree page');
+  }
+  return { page, filled, entries: value.entries.map(parseEntry) };
+}
+
+/** A bucket of `ghost_getNoteBucket`, checked to be the bucket asked for. */
+export function parseBucket(raw: unknown, treeIndex: number, bits: number, prefix: number): NodeBucket {
+  const value = (raw ?? {}) as Record<string, unknown>;
+  checkTree(value, treeIndex);
+  if (
+    smallNumber(value.bits, 'bucket size') !== bits ||
+    smallNumber(value.prefix, 'bucket prefix') !== prefix ||
+    !Array.isArray(value.entries)
+  ) {
+    throw new Error('the node sent a malformed note bucket');
+  }
+  return {
+    bits,
+    prefix,
+    entries: value.entries.map((raw: unknown) => ({
+      ...parseEntry(raw),
+      position: smallNumber((raw as Record<string, unknown> | null)?.position, 'note position'),
+    })),
+  };
+}
+
 export type VanishNode = {
   chainId(): Promise<bigint>;
+  /** The tip's header: its height, hash and `coinTreeRoot`. */
+  anchor(): Promise<NodeAnchor>;
+  /** The page roots of coin tree `treeIndex` as of block `anchorHash`. */
+  pageRoots(treeIndex: number, anchorHash: string): Promise<string[]>;
+  /** Each set of pages (`ghost_getPageSet`), all in one batch. */
+  pageSets(treeIndex: number, sets: number[][], anchorHash: string): Promise<NodePage[][]>;
+  /** The buckets of `prefixes` (`ghost_getNoteBucket`), all in one batch. */
+  noteBuckets(treeIndex: number, bits: number, prefixes: number[], anchorHash: string): Promise<NodeBucket[]>;
   tipHeight(): Promise<number>;
   /** Blocks `from` to `to`, with their transactions, and every receipt of them. */
   blocks(from: number, to: number): Promise<{ block: NodeBlock; receipts: NodeReceipt[] }[]>;
@@ -111,6 +204,51 @@ export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
     async tipHeight() {
       const [height] = await call([['eth_blockNumber', []]]);
       return Number(quantity(height, 'block height'));
+    },
+    async anchor() {
+      const [raw] = await call([['eth_getBlockByNumber', ['latest', false]]]);
+      const block = (raw ?? {}) as Record<string, unknown>;
+      return {
+        height: Number(quantity(block.number, 'block height')),
+        hash: hash(block.hash, 'block hash'),
+        coinTreeRoot: hash(block.coinTreeRoot, 'coin tree root'),
+      };
+    },
+    async pageRoots(treeIndex, anchorHash) {
+      const [roots] = await call([['ghost_getPageRoots', [COIN_KIND, hexQuantity(treeIndex), anchorHash]]]);
+      if (!Array.isArray(roots)) {
+        throw new Error('the node sent malformed coin page roots');
+      }
+      return roots.map((root: unknown) => hash(root, 'coin page root'));
+    },
+    async pageSets(treeIndex, sets, anchorHash) {
+      if (sets.length === 0) {
+        return [];
+      }
+      const answers = await call(
+        sets.map((pages): [string, unknown[]] => [
+          'ghost_getPageSet',
+          [COIN_KIND, hexQuantity(treeIndex), pages.map(hexQuantity), anchorHash],
+        ]),
+      );
+      return answers.map((answer, i) => {
+        if (!Array.isArray(answer) || answer.length !== sets[i].length) {
+          throw new Error('the node sent a malformed coin tree page');
+        }
+        return answer.map((page: unknown, j) => parsePage(page, treeIndex, sets[i][j]));
+      });
+    },
+    async noteBuckets(treeIndex, bits, prefixes, anchorHash) {
+      if (prefixes.length === 0) {
+        return [];
+      }
+      const answers = await call(
+        prefixes.map((prefix): [string, unknown[]] => [
+          'ghost_getNoteBucket',
+          [COIN_KIND, hexQuantity(treeIndex), hexQuantity(bits), hexQuantity(prefix), anchorHash],
+        ]),
+      );
+      return answers.map((answer, i) => parseBucket(answer, treeIndex, bits, prefixes[i]));
     },
     async blocks(from, to) {
       const heights = Array.from({ length: Math.max(0, to - from + 1) }, (_, i) => hexQuantity(from + i));
