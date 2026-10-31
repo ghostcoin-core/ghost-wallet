@@ -78,8 +78,9 @@ export function PaymentProgress({
 export const LEAVE_NOTE = 'You can leave this screen. The payment keeps going.';
 
 /**
- * Under the progress: Done once the payment is settled or failed. Until then
- * the screen says the payment goes on without it, with a quiet Leave.
+ * Under the progress: Done once the payment is in a block (settling goes on
+ * without the screen), settled or failed. Until then the screen says the
+ * payment goes on without it, with a quiet Leave.
  */
 export function PaymentExit({
   final,

@@ -7,9 +7,9 @@
 // person taps a card this iPhone wrote: the card's key goes straight to the
 // native core, and the same lookup and proof run on it there. While the lookup
 // runs the screen says so, notes when it is slow, and offers Try again if it
-// fails. Done shows only
-// once the payment is settled or failed; until then the person may leave, and
-// Home lists it as pending.
+// fails. Once the payment is in a block the coins show as in the account and
+// Done shows; settling goes on and Activity shows Settled later. Before that
+// the person may leave, and Home lists it as pending.
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
@@ -27,7 +27,7 @@ import { parseGhostAmount } from '../lib/vanish/amount';
 import { keyFieldRule } from '../lib/vanish/field-rules';
 import { decodeDetails } from '../lib/vanish/payments';
 import { newestShared, openShared, paymentsChanged, shared, takeReopened } from '../lib/vanish/pending';
-import { isFinal, lookupMessage, statusOfStep, type RevealKind } from '../lib/vanish/status-mapping';
+import { arrivedText, isFinal, lookupMessage, screenDone, statusOfStep, type RevealKind } from '../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import { normaliseKeyText, parseWordsCheck } from '../lib/vanish/word-validation';
 import { checkKeyWords, type CorePaymentSequence } from '../modules/ghost-core';
@@ -188,6 +188,7 @@ export default function SummonScreen() {
 
   const unavailable = !kit || !address;
   const status = proving ? 'proving' : payment?.status;
+  const arrived = status ? arrivedText(status, kind) : null;
   const keyNeeded = payment?.needsKey && !key;
 
   return (
@@ -272,8 +273,8 @@ export default function SummonScreen() {
         {status ? (
           <>
             <PaymentProgress status={status} kind={kind} step={payment?.step} error={payment?.error} />
-            {status === 'settled' ? <CoinsBack text="The coins are back in your account." /> : null}
-            <PaymentExit final={isFinal(status)} onLeave={() => router.back()} testPrefix="summon" />
+            {arrived ? <CoinsBack text={arrived} /> : null}
+            <PaymentExit final={screenDone(status)} onLeave={() => router.back()} testPrefix="summon" />
           </>
         ) : lookingUp ? (
           <KeyLookupProgress failure={lookupFailure} onRetry={() => void find(lookingUp)} />

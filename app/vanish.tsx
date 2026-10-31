@@ -8,8 +8,9 @@
 // every time); the core then drops the key unchecked. Once the words were
 // shown the key can also be put on a blank NTAG 424 card before the core
 // drops it, with no word check: the card is never the only copy.
-// Done shows only once the Vanish is settled or failed; until then the person
-// may leave, and Home lists it as pending. Leaving before the key is written
+// Once the Commit is in a block the coins show as in the Phantom Key and Done
+// shows; settling goes on and Activity shows Settled later. Before that the
+// person may leave, and Home lists it as pending. Leaving before the key is written
 // down (or on its card) keeps the key: opening the Vanish again returns there.
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
@@ -57,7 +58,7 @@ import {
   takeReopened,
   type HeldVanish,
 } from '../lib/vanish/pending';
-import { isFinal, statusOfStep, stepName } from '../lib/vanish/status-mapping';
+import { isFinal, screenDone, statusOfStep, stepName } from '../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import type { CorePaymentSequence } from '../modules/ghost-core';
 import { CardCancelled, cardsSupported, putPhantomKeyOnCard } from '../modules/ghost-nfc';
@@ -526,7 +527,7 @@ export default function VanishScreen() {
             <TextButton label="Leave" onPress={() => router.back()} testID="vanish-leave" />
           </>
         ) : phase.name === 'sending' ? (
-          <PaymentExit final={payment ? isFinal(payment.status) : false} onLeave={() => router.back()} testPrefix="vanish" />
+          <PaymentExit final={payment ? screenDone(payment.status) : false} onLeave={() => router.back()} testPrefix="vanish" />
         ) : null}
       </Column>
     </Screen>

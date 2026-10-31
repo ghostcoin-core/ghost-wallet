@@ -1,9 +1,11 @@
 import {
   NOT_FOUND_MESSAGE,
   STEP_NAMES,
+  arrivedText,
   isFinal,
   lookupMessage,
   progressRows,
+  screenDone,
   statusDetail,
   statusLabel,
   statusOfRecovery,
@@ -104,6 +106,21 @@ describe('what the screen shows', () => {
     expect(statusDetail('sent', 'vanish')).toBe('Safe to close the app. It never pays twice.');
     expect(statusDetail('settled', 'vanish')).toBe('The coins are in the Phantom Key.');
     expect(statusDetail('settled', 'summon')).toBe('The coins are back in your account.');
+  });
+
+  it('counts settling from the first block, and lets the screen finish there', () => {
+    expect(statusDetail('in-block', 'summon')).toBe('Settling: 1 of 3 confirmations');
+    expect(statusDetail('in-block', 'vanish')).toBe('The coins are in the Phantom Key. Settling: 1 of 3 confirmations');
+    expect(arrivedText('in-block', 'claim')).toBe('The coins are in your account.');
+    expect(arrivedText('sent', 'summon')).toBeNull();
+    expect(arrivedText('failed', 'summon')).toBeNull();
+    expect((['proving', 'sent', 'in-block', 'settled', 'failed'] as const).map(screenDone)).toEqual([
+      false,
+      false,
+      true,
+      true,
+      true,
+    ]);
   });
 });
 
