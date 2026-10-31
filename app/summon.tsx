@@ -7,7 +7,8 @@
 // person taps a card this iPhone wrote: the card's key goes straight to the
 // native core, and the same lookup and proof run on it there. While the lookup
 // runs the screen says so, notes when it is slow, and offers Try again if it
-// fails. Once the payment is in a block the coins show as in the account and
+// fails. If the spent markers hint, unchecked, that the coins may be summoned
+// already, the screen says so quietly but still offers Summon. Once the payment is in a block the coins show as in the account and
 // Done shows; settling goes on and Activity shows Settled later. Before that
 // the person may leave, and Home lists it as pending.
 import { useRouter } from 'expo-router';
@@ -24,6 +25,7 @@ import { failureReason } from '../lib/node/failure-reason';
 import { useSettings } from '../lib/settings/settings';
 import { CARD_KEY, lookUpKey, proveRevealAgain, startReveal, type KeyLookup, type KeySource } from '../lib/vanish/actions';
 import { parseGhostAmount } from '../lib/vanish/amount';
+import type { SpentHint } from '../lib/vanish/coin-pages';
 import { keyFieldRule } from '../lib/vanish/field-rules';
 import { decodeDetails } from '../lib/vanish/payments';
 import { newestShared, openShared, paymentsChanged, shared, takeReopened } from '../lib/vanish/pending';
@@ -98,6 +100,32 @@ export default function SummonScreen() {
     [kit],
   );
   const payment = usePayment(kit, sequence, rebuild, true);
+
+  // What the spent markers hint about the coins found: unchecked, never waited
+  // on, and never a reason to hold Summon or Claim back.
+  const spentHint = lookup?.spentHint;
+  // Kept with the hint it came from, so a new lookup clears it.
+  const [hintRead, setHintRead] = useState<{ from: Promise<SpentHint>; spent: boolean } | null>(null);
+  const maybeSpent = spentHint !== undefined && hintRead?.from === spentHint && hintRead.spent;
+  useEffect(() => {
+    if (!spentHint) {
+      return;
+    }
+    let current = true;
+    spentHint.then(
+      (hint) => {
+        if (current) {
+          setHintRead({ from: spentHint, spent: hint.spent === true });
+        }
+      },
+      () => {
+        // No hint is no warning.
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [spentHint]);
 
   const claimWei = parseGhostAmount(claimText);
   const most = lookup ? BigInt(lookup.amountWei) - BigInt(lookup.feeWei) : 0n;
@@ -287,6 +315,11 @@ export default function SummonScreen() {
                   {formatGhost(lookup.amountWei)} GHOST
                 </Text>
                 <Text style={textStyles.quiet}>Fee {formatGhost(lookup.feeWei)} GHOST</Text>
+                {maybeSpent ? (
+                  <Text accessibilityLiveRegion="polite" style={textStyles.quiet} testID="summon-spent-hint">
+                    Not checked: these coins may have been summoned already.
+                  </Text>
+                ) : null}
                 <ButtonRow>
                   <Button label="All" secondary={claiming} onPress={() => setClaiming(false)} testID="summon-all" />
                   <Button label="Part" secondary={!claiming} onPress={() => setClaiming(true)} testID="summon-part" />
