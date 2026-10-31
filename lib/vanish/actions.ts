@@ -17,6 +17,7 @@ import {
   type PaymentDetails,
   type Rebuild,
 } from './payments';
+import { stoppedVanish } from './pending';
 import type { PaymentKit } from './use-payment';
 import { treeAtTip } from './use-payment';
 
@@ -96,6 +97,11 @@ export function signVanishAgain(kit: PaymentKit, sequence: CorePaymentSequence):
     const record = sequence.record();
     if (onOtherChain(record)) {
       throw new Error('this Vanish was saved on another network');
+    }
+    // Refused for lack of funds once, it is never signed again, whatever the
+    // balance now: the person can only cancel it.
+    if (stoppedVanish(record.id, kit.store) !== null) {
+      throw new Error('not enough GHOST for this Vanish when it was sent: it is stopped and will not be sent');
     }
     const details = decodeDetails(record.intent.details);
     if (!details || details.kind !== 'vanish') {

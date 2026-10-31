@@ -21,6 +21,28 @@ export type PaymentFiles = {
 
 const RECORD = '.record';
 const PAYLOAD = '.tx';
+const REFUSED = '.refused';
+
+/**
+ * The Vanishes the node refused for lack of funds. The core checksums a record
+ * with its details, so this is kept beside it: a small file holding why,
+ * removed with the record. No marker reads as not refused.
+ */
+export type RefusedMarks = {
+  markRefused(id: string, reason: string): void;
+  /** Why payment `id` was refused, or null when it was not. */
+  refusedReason(id: string): string | null;
+};
+
+export type PaymentStore = CorePaymentStore & RefusedMarks;
+
+/** The refused marks of `store`, or null when it keeps none (then nothing is kept across restarts). */
+export function refusedMarks(store: CorePaymentStore | null | undefined): RefusedMarks | null {
+  const marks = store as Partial<RefusedMarks> | null | undefined;
+  return marks && typeof marks.markRefused === 'function' && typeof marks.refusedReason === 'function'
+    ? (marks as RefusedMarks)
+    : null;
+}
 
 function safeId(id: string): string {
   if (!/^[a-z0-9-]{1,64}$/.test(id)) {
@@ -45,7 +67,7 @@ function payloadName(id: string, transactionHash: ArrayBuffer): string {
 export function paymentStore(
   core: Pick<VanishBindings, 'encodePaymentRecord' | 'decodePaymentRecord'>,
   files: PaymentFiles,
-): CorePaymentStore {
+): PaymentStore {
   return {
     save(record: CorePaymentRecord) {
       files.write(`${safeId(record.id)}${RECORD}`, view(core.encodePaymentRecord(record)));
@@ -69,6 +91,22 @@ export function paymentStore(
         }
       }
       files.remove(`${id}${RECORD}`);
+      files.remove(`${id}${REFUSED}`);
+    },
+    markRefused(id: string, reason: string) {
+      files.write(`${safeId(id)}${REFUSED}`, new TextEncoder().encode(reason));
+    },
+    refusedReason(id: string) {
+      const bytes = files.read(`${safeId(id)}${REFUSED}`);
+      if (!bytes) {
+        return null;
+      }
+      try {
+        return new TextDecoder().decode(bytes);
+      } catch {
+        // Unreadable still means refused: it is never sent.
+        return '';
+      }
     },
     savePayload(id: string, transactionHash: ArrayBuffer, signedTransaction: ArrayBuffer) {
       files.write(payloadName(id, transactionHash), view(signedTransaction));
