@@ -152,14 +152,25 @@ export const CARD_KEY = { card: true } as const;
 /** The key of a Summon or Claim: the typed text, or the card key the core holds. */
 export type KeySource = string | typeof CARD_KEY;
 
-/** Looks the key up in the coin tree at the tip, with the fee a reveal pays now. */
+/**
+ * Looks the key up in the coin tree at the tip, from the node's checked pages,
+ * with the fee a reveal pays now. Spent markers are only a hint: a coin
+ * already spent is refused by the node when it is summoned.
+ */
 export async function lookUpKey(kit: PaymentKit, key: KeySource): Promise<KeyLookup> {
   const chainId = await checkedChainId(kit);
-  const { tree, tip } = await treeAtTip(kit);
-  const coins =
+  const find = (tree: CoinTree) =>
     typeof key === 'string'
       ? kit.core.findKeyCoins(key, chainId, tree.leaves, spentBuffers(tree))
       : kit.core.findCardKeyCoins(chainId, tree.leaves, spentBuffers(tree));
+  let { tree, tip } = await treeAtTip(kit, chainId, { keyText: typeof key === 'string' ? key : null });
+  let coins = find(tree);
+  if (coins.status !== 'found' && tree.complete === false) {
+    // The pages the buckets named show no unspent coin: the key may have more
+    // coins than one batch of lookup tags reaches. Every page decides.
+    ({ tree, tip } = await treeAtTip(kit, chainId, { complete: true }));
+    coins = find(tree);
+  }
   const window = kit.core.feeWindow(BigInt(tip));
   const reference = await kit.node.block(Number(window.referenceHeight));
   return { ...coins, feeWei: kit.core.revealFeeWei(reference.baseFeePerGas.toString()), tree, tip };
@@ -176,7 +187,8 @@ export async function proveReveal(
   outWei: bigint | null,
 ): Promise<{ envelope: ArrayBuffer; validUntil: bigint; marker: string; feeWei: string; outWei: string }> {
   const chainId = await checkedChainId(kit);
-  const { tree, tip } = await treeAtTip(kit);
+  // A proof's path needs every leaf of the tree.
+  const { tree, tip } = await treeAtTip(kit, chainId, { complete: true });
   const window = kit.core.feeWindow(BigInt(tip));
   const [genesis, reference] = await Promise.all([kit.node.block(0), kit.node.block(Number(window.referenceHeight))]);
   const request = {
@@ -198,6 +210,11 @@ export async function proveReveal(
     outWei: proved.outWei,
   };
 }
+
+/** What the screen says when the node refuses a reveal of a coin already spent. */
+export const ALREADY_SUMMONED_TEXT = 'These coins were already summoned.';
+/** How a node refuses a reveal whose marker is spent. */
+const SPENT_REFUSAL = /already spent|marker (is )?(already )?(spent|used)|spent marker/i;
 
 /** Proves the reveal, saves it with its marker as identity, and sends it. */
 export async function startReveal(
@@ -221,7 +238,15 @@ export async function startReveal(
   // The key (typed, or on its card) is the backup: nothing more to save before sending.
   sequence.markBackedUp();
   sequence.addAttempt(proved.envelope, proved.validUntil);
-  await kit.node.sendRaw(bytesToHex(sequence.markSent()));
+  try {
+    await kit.node.sendRaw(bytesToHex(sequence.markSent()));
+  } catch (error) {
+    // The lookup never waits on a spent check: the node is what refuses a coin already spent.
+    if (error instanceof Error && SPENT_REFUSAL.test(error.message)) {
+      throw new Error(ALREADY_SUMMONED_TEXT);
+    }
+    throw error;
+  }
   return sequence;
 }
 

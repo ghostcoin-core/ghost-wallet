@@ -6,7 +6,8 @@ import { useEffect, useRef, useState } from 'react';
 
 import { vanishCore, type CorePaymentSequence, type CorePaymentStore, type VanishBindings } from '../../modules/ghost-core';
 import { failureReason } from '../node/failure-reason';
-import { coinTreeAt, type CoinTree } from './coin-tree';
+import { devicePageCache, readCoinTree, type PageCache, type PageReadOptions } from './coin-pages';
+import type { CoinTree } from './coin-tree';
 import { vanishNode, type VanishNode } from './node';
 import { advance, type Rebuild } from './payments';
 import { documentPaymentFiles, paymentStore } from './payment-store';
@@ -22,6 +23,8 @@ export type PaymentKit = {
   nodeUrl: string;
   /** Reads an account's balance at a block; the node's `eth_getBalance` when not set. */
   balance?: (account: string, blockHash: string) => Promise<bigint>;
+  /** Where checked coin tree pages are kept; this phone's, by chain, when not set. */
+  pages?: PageCache;
 };
 
 /** The core, the store and the node; null in a build without the native core. */
@@ -38,11 +41,16 @@ export function paymentKit(nodeUrl: string): PaymentKit | null {
   }
 }
 
-/** The coin tree at the node's tip. */
-export async function treeAtTip(kit: PaymentKit): Promise<{ tree: CoinTree; tip: number }> {
-  const tip = await kit.node.tipHeight();
-  const tree = await coinTreeAt(kit.core, kit.node, kit.nodeUrl, kit.core.commitEntryAddress(), tip);
-  return { tree, tip };
+/**
+ * The coin tree at the node's tip, from its checked pages, for a lookup or a
+ * proof on chain `chainId` (lib/vanish/coin-pages.ts). No block is read.
+ */
+export async function treeAtTip(
+  kit: PaymentKit,
+  chainId: bigint,
+  options: PageReadOptions = {},
+): Promise<{ tree: CoinTree; tip: number }> {
+  return readCoinTree(kit.core, kit.node, kit.pages ?? devicePageCache(chainId), options);
 }
 
 export type PaymentView = {
@@ -56,7 +64,8 @@ export type PaymentView = {
 
 /**
  * Moves `sequence` until it is final. `rebuild` makes a new attempt when the
- * fee window passed; `withTree` reads the coin tree for a reveal's marker.
+ * fee window passed. `withTree` marks a reveal's screen; no coin tree is read
+ * to move a payment.
  */
 export function usePayment(
   kit: PaymentKit | null,
@@ -92,10 +101,9 @@ export function usePayment(
           return;
         }
         // Home may be moving this payment right now: then this move waits for the next.
-        const next = await moveAlone(id, async () => {
-          const tree = withTree ? (await treeAtTip(tools)).tree : null;
-          return advance(tools.node, payment, rebuildRef.current, tree);
-        });
+        // A reveal moves on the receipts of its saved attempts: the coin
+        // tree pages cannot tell which transaction spent a marker.
+        const next = await moveAlone(id, () => advance(tools.node, payment, rebuildRef.current, null));
         if (stopped) {
           return;
         }

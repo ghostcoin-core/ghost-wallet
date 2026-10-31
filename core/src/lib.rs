@@ -10,6 +10,7 @@ use ghost_client::account::{SeedError, WalletSeed};
 
 pub mod accounts;
 pub mod card;
+pub mod coin_tree;
 pub mod header_sync;
 #[cfg(target_os = "ios")]
 pub mod keychain;
@@ -25,6 +26,10 @@ pub use accounts::{
     check_saved_account_words, discard_new_account, has_account, import_account_words, is_account_word,
     is_listed_word, new_account_words, save_new_account, save_new_account_unchecked, saved_account_words,
     saved_account_zero_address,
+};
+pub use coin_tree::{
+    BucketNote, BucketQuery, CoinPage, CoinTreeError, PAGE_LEAVES, check_coin_pages, key_bucket_positions,
+    key_note_buckets, note_bucket_bits, page_root, tree_root_of_pages,
 };
 pub use header_sync::{
     ChainState, DeviceConditions, HeaderChainConstants, HeaderProgress, HeaderRun, HeaderStore, HeaderSync,

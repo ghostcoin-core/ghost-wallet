@@ -19,7 +19,7 @@ import {
   subscribePending,
   type PendingPayment,
 } from '../vanish/pending';
-import { paymentKit, treeAtTip, type PaymentKit } from '../vanish/use-payment';
+import { paymentKit, type PaymentKit } from '../vanish/use-payment';
 
 export const MOVE_PENDING_EVERY_MS = 10_000;
 
@@ -45,7 +45,8 @@ async function movePending(kit: PaymentKit, pending: readonly PendingPayment[]) 
         if (payment.kind === 'vanish') {
           return advance(kit.node, sequence, signVanishAgain(kit, sequence), null);
         }
-        return advance(kit.node, sequence, null, (await treeAtTip(kit)).tree);
+        // A reveal moves on the receipts of its saved attempts; no coin tree is read.
+        return advance(kit.node, sequence, null, null);
       });
     } catch (error) {
       // The payment is saved; the next move tries again, unless the account
