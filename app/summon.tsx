@@ -207,6 +207,8 @@ export default function SummonScreen() {
           paymentsChanged();
         },
         (failure) => {
+          // Only a failure before sending, or the node's refusal: a send that
+          // timed out comes back above as a payment still sending.
           setProving(false);
           setError(`The coins could not be summoned. ${failureReason(failure, kit.nodeUrl)}`);
         },

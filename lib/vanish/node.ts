@@ -2,7 +2,7 @@
 // local test chain serves. The node's answers are its report: the core checks
 // what it can (the proof, the leaves it rebuilds), and nothing here proves
 // the rest.
-import { rpcBatch, type FetchLike } from '../node/rpc';
+import { rpcBatch, SEND_TIMEOUT_MS, type FetchLike } from '../node/rpc';
 
 export type NodeBlock = {
   height: number;
@@ -219,6 +219,7 @@ export type VanishNode = {
   rawTransaction(hash: string): Promise<string>;
   nonce(address: string): Promise<bigint>;
   maxPriorityFeePerGas(): Promise<bigint>;
+  /** Sends a signed transaction, with the send time limit (`SEND_TIMEOUT_MS`), not a read's. */
   sendRaw(bytes: string): Promise<string>;
 };
 
@@ -356,7 +357,8 @@ export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
     },
     async sendRaw(bytes) {
       try {
-        const [sent] = await call([['eth_sendRawTransaction', [bytes]]]);
+        // A reveal is about 1.3 MB: its upload gets the send time limit, not a read's.
+        const [sent] = await rpcBatch(url, [['eth_sendRawTransaction', [bytes]]], fetchImpl, SEND_TIMEOUT_MS);
         return hash(sent, 'transaction hash');
       } catch (error) {
         // Sending the same bytes again is what recovery does: not an error.

@@ -4,7 +4,7 @@
 import type { CorePaymentSequence, KeyCoins } from '../../modules/ghost-core';
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { buildNetwork } from '../network/build-network';
-import { getAccountState } from '../node/rpc';
+import { getAccountState, isRefusal } from '../node/rpc';
 import { coversVanish } from './amount';
 import { readSpentMarkers, type SpentHint } from './coin-pages';
 import { spentBuffers, type CoinTree } from './coin-tree';
@@ -244,7 +244,12 @@ export const ALREADY_SUMMONED_TEXT = 'These coins were already summoned.';
 /** How a node refuses a reveal whose marker is spent. */
 const SPENT_REFUSAL = /already spent|marker (is )?(already )?(spent|used)|spent marker/i;
 
-/** Proves the reveal, saves it with its marker as identity, and sends it. */
+/**
+ * Proves the reveal, saves it with its marker as identity, and sends it. Only
+ * the node's refusal fails it: a send that timed out or lost its connection
+ * may have reached the node, so the saved payment is returned as sending, and
+ * the payment mover sends it again or finds its receipt.
+ */
 export async function startReveal(
   kit: PaymentKit,
   key: KeySource,
@@ -269,6 +274,10 @@ export async function startReveal(
   try {
     await kit.node.sendRaw(bytesToHex(sequence.markSent()));
   } catch (error) {
+    if (!isRefusal(error)) {
+      // Saved with its attempt and marked sent before it went: not lost.
+      return sequence;
+    }
     // The lookup never waits on a spent check: the node is what refuses a coin already spent.
     if (error instanceof Error && SPENT_REFUSAL.test(error.message)) {
       throw new Error(ALREADY_SUMMONED_TEXT);
