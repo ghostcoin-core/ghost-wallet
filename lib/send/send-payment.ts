@@ -19,6 +19,7 @@ import {
   type VanishBindings,
 } from '../../modules/ghost-core';
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
+import { buildNetwork } from '../network/build-network';
 import { checkedChainId } from '../vanish/actions';
 import { vanishNode } from '../vanish/node';
 import { documentPaymentFiles, paymentStore } from '../vanish/payment-store';
@@ -30,7 +31,9 @@ import {
   decodeDetails,
   encodeDetails,
   newPaymentId,
+  onOtherChain,
   recoveryTag,
+  savedChainId,
   type SendDetails,
 } from '../vanish/payments';
 import { openShared, paymentsChanged, shared } from '../vanish/pending';
@@ -113,7 +116,12 @@ export function reservedNonce(kit: Pick<PaymentKit, 'core' | 'store'>, account: 
     if (!sequence) {
       continue;
     }
-    const { identity } = sequence.record().intent;
+    const record = sequence.record();
+    if (onOtherChain(record)) {
+      // Its nonce is another chain's.
+      continue;
+    }
+    const { identity } = record.intent;
     if (
       identity.tag === 'AccountNonce' &&
       bytesToHex(identity.inner.account) === own &&
@@ -181,6 +189,8 @@ export async function startSend(kit: SendKit, send: NewSend, now: number = Date.
     maxFeePerGas: send.maxFeePerGas === null ? null : send.maxFeePerGas.toString(),
     fromHeight,
     at: now,
+    // Saved with the node out of reach too: it is signed only once a node of this chain is reached.
+    chainId: buildNetwork.chainId.toString(),
   };
   const sequence = shared(
     kit.core.PaymentSequence.start(kit.store, newPaymentId('send', now), sendIntent(send.account, nonce, details)),
@@ -196,6 +206,9 @@ export async function startSend(kit: SendKit, send: NewSend, now: number = Date.
  * fee rate the person reviewed.
  */
 export async function signSend(kit: SendKit, details: SendDetails): Promise<ArrayBuffer> {
+  if (savedChainId(details) !== buildNetwork.chainId) {
+    throw new Error('this send was saved on another network');
+  }
   const chainId = await checkedChainId(kit);
   const tip = await kit.node.tipHeight();
   const [genesis, block, priority] = await Promise.all([
@@ -279,6 +292,11 @@ async function broadcast(kit: SendKit, sequence: CorePaymentSequence) {
  */
 export async function advanceSend(kit: SendKit, sequence: CorePaymentSequence): Promise<SendAdvance> {
   const record = sequence.record();
+  if (onOtherChain(record)) {
+    // Saved for another chain: kept, never signed or sent from here.
+    const step = sequence.step();
+    return { step, status: sendStatusOf(step, hasReached(record.id)) };
+  }
   const view = await sendChainView(kit, record);
   const tag = recoveryTag(sequence.recover(view).tag);
   switch (tag) {

@@ -17,6 +17,7 @@ import type {
   VanishBindings,
 } from '../../modules/ghost-core';
 import { bytesToHex, hexToBytes } from '../../modules/ghost-core/account-lookup';
+import { GHOST_DEV_CHAIN_ID, buildNetwork } from '../network/build-network';
 import type { CoinTree } from './coin-tree';
 import type { NodeReceipt, VanishNode } from './node';
 import {
@@ -38,10 +39,14 @@ export function buffer(hex: string): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-/** What a payment needs to be rebuilt, saved in its intent. Public data only. */
+/**
+ * What a payment needs to be rebuilt, saved in its intent. Public data only.
+ * `chainId` is the chain it was made for, in decimal; one saved before it
+ * was written down is a dev-chain payment.
+ */
 export type PaymentDetails =
-  | { kind: 'vanish'; commitData: string; amountWei: string; nonce: string; at: number }
-  | { kind: 'summon' | 'claim'; amountWei: string; feeWei: string; marker: string; at: number }
+  | { kind: 'vanish'; commitData: string; amountWei: string; nonce: string; at: number; chainId?: string }
+  | { kind: 'summon' | 'claim'; amountWei: string; feeWei: string; marker: string; at: number; chainId?: string }
   | SendDetails;
 
 /**
@@ -57,7 +62,33 @@ export type SendDetails = {
   maxFeePerGas: string | null;
   fromHeight: number;
   at: number;
+  chainId?: string;
 };
+
+/**
+ * The chain a payment was saved for: the dev chain when its details do not
+ * say, null when they say something that is not a chain id.
+ */
+export function savedChainId(details: Pick<PaymentDetails, 'chainId'>): bigint | null {
+  const saved = details.chainId;
+  if (saved === undefined) {
+    return GHOST_DEV_CHAIN_ID;
+  }
+  return typeof saved === 'string' && /^[0-9]{1,20}$/.test(saved) ? BigInt(saved) : null;
+}
+
+/**
+ * Whether `record` was saved for another chain than this build's: such a
+ * payment is kept, but never signed or sent from here. A record whose
+ * details do not read is left to the core, as before.
+ */
+export function onOtherChain(record: Pick<CorePaymentRecord, 'intent'>, chainId: bigint = buildNetwork.chainId): boolean {
+  const details = decodeDetails(record.intent.details);
+  return details !== null && savedChainId(details) !== chainId;
+}
+
+/** How Home lists a payment saved for another chain. */
+export const OTHER_NETWORK_TEXT = 'Saved on another network. Not sent.';
 
 export function encodeDetails(details: PaymentDetails): ArrayBuffer {
   const bytes = new TextEncoder().encode(JSON.stringify(details));
@@ -163,6 +194,8 @@ export type Advance = {
   needsKey: boolean;
   /** `recover` asked for a backup this screen can no longer give. */
   needsBackup: boolean;
+  /** Saved for another chain than this build's: nothing was asked, signed or sent. */
+  otherNetwork?: boolean;
 };
 
 export function recoveryTag(tag: string): RecoveryTag {
@@ -184,7 +217,12 @@ export async function advance(
   rebuild: Rebuild | null,
   tree: CoinTree | null,
 ): Promise<Advance> {
-  const view = await chainSnapshot(node, sequence.record(), tree);
+  const record = sequence.record();
+  if (onOtherChain(record)) {
+    const step = sequence.step();
+    return { status: statusOfStep(step), step, needsKey: false, needsBackup: false, otherNetwork: true };
+  }
+  const view = await chainSnapshot(node, record, tree);
   const recovery = sequence.recover(view);
   const tag = recoveryTag(recovery.tag);
   const result = (needsKey = false, needsBackup = false): Advance => {
