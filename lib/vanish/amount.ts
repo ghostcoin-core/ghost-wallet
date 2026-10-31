@@ -12,3 +12,12 @@ export function parseGhostAmount(text: string): bigint | null {
   const wei = whole * WEI_PER_GHOST + fraction;
   return wei > 0n ? wei : null;
 }
+
+/**
+ * Whether a balance pays a Vanish of `amountWei` and the most it pays in fee.
+ * A balance not known yet (null) blocks nothing; a fee not known yet counts as
+ * none, as on Send.
+ */
+export function coversVanish(amountWei: bigint, balanceWei: bigint | null, feeWei: bigint | null): boolean {
+  return balanceWei === null || amountWei + (feeWei ?? 0n) <= balanceWei;
+}

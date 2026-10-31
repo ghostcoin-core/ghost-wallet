@@ -70,6 +70,7 @@ const mockLookUp = jest.fn();
 jest.mock('../../lib/vanish/actions', () => ({
   CARD_KEY: { card: true },
   minimumVanish: () => mockMinimum(),
+  vanishFee: () => new Promise(() => {}),
   startVanish: (...args: unknown[]) => mockStartVanish(...args),
   lookUpKey: (...args: unknown[]) => mockLookUp(...args),
   signVanishAgain: () => async () => ({ signed: new ArrayBuffer(1) }),

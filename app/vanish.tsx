@@ -35,12 +35,14 @@ import { PaymentExit, PaymentProgress, PhantomKeyWords } from '../components/van
 import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
 import { formatGhost } from '../lib/home/balance-format';
+import { useHome } from '../lib/home/use-home';
 import { useLayout } from '../lib/layout';
 import { failureReason } from '../lib/node/failure-reason';
 import { pickCheckPositions } from '../lib/onboarding/word-check';
+import { amountMessage } from '../lib/send/validation';
 import { useSettings } from '../lib/settings/settings';
-import { minimumVanish, signVanishAgain, startVanish } from '../lib/vanish/actions';
-import { parseGhostAmount } from '../lib/vanish/amount';
+import { minimumVanish, signVanishAgain, startVanish, vanishFee } from '../lib/vanish/actions';
+import { coversVanish, parseGhostAmount } from '../lib/vanish/amount';
 import {
   forgetShared,
   heldKey,
@@ -51,6 +53,7 @@ import {
   paymentAmountWei,
   releaseHeldVanish,
   shared,
+  stoppedVanish,
   takeReopened,
   type HeldVanish,
 } from '../lib/vanish/pending';
@@ -133,6 +136,9 @@ export default function VanishScreen() {
   const [sequence, setSequence] = useState<CorePaymentSequence | null>(resumed?.sequence ?? null);
   const [amountText, setAmountText] = useState('');
   const [minimum, setMinimum] = useState<bigint | null>(null);
+  const [fee, setFee] = useState<bigint | null>(null);
+  // The balance Send checks against: Home's snapshot, null while not known.
+  const { view: home } = useHome(nodeUrl, address);
   const [typed, setTyped] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -149,6 +155,8 @@ export default function VanishScreen() {
       setMinimum(null);
       setError(failureReason(failure, kit.nodeUrl));
     });
+    // Not known yet, the amount is checked against the balance alone, as on Send.
+    vanishFee(kit).then(setFee, () => setFee(null));
   }, [kit]);
 
   const rebuild = useMemo(() => (kit && sequence ? signVanishAgain(kit, sequence) : null), [kit, sequence]);
@@ -156,6 +164,8 @@ export default function VanishScreen() {
 
   const amount = parseGhostAmount(amountText);
   const tooSmall = amount !== null && minimum !== null && amount < minimum;
+  const balance = home.snapshot ? BigInt(home.snapshot.balanceWei) : null;
+  const tooMuch = amount !== null && !coversVanish(amount, balance, fee);
   // A Vanish opened again has no amount typed: its saved one is shown.
   const vanishAmount = amount ?? (sequence ? paymentAmountWei(sequence) : null);
 
@@ -181,7 +191,7 @@ export default function VanishScreen() {
   }
 
   async function makeKey() {
-    if (!kit || !address || amount === null || tooSmall) {
+    if (!kit || !address || amount === null || tooSmall || tooMuch) {
       return;
     }
     setBusy(true);
@@ -322,6 +332,16 @@ export default function VanishScreen() {
     router.back();
   }
 
+  /** Drops a Vanish held stopped for lack of funds: nothing of it landed, and it is never sent. */
+  function cancelStopped() {
+    if (kit && sequence && stoppedVanish(sequence.record().id) !== null) {
+      const id = sequence.record().id;
+      kit.store.remove(id);
+      forgetShared(id);
+    }
+    router.back();
+  }
+
   const unavailable = !kit || !address;
 
   return (
@@ -364,11 +384,16 @@ export default function VanishScreen() {
                   At least {formatGhost(minimum)} GHOST: four times the fee to Summon it back.
                 </Text>
               ) : null}
+              {tooMuch ? (
+                <Text style={[textStyles.body, styles.error]} testID="vanish-not-enough">
+                  {amountMessage('not-enough', balance)}
+                </Text>
+              ) : null}
             </Panel>
             <Button
               label="Make a Phantom Key"
               icon="key"
-              disabled={unavailable || busy || amount === null || tooSmall}
+              disabled={unavailable || busy || amount === null || tooSmall || tooMuch}
               onPress={() => void makeKey()}
               testID="vanish-make-key"
             />
@@ -468,7 +493,12 @@ export default function VanishScreen() {
       </Column>
       <Column>
         {phase.name === 'sending' && payment ? (
-          <PaymentProgress status={payment.status} kind="vanish" step={payment.step} error={payment.error} />
+          <PaymentProgress
+            status={payment.status}
+            kind="vanish"
+            step={payment.step}
+            error={payment.stopped ? null : payment.error}
+          />
         ) : (
           <Panel style={styles.form}>
             <Text style={textStyles.quiet}>How it works</Text>
@@ -486,7 +516,16 @@ export default function VanishScreen() {
             ) : null}
           </Panel>
         )}
-        {phase.name === 'sending' ? (
+        {phase.name === 'sending' && payment?.stopped ? (
+          <>
+            <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="vanish-stopped">
+              {payment.error} This Vanish is stopped and will not be sent. Cancel it; the Phantom Key you wrote down
+              holds nothing.
+            </Text>
+            <Button label="Cancel the Vanish" onPress={cancelStopped} testID="vanish-stopped-cancel" />
+            <TextButton label="Leave" onPress={() => router.back()} testID="vanish-leave" />
+          </>
+        ) : phase.name === 'sending' ? (
           <PaymentExit final={payment ? isFinal(payment.status) : false} onLeave={() => router.back()} testPrefix="vanish" />
         ) : null}
       </Column>

@@ -102,7 +102,9 @@ function fakeKit() {
     },
   };
   const store = { list: () => [...saved.keys()], remove: jest.fn() };
-  const kit = { core, store, node, nodeUrl: 'http://127.0.0.1:8547' } as unknown as SendKit;
+  // A Vanish is signed only when the account pays its amount and fee.
+  const balance = jest.fn(async () => 10n ** 18n);
+  const kit = { core, store, node, nodeUrl: 'http://127.0.0.1:8547', balance } as unknown as SendKit;
   return { kit, core, node, saved };
 }
 
