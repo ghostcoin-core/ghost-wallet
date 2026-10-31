@@ -17,6 +17,13 @@
 // on this phone by chain and tree, so a later lookup reads only pages whose
 // root changed: the new last page, or the pages a reorg rewrote.
 //
+// A node whose data is refused is dropped and the read starts again at the
+// next node the build lists (`readCoinTreeFrom`).
+//
+// Spent markers are read after a lookup, in the background, from every marker
+// page: a hint shown as unchecked, never waited on. A coin already spent is
+// refused by the node when it is summoned.
+//
 // No request names a coin, a leaf, a position or a marker.
 import type { CoinLeaf, CoreCoinPage, VanishBindings } from '../../modules/ghost-core';
 import { hexToBytes } from '../../modules/ghost-core/account-lookup';
@@ -320,4 +327,55 @@ export async function readCoinTree(
     tree: { height: anchor.height, hash: anchor.hash, leaves, spent: [], spentBy: {}, complete: held.length === pageCount },
     tip: anchor.height,
   };
+}
+
+export const OTHER_CHAIN_TEXT = 'the node is not on the same Ghost network';
+
+/**
+ * The coin tree from the first of `nodes` whose pages check out. A node whose
+ * data is refused (a mismatch, a malformed reply, no `ghost_` calls) or that
+ * does not answer is dropped, and the whole read starts again at the next
+ * node, from the pages this phone checked before: nothing of the refused
+ * node's data is kept. A node after the first must report `chainId`. When no
+ * node answers, the first node's error says why.
+ */
+export async function readCoinTreeFrom(
+  core: PagesCore,
+  nodes: readonly VanishNode[],
+  cache: PageCache,
+  chainId: bigint,
+  options: PageReadOptions = {},
+): Promise<{ tree: CoinTree; tip: number; node: VanishNode }> {
+  let first: unknown = null;
+  for (const [i, node] of nodes.entries()) {
+    try {
+      if (i > 0 && (await node.chainId()) !== chainId) {
+        throw new Error(OTHER_CHAIN_TEXT);
+      }
+      return { ...(await readCoinTree(core, node, cache, options)), node };
+    } catch (error) {
+      first = first ?? error;
+    }
+  }
+  throw first ?? new Error(NO_PAGES_TEXT);
+}
+
+/** What the spent markers say of a key's coins: never checked, so never a reason to block a Summon. */
+export type SpentHint = {
+  checked: false;
+  /** True when the markers show the coins spent, false when not, null when they could not be read. */
+  spent: boolean | null;
+};
+
+/**
+ * The spent markers of the coin tree as of block `anchorHash`, read whole
+ * from the marker pages: a hint, with no root to check it against. A failure
+ * gives no markers. The key's own marker is never asked about.
+ */
+export async function readSpentMarkers(node: VanishNode, anchorHash: string): Promise<string[] | null> {
+  try {
+    return await node.markerPages(TREE_INDEX, anchorHash);
+  } catch {
+    return null;
+  }
 }

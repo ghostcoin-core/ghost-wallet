@@ -6,7 +6,8 @@ import { useEffect, useRef, useState } from 'react';
 
 import { vanishCore, type CorePaymentSequence, type CorePaymentStore, type VanishBindings } from '../../modules/ghost-core';
 import { failureReason } from '../node/failure-reason';
-import { devicePageCache, readCoinTree, type PageCache, type PageReadOptions } from './coin-pages';
+import { buildNetwork, type BuildNetwork } from '../network/build-network';
+import { devicePageCache, readCoinTreeFrom, type PageCache, type PageReadOptions } from './coin-pages';
 import type { CoinTree } from './coin-tree';
 import { vanishNode, type VanishNode } from './node';
 import { advance, type Rebuild } from './payments';
@@ -25,7 +26,14 @@ export type PaymentKit = {
   balance?: (account: string, blockHash: string) => Promise<bigint>;
   /** Where checked coin tree pages are kept; this phone's, by chain, when not set. */
   pages?: PageCache;
+  /** The nodes the coin tree is read from when `node`'s pages are refused, in order. */
+  fallbackNodes?: readonly VanishNode[];
 };
+
+/** The build's other nodes, in its order: where the coin tree is read when `nodeUrl`'s is refused. */
+export function fallbackNodeUrls(nodeUrl: string, network: Pick<BuildNetwork, 'nodeUrls'> = buildNetwork): string[] {
+  return network.nodeUrls.filter((url) => url !== nodeUrl);
+}
 
 /** The core, the store and the node; null in a build without the native core. */
 export function paymentKit(nodeUrl: string): PaymentKit | null {
@@ -35,7 +43,13 @@ export function paymentKit(nodeUrl: string): PaymentKit | null {
     if (!files) {
       return null;
     }
-    return { core, store: paymentStore(core, files), node: vanishNode(nodeUrl), nodeUrl };
+    return {
+      core,
+      store: paymentStore(core, files),
+      node: vanishNode(nodeUrl),
+      nodeUrl,
+      fallbackNodes: fallbackNodeUrls(nodeUrl).map((url) => vanishNode(url)),
+    };
   } catch {
     return null;
   }
@@ -43,14 +57,17 @@ export function paymentKit(nodeUrl: string): PaymentKit | null {
 
 /**
  * The coin tree at the node's tip, from its checked pages, for a lookup or a
- * proof on chain `chainId` (lib/vanish/coin-pages.ts). No block is read.
+ * proof on chain `chainId` (lib/vanish/coin-pages.ts), with the node that
+ * served it: the kit's node, or the next one when its pages are refused. No
+ * block is read.
  */
 export async function treeAtTip(
   kit: PaymentKit,
   chainId: bigint,
   options: PageReadOptions = {},
-): Promise<{ tree: CoinTree; tip: number }> {
-  return readCoinTree(kit.core, kit.node, kit.pages ?? devicePageCache(chainId), options);
+): Promise<{ tree: CoinTree; tip: number; node: VanishNode }> {
+  const nodes = [kit.node, ...(kit.fallbackNodes ?? [])];
+  return readCoinTreeFrom(kit.core, nodes, kit.pages ?? devicePageCache(chainId), chainId, options);
 }
 
 export type PaymentView = {

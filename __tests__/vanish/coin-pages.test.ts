@@ -12,7 +12,9 @@ import {
   NO_PAGES_TEXT,
   PAGE_SET,
   pageSetsFor,
+  OTHER_CHAIN_TEXT,
   readCoinTree,
+  readCoinTreeFrom,
   readSavedPages,
   type PageCache,
   type PagesCore,
@@ -93,7 +95,7 @@ type Call = { method: string; params: unknown[] };
 
 function fakeNode(
   initial: Entry[],
-  options: { tamperPage?: number; wrongRoot?: boolean; noGhost?: boolean } = {},
+  options: { tamperPage?: number; wrongRoot?: boolean; noGhost?: boolean; markers?: string[]; chainId?: bigint; down?: boolean } = {},
 ) {
   let entries = initial;
   const requests: Call[][] = [];
@@ -109,13 +111,30 @@ function fakeNode(
       if (options.noGhost) {
         return { error: { code: -32601, message: `the method ${method} does not exist/is not available` } };
       }
+      if (params[0] === 'coin-markers') {
+        // The marker tree's shape: pages of 32-byte markers, with no salt and no note.
+        const markers = options.markers ?? [];
+        const markerPages = Math.ceil(markers.length / PAGE);
+        if (params[1] !== '0x0' || params[params.length - 1] !== anchorHash) {
+          return refuse('unexpected tree or anchor');
+        }
+        if (method === 'ghost_getPageRoots') {
+          return { result: Array.from({ length: markerPages }, (_, p) => pageRootOf(markers.slice(p * PAGE, (p + 1) * PAGE))) };
+        }
+        if (method === 'ghost_getTreePage') {
+          const page = parseInt(params[2] as string, 16);
+          const onPage = markers.slice(page * PAGE, (page + 1) * PAGE);
+          return { result: { kind: 'coin-markers', treeIndex: '0x0', page: q(page), filled: q(onPage.length), entries: onPage.map((leaf) => ({ leaf })) } };
+        }
+        return refuse('the marker tree serves pages and page roots only');
+      }
       if (params[0] !== 'coin' || params[1] !== '0x0' || params[params.length - 1] !== anchorHash) {
         return refuse('unexpected tree or anchor');
       }
     }
     switch (method) {
       case 'eth_chainId':
-        return { result: q(Number(buildNetwork.chainId)) };
+        return { result: q(Number(options.chainId ?? buildNetwork.chainId)) };
       case 'eth_getBlockByNumber': {
         const height = params[0] === 'latest' ? TIP : parseInt(params[0] as string, 16);
         const coinTreeRoot = options.wrongRoot ? hex32(1, 9) : treeRootOf(roots());
@@ -162,6 +181,9 @@ function fakeNode(
   const fetchImpl = jest.fn(async (_url: string, init: RequestInit) => {
     const calls = JSON.parse(init.body as string) as (Call & { id: number })[];
     requests.push(calls.map(({ method, params }) => ({ method, params })));
+    if (options.down) {
+      throw new Error('Network request failed');
+    }
     return { ok: true, status: 200, json: async () => calls.map((call) => ({ jsonrpc: '2.0', id: call.id, ...answer(call) })) } as Response;
   });
 
@@ -355,6 +377,64 @@ describe("finding a key's coins from the node's coin tree pages", () => {
   });
 });
 
+describe('trying the next node when one is refused', () => {
+  const CHAIN = buildNetwork.chainId;
+
+  it('reads the next node when a page does not match its root, and keeps only what checked out', async () => {
+    const leaves = treeOf(10_000, [9_500]);
+    const cache = memoryCache();
+    const bad = fakeNode(leaves, { tamperPage: 2 });
+    const good = fakeNode(leaves);
+    const { tree, node } = await readCoinTreeFrom(fakeCore(), [bad.node, good.node], cache, CHAIN, { keyText: OURS });
+    expect(node).toBe(good.node);
+    expect(found(tree.leaves)).toBe('found');
+    expect(cache.saves).toBe(1);
+    // The kept pages are the good node's.
+    expect(cache.saved?.pages.find((page) => page.page === 2)?.entries[5].leaf).toBe(leaves[2 * PAGE + 5].leaf);
+    // The next node was asked its chain before its pages were used.
+    expect(good.methods()[0]).toBe('eth_chainId');
+    noBlockScan([...bad.methods(), ...good.methods()]);
+  });
+
+  it("reads the next node when the page roots do not match the header's coinTreeRoot", async () => {
+    const cache = memoryCache();
+    const bad = fakeNode(treeOf(5_000, [10]), { wrongRoot: true });
+    const good = fakeNode(treeOf(5_000, [10]));
+    const { node } = await readCoinTreeFrom(fakeCore(), [bad.node, good.node], cache, CHAIN, {});
+    expect(node).toBe(good.node);
+    expect(cache.saves).toBe(1);
+  });
+
+  it('reads the next node when one does not serve pages or does not answer', async () => {
+    const leaves = treeOf(5_000, [10]);
+    const none = fakeNode(leaves, { noGhost: true });
+    const down = fakeNode(leaves, { down: true });
+    const good = fakeNode(leaves);
+    const { node } = await readCoinTreeFrom(fakeCore(), [none.node, down.node, good.node], memoryCache(), CHAIN, {});
+    expect(node).toBe(good.node);
+  });
+
+  it('never uses a next node on another chain, and says why the first node was refused', async () => {
+    const leaves = treeOf(5_000, [10]);
+    const cache = memoryCache();
+    const bad = fakeNode(leaves, { tamperPage: 0 });
+    const elsewhere = fakeNode(leaves, { chainId: CHAIN + 1n });
+    await expect(readCoinTreeFrom(fakeCore(), [bad.node, elsewhere.node], cache, CHAIN, {})).rejects.toThrow(MISMATCH_TEXT);
+    expect(elsewhere.methods()).toEqual(['eth_chainId']);
+    expect(cache.saves).toBe(0);
+    expect(OTHER_CHAIN_TEXT).not.toMatch(/0x/);
+  });
+
+  it("does not ask the next node when the first one's pages check out", async () => {
+    const leaves = treeOf(5_000, [10]);
+    const first = fakeNode(leaves);
+    const next = fakeNode(leaves);
+    const { node } = await readCoinTreeFrom(fakeCore(), [first.node, next.node], memoryCache(), CHAIN, {});
+    expect(node).toBe(first.node);
+    expect(next.requests).toHaveLength(0);
+  });
+});
+
 describe('page sets and kept pages', () => {
   it('asks a small tree for every page and a large one for 8 distinct ascending pages', () => {
     expect(pageSetsFor([1], 3)).toEqual([[0, 1, 2]]);
@@ -383,10 +463,16 @@ describe('page sets and kept pages', () => {
 });
 
 describe('Summon and Claim on the pages', () => {
-  function kit(fake: ReturnType<typeof fakeNode>) {
+  /** The fake key's coin's spent marker, as the core would derive it. */
+  const OUR_MARKER = hex32(4242, 5);
+
+  function kit(fake: ReturnType<typeof fakeNode>, fallbackNodes: ReturnType<typeof fakeNode>[] = []) {
     const core = {
       ...fakeCore(),
-      findKeyCoins: jest.fn((_key: string, _chain: bigint, leaves: CoinLeaf[]) => ({ status: found(leaves), amountWei: '9' })),
+      findKeyCoins: jest.fn((_key: string, _chain: bigint, leaves: CoinLeaf[], spent: ArrayBuffer[]) => ({
+        status: spent.map(hexOf).includes(OUR_MARKER) ? 'spent' : found(leaves),
+        amountWei: '9',
+      })),
       proveKeyReveal: jest.fn((_key: string, _request: unknown, leaves: CoinLeaf[]) => ({
         transactionHash: new ArrayBuffer(32),
         marker: new Uint8Array(32).fill(1).buffer,
@@ -401,9 +487,62 @@ describe('Summon and Claim on the pages', () => {
     };
     return {
       core,
-      kit: { core: core as unknown as VanishBindings, node: fake.node, nodeUrl: URL, store: {} as never, pages: memoryCache() } satisfies PaymentKit,
+      kit: {
+        core: core as unknown as VanishBindings,
+        node: fake.node,
+        nodeUrl: URL,
+        store: {} as never,
+        pages: memoryCache(),
+        fallbackNodes: fallbackNodes.map((other) => other.node),
+      } satisfies PaymentKit,
     };
   }
+
+  it('looks a key up from the next node when the first one is refused', async () => {
+    const leaves = treeOf(10_000, [9_500]);
+    const bad = fakeNode(leaves, { tamperPage: 2 });
+    const good = fakeNode(leaves);
+    const { kit: tools } = kit(bad, [good]);
+    const lookup = await lookUpKey(tools, OURS);
+    expect(lookup.status).toBe('found');
+    expect(good.methods()).toContain('ghost_getPageSet');
+
+    // A proof's tree comes from the next node too.
+    await proveReveal(tools, OURS, `0x${'55'.repeat(20)}`, null);
+    expect(good.methods().filter((method) => method === 'ghost_getPageRoots').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('hints in the background, unchecked, that the coins were spent, never naming the marker or holding the lookup', async () => {
+    const other = Array.from({ length: 5 }, (_, i) => hex32(i + 1, 6));
+    const fake = fakeNode(treeOf(5_000, [10]), { markers: [...other, OUR_MARKER] });
+    const { kit: tools } = kit(fake);
+    const lookup = await lookUpKey(tools, OURS);
+    // The lookup itself never waits on the markers: Summon stays open.
+    expect(lookup.status).toBe('found');
+    expect(lookup.spentHint).toBeDefined();
+    const hint = await lookup.spentHint;
+    expect(hint).toEqual({ checked: false, spent: true });
+    expect(lookup.tree.spent).toEqual([...other, OUR_MARKER]);
+    expect(lookup.tree.spentBy).toEqual({});
+    // Every marker page is read; no request names the key's marker.
+    const pageReads = fake.requests.flat().filter((call) => call.method === 'ghost_getTreePage');
+    expect(pageReads.map((call) => call.params.slice(0, 3))).toEqual([['coin-markers', '0x0', '0x0']]);
+    expect(fake.bodies()).not.toContain(OUR_MARKER);
+  });
+
+  it('hints unspent when the markers do not hold the coin, and no hint when they cannot be read', async () => {
+    const fake = fakeNode(treeOf(5_000, [10]), { markers: [hex32(1, 6)] });
+    const lookup = await lookUpKey(kit(fake).kit, OURS);
+    await expect(lookup.spentHint).resolves.toEqual({ checked: false, spent: false });
+
+    const broken = fakeNode(treeOf(5_000, [10]));
+    const tools = kit(broken).kit;
+    const failing = { ...tools, node: { ...broken.node, markerPages: async () => Promise.reject(new Error('down')) } };
+    const without = await lookUpKey(failing, OURS);
+    expect(without.status).toBe('found');
+    await expect(without.spentHint).resolves.toEqual({ checked: false, spent: null });
+    expect(without.tree.spent).toEqual([]);
+  });
 
   it('looks a typed key up with no block scan, and proves over every leaf of the tree', async () => {
     const fake = fakeNode(treeOf(40_000, [33_000]));
