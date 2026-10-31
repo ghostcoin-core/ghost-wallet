@@ -95,7 +95,17 @@ type Call = { method: string; params: unknown[] };
 
 function fakeNode(
   initial: Entry[],
-  options: { tamperPage?: number; wrongRoot?: boolean; noGhost?: boolean; markers?: string[]; chainId?: bigint; down?: boolean } = {},
+  options: {
+    tamperPage?: number;
+    /** A page sent with its genuine leaves but every note zeroed: no root covers notes. */
+    zeroNotesPage?: number;
+    wrongRoot?: boolean;
+    noGhost?: boolean;
+    markers?: string[];
+    chainId?: bigint;
+    down?: boolean;
+    url?: string;
+  } = {},
 ) {
   let entries = initial;
   const requests: Call[][] = [];
@@ -157,7 +167,11 @@ function fakeNode(
             page: q(page),
             filled: q(pageEntries(page).length),
             entries: pageEntries(page).map((entry, i) =>
-              page === options.tamperPage && i === 5 ? { ...entry, leaf: hex32(99_999) } : entry,
+              page === options.tamperPage && i === 5
+                ? { ...entry, leaf: hex32(99_999) }
+                : page === options.zeroNotesPage
+                  ? { ...entry, note: `0x${'00'.repeat(156)}` }
+                  : entry,
             ),
           })),
         };
@@ -188,7 +202,7 @@ function fakeNode(
   });
 
   return {
-    node: vanishNode(URL, fetchImpl),
+    node: vanishNode(options.url ?? URL, fetchImpl),
     requests,
     methods: () => requests.flat().map((call) => call.method),
     grow(more: Entry[]) {
@@ -208,6 +222,13 @@ function memoryCache(): PageCache & { saved: SavedPages | null; saves: number } 
       cache.saves += 1;
     },
   };
+  return cache;
+}
+
+/** The cache as the app finds it after a restart: read back from the saved file. */
+function afterRestart(before: { saved: SavedPages | null }) {
+  const cache = memoryCache();
+  cache.saved = readSavedPages(JSON.parse(JSON.stringify(before.saved)));
   return cache;
 }
 
@@ -390,7 +411,7 @@ describe('trying the next node when one is refused', () => {
     expect(found(tree.leaves)).toBe('found');
     expect(cache.saves).toBe(1);
     // The kept pages are the good node's.
-    expect(cache.saved?.pages.find((page) => page.page === 2)?.entries[5].leaf).toBe(leaves[2 * PAGE + 5].leaf);
+    expect(cache.saved?.pages.find((page) => page.page === 2)?.leaves[5]).toBe(leaves[2 * PAGE + 5].leaf);
     // The next node was asked its chain before its pages were used.
     expect(good.methods()[0]).toBe('eth_chainId');
     noBlockScan([...bad.methods(), ...good.methods()]);
@@ -452,13 +473,85 @@ describe('page sets and kept pages', () => {
 
   it('reads back what it saved and nothing else', () => {
     const saved: SavedPages = {
+      version: 2,
       roots: [hex32(1)],
-      pages: [{ page: 0, root: hex32(1), filled: 1, entries: [{ leaf: hex32(2), note: noteWith(1, '00') }] }],
+      pages: [
+        {
+          page: 0,
+          root: hex32(1),
+          filled: 2,
+          leaves: [hex32(2), hex32(3)],
+          payload: { source: URL, notes: [noteWith(1, '00'), noteWith(2, '00')], salts: [null, `0x${'33'.repeat(16)}`] },
+        },
+      ],
     };
     expect(readSavedPages(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
     expect(readSavedPages(null)).toBeNull();
-    expect(readSavedPages({ roots: ['nope'], pages: [] })).toBeNull();
-    expect(readSavedPages({ roots: [], pages: [{ page: 0, root: hex32(1), filled: 2, entries: [] }] })).toBeNull();
+    expect(readSavedPages({ version: 2, roots: ['nope'], pages: [] })).toBeNull();
+    expect(readSavedPages({ ...saved, pages: [{ ...saved.pages[0], filled: 3 }] })).toBeNull();
+    expect(readSavedPages({ ...saved, pages: [{ ...saved.pages[0], payload: { ...saved.pages[0].payload, source: undefined } }] })).toBeNull();
+    // A file of the old layout, whose notes were kept as if a root covered them, is dropped whole.
+    const old = { roots: [hex32(1)], pages: [{ page: 0, root: hex32(1), filled: 1, entries: [{ leaf: hex32(2), note: noteWith(1, '00') }] }] };
+    expect(readSavedPages(old)).toBeNull();
+  });
+});
+
+describe('notes and salts kept on the phone, which no root covers', () => {
+  const EVIL = 'http://evil.test:8545';
+  const HONEST = 'http://honest.test:8545';
+  const CHAIN = buildNetwork.chainId;
+
+  it("never lets one node's wrong notes hide a coin from an honest node, even after a restart", async () => {
+    // Genuine leaves, roots and header, but the coin's page sent with zeroed notes: it checks out.
+    const leaves = treeOf(5_000, [4_200]);
+    const evil = fakeNode(leaves, { url: EVIL, zeroNotesPage: 1 });
+    const cache = memoryCache();
+    const { tree: poisoned } = await readCoinTree(fakeCore(), evil.node, cache, { keyText: OURS });
+    expect(found(poisoned.leaves)).toBe('not-found');
+    // What it sent is kept as that node's word, apart from the checked leaves.
+    const kept = cache.saved?.pages.find((page) => page.page === 1);
+    expect(kept?.payload.source).toBe(EVIL);
+    expect(kept?.leaves[4_200 - PAGE]).toBe(leaves[4_200].leaf);
+
+    // After a restart, an honest node is read for the notes, not the kept ones.
+    const restarted = afterRestart(cache);
+    expect(restarted.saved?.pages).toHaveLength(2);
+    const honest = fakeNode(leaves, { url: HONEST });
+    const { tree, node } = await readCoinTreeFrom(fakeCore(), [honest.node], restarted, CHAIN, { keyText: OURS });
+    expect(node).toBe(honest.node);
+    expect(found(tree.leaves)).toBe('found');
+    expect(honest.methods()).toContain('ghost_getPageSet');
+    // The honest node's notes replace the wrong ones, though the roots did not change.
+    expect(restarted.saved?.pages.every((page) => page.payload.source === HONEST)).toBe(true);
+    expect(restarted.saved?.pages.find((page) => page.page === 1)?.payload.notes[4_200 - PAGE]).toBe(leaves[4_200].note);
+
+    // And the next lookup on the honest node uses them again: the header and the roots only.
+    honest.requests.length = 0;
+    const again = await readCoinTree(fakeCore(), honest.node, afterRestart(restarted), { keyText: OURS });
+    expect(found(again.tree.leaves)).toBe('found');
+    expect(honest.methods()).toEqual(['eth_getBlockByNumber', 'ghost_getPageRoots']);
+  });
+
+  it('reads the notes again when a lookup on kept notes finds nothing, even from the same node', async () => {
+    const leaves = treeOf(5_000, [4_200]);
+    const cache = memoryCache();
+    // The node at this address once sent wrong notes, and now sends the right ones.
+    await readCoinTree(fakeCore(), fakeNode(leaves, { url: HONEST, zeroNotesPage: 1 }).node, cache, { keyText: OURS });
+    const now = fakeNode(leaves, { url: HONEST });
+    const restarted = afterRestart(cache);
+    const core = {
+      ...fakeCore(),
+      findKeyCoins: jest.fn((_key: string, _chain: bigint, leaves_: CoinLeaf[]) => ({ status: found(leaves_), amountWei: '9' })),
+      feeWindow: (tip: bigint) => ({ referenceHeight: tip - 1n, validUntil: tip + 3n }),
+      revealFeeWei: () => '1',
+    };
+    const tools = { core: core as unknown as VanishBindings, node: now.node, nodeUrl: HONEST, store: {} as never, pages: restarted } satisfies PaymentKit;
+    const lookup = await lookUpKey(tools, OURS);
+    expect(lookup.status).toBe('found');
+    // The kept notes found nothing; the notes read again found the coin.
+    expect(core.findKeyCoins.mock.results.slice(0, 2).map((result) => result.value.status)).toEqual(['not-found', 'found']);
+    expect(now.methods()).toContain('ghost_getPageSet');
+    expect(restarted.saved?.pages.find((page) => page.page === 1)?.payload.notes[4_200 - PAGE]).toBe(leaves[4_200].note);
   });
 });
 

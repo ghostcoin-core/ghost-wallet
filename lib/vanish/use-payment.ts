@@ -7,8 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { vanishCore, type CorePaymentSequence, type CorePaymentStore, type VanishBindings } from '../../modules/ghost-core';
 import { failureReason } from '../node/failure-reason';
 import { buildNetwork, type BuildNetwork } from '../network/build-network';
-import { devicePageCache, readCoinTreeFrom, type PageCache, type PageReadOptions } from './coin-pages';
-import type { CoinTree } from './coin-tree';
+import { devicePageCache, readCoinTreeFrom, type CoinTreeRead, type PageCache, type PageReadOptions } from './coin-pages';
 import { vanishNode, type VanishNode } from './node';
 import { advance, type Rebuild } from './payments';
 import { documentPaymentFiles, paymentStore } from './payment-store';
@@ -65,7 +64,7 @@ export async function treeAtTip(
   kit: PaymentKit,
   chainId: bigint,
   options: PageReadOptions = {},
-): Promise<{ tree: CoinTree; tip: number; node: VanishNode }> {
+): Promise<CoinTreeRead & { node: VanishNode }> {
   const nodes = [kit.node, ...(kit.fallbackNodes ?? [])];
   return readCoinTreeFrom(kit.core, nodes, kit.pages ?? devicePageCache(chainId), chainId, options);
 }
