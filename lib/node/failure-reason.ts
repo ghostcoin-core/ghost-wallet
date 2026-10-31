@@ -3,6 +3,8 @@
 // should know whether the node is out of reach, the account is short of test
 // GHOST, or the node refused it for another reason it gave.
 
+import type { NodeError } from './rpc';
+
 const NOT_ENOUGH = 'Not enough test GHOST in this account for the amount and its fee. Tap Get test GHOST on Home.';
 
 function rawMessage(error: unknown): string {
@@ -21,10 +23,21 @@ function sentence(text: string): string {
   return /[.!?]$/.test(capital) ? capital : `${capital}.`;
 }
 
-/** The reason, as one or two sentences the screen can show as they are. */
-export function failureReason(error: unknown, nodeUrl: string): string {
+/** The node the error came from, when it says (lib/node/rpc.ts `fromNode`). */
+function failedNode(error: unknown): string | null {
+  const url = error instanceof Error ? (error as NodeError).nodeUrl : undefined;
+  return typeof url === 'string' && url !== '' ? url : null;
+}
+
+/**
+ * The reason, as one or two sentences the screen can show as they are. The
+ * node named is the one the error came from, which may be a backup node;
+ * `settingsUrl` only when the error does not say.
+ */
+export function failureReason(error: unknown, settingsUrl: string): string {
   const message = rawMessage(error).trim();
   const lower = message.toLowerCase();
+  const nodeUrl = failedNode(error) ?? settingsUrl;
   const node = `the test node at ${nodeUrl}`;
 
   if (
