@@ -6,6 +6,7 @@ import SummonScreen from '../../app/summon';
 import VanishScreen from '../../app/vanish';
 import { PaymentProgress } from '../../components/vanish-ui';
 import { failureReason } from '../../lib/node/failure-reason';
+import { fromNode, rpcBatch, type FetchLike } from '../../lib/node/rpc';
 
 const NODE = 'http://192.168.1.36:8547';
 
@@ -137,5 +138,40 @@ describe('a failed Summon lookup', () => {
     expect(screen.getByTestId('summon-error')).toHaveTextContent(
       /^The coins could not be looked up\. Can't reach the test node at http:\/\/192\.168\.1\.36:8547\./,
     );
+  });
+
+  it('names the backup node when it was the backup node that timed out', async () => {
+    const backup = 'http://backup-node.test:8545';
+    const silent: FetchLike = (_url, init) =>
+      new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(new Error('Aborted'))));
+    const timedOut = await rpcBatch(backup, [['eth_chainId', []]], silent, 5).catch((error: unknown) => error);
+    mockMinimum = async () => 10n ** 17n;
+    mockLookUp.mockRejectedValue(timedOut);
+    renderScreen(SummonScreen);
+    await act(async () => {});
+
+    fireEvent.changeText(screen.getByTestId('summon-key'), Array.from({ length: 24 }, () => 'abandon').join(' '));
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('summon-find'));
+    });
+
+    const message = screen.getByTestId('summon-error');
+    expect(message).toHaveTextContent(
+      `The coins could not be looked up. The test node at ${backup} did not answer in time. Check that it is running and try again.`,
+    );
+    expect(message).not.toHaveTextContent(NODE);
+  });
+});
+
+describe('a failed Vanish on a backup node', () => {
+  it('names the node that failed, not the node in Settings', async () => {
+    const backup = 'http://backup-node.test:8545';
+    mockMinimum = async () => {
+      throw fromNode(new Error('the node answered HTTP 503'), backup);
+    };
+    renderScreen(VanishScreen);
+    await act(async () => {});
+
+    expect(screen.getByTestId('vanish-error')).toHaveTextContent(`The test node at ${backup} answered with an error (HTTP 503).`);
   });
 });

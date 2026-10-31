@@ -30,6 +30,7 @@
 // No request names a coin, a leaf, a position or a marker.
 import type { CoinLeaf, CoreCoinPage, VanishBindings } from '../../modules/ghost-core';
 import { hexToBytes } from '../../modules/ghost-core/account-lookup';
+import { fromNode } from '../node/rpc';
 import { jsonFile } from '../storage';
 import type { CoinTree } from './coin-tree';
 import type { NodeAnchor, NodeBucketEntry, NodePage, NodePageEntry, VanishNode } from './node';
@@ -410,7 +411,7 @@ export const OTHER_CHAIN_TEXT = 'the node is not on the same Ghost network';
  * does not answer is dropped, and the whole read starts again at the next
  * node, from the pages this phone checked before: nothing of the refused
  * node's data is kept. A node after the first must report `chainId`. When no
- * node answers, the first node's error says why.
+ * node answers, the first node's error says why, and names that node.
  */
 export async function readCoinTreeFrom(
   core: PagesCore,
@@ -427,7 +428,7 @@ export async function readCoinTreeFrom(
       }
       return { ...(await readCoinTree(core, node, cache, options)), node };
     } catch (error) {
-      first = first ?? error;
+      first = first ?? fromNode(error, node.url);
     }
   }
   throw first ?? new Error(NO_PAGES_TEXT);

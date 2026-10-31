@@ -20,6 +20,8 @@ import {
   type PagesCore,
   type SavedPages,
 } from '../../lib/vanish/coin-pages';
+import { failureReason } from '../../lib/node/failure-reason';
+import { failedNodeUrl } from '../../lib/node/rpc';
 import { vanishNode } from '../../lib/vanish/node';
 import type { PaymentKit } from '../../lib/vanish/use-payment';
 import { buildNetwork } from '../../lib/network/build-network';
@@ -444,6 +446,25 @@ describe('trying the next node when one is refused', () => {
     expect(elsewhere.methods()).toEqual(['eth_chainId']);
     expect(cache.saves).toBe(0);
     expect(OTHER_CHAIN_TEXT).not.toMatch(/0x/);
+  });
+
+  it('names the node whose pages were refused, and the backup node when it times out', async () => {
+    const leaves = treeOf(5_000, [10]);
+    const SETTINGS = 'http://settings.test:8545';
+    const BACKUP = 'http://backup.test:8545';
+    const bad = fakeNode(leaves, { url: SETTINGS, tamperPage: 0 });
+    const down = fakeNode(leaves, { url: BACKUP, down: true });
+    const refused = await readCoinTreeFrom(fakeCore(), [bad.node, down.node], memoryCache(), CHAIN, {}).catch((error: unknown) => error);
+    expect(refused).toEqual(new Error(MISMATCH_TEXT));
+    expect(failedNodeUrl(refused)).toBe(SETTINGS);
+
+    // A backup node read first (the Settings node not in the list) is the one named.
+    const backup = vanishNode(BACKUP, async () => {
+      throw new Error('the request timed out');
+    });
+    const timedOut = await readCoinTreeFrom(fakeCore(), [backup], memoryCache(), CHAIN, {}).catch((error: unknown) => error);
+    expect(failedNodeUrl(timedOut)).toBe(BACKUP);
+    expect(failureReason(timedOut, SETTINGS)).toMatch(/^Can't reach the test node at http:\/\/backup\.test:8545\./);
   });
 
   it("does not ask the next node when the first one's pages check out", async () => {
