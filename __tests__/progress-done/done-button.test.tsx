@@ -112,7 +112,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   const open = device === 'iPhone Duo open';
 
   describe.each(SCREENS)('the %s progress', (_name, Screen, prefix) => {
-    it.each(['proving', 'sent', 'in-block'] as const)('has no Done while %s: it says the payment goes on and offers Leave', (status) => {
+    it.each(['proving', 'sent'] as const)('has no Done while %s: it says the payment goes on and offers Leave', (status) => {
       mockStatus = status;
       renderOn(device, Screen);
       expect(sideBySide(`${prefix}-screen-content`)).toBe(open);
@@ -129,7 +129,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
       expect(mockBack).toHaveBeenCalledTimes(1);
     });
 
-    it.each(['settled', 'failed'] as const)('shows Done once %s, and no longer the leave line', (status) => {
+    it.each(['in-block', 'settled', 'failed'] as const)('shows Done once %s, and no longer the leave line', (status) => {
       mockStatus = status;
       renderOn(device, Screen);
       expect(screen.getByTestId('payment-progress')).toBeOnTheScreen();
@@ -139,11 +139,11 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
       expect(mockBack).toHaveBeenCalledTimes(1);
     });
 
-    it('swaps Leave for Done when the payment settles while the screen shows', () => {
-      mockStatus = 'in-block';
+    it('swaps Leave for Done when the payment reaches a block while the screen shows', () => {
+      mockStatus = 'sent';
       const view = renderOn(device, Screen);
       expect(screen.queryByTestId(`${prefix}-done`)).toBeNull();
-      mockStatus = 'settled';
+      mockStatus = 'in-block';
       act(() => {
         view.rerender(
           <SafeAreaProvider

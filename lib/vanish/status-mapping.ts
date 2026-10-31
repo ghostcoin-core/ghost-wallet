@@ -122,6 +122,42 @@ export function progressRows(status: PaymentStatus, kind: RevealKind): ProgressR
   }));
 }
 
+/**
+ * How many blocks deep a payment is before it shows as Settled. Display only:
+ * the rule itself is the core's `SETTLE_CONFIRMATIONS`
+ * (`core/src/step_sequence.rs`), and the two must agree.
+ */
+export const SETTLE_CONFIRMATIONS = 3;
+
+/** How far settling is, `confirmations` blocks deep. */
+export function settlingLine(confirmations: number): string {
+  return `Settling: ${confirmations} of ${SETTLE_CONFIRMATIONS} confirmations`;
+}
+
+/**
+ * Whether the screen is done with the payment: once it is in a block the
+ * person may go (settling goes on, and Activity shows Settled later), and once
+ * it settled or failed. Before the first block it is not.
+ */
+export function screenDone(status: PaymentStatus): boolean {
+  return status === 'in-block' || isFinal(status);
+}
+
+/**
+ * The success line once the coins have arrived: from the first block, as from
+ * Settled. Null before the first block, and once failed.
+ */
+export function arrivedText(status: PaymentStatus, kind: RevealKind): string | null {
+  switch (status) {
+    case 'in-block':
+      return kind === 'vanish' ? 'The coins are in the Phantom Key.' : 'The coins are in your account.';
+    case 'settled':
+      return kind === 'vanish' ? 'The coins are in the Phantom Key.' : 'The coins are back in your account.';
+    default:
+      return null;
+  }
+}
+
 /** The line under the progress. */
 export function statusDetail(status: PaymentStatus, kind: RevealKind, step?: number | string): string {
   switch (status) {
@@ -130,10 +166,12 @@ export function statusDetail(status: PaymentStatus, kind: RevealKind, step?: num
         ? 'Signing the Vanish with your account.'
         : 'Making the proof on this phone. This can take a minute.';
     case 'sent':
-    case 'in-block':
       return 'Safe to close the app. It never pays twice.';
+    case 'in-block':
+      // In a block is one confirmation; no live count is asked of the node.
+      return kind === 'vanish' ? `${arrivedText(status, kind)} ${settlingLine(1)}` : settlingLine(1);
     case 'settled':
-      return kind === 'vanish' ? 'The coins are in the Phantom Key.' : 'The coins are back in your account.';
+      return arrivedText(status, kind) ?? '';
     case 'failed':
       return step !== undefined && stepName(step) === 'Conflicted'
         ? 'Another payment used these coins first. Nothing more is sent.'
