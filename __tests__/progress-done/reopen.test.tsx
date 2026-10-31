@@ -65,6 +65,7 @@ const mockStartVanish = jest.fn(async () => {
 jest.mock('../../lib/vanish/actions', () => ({
   CARD_KEY: { card: true },
   minimumVanish: () => new Promise(() => {}),
+  vanishFee: () => new Promise(() => {}),
   startVanish: () => mockStartVanish(),
   lookUpKey: jest.fn(),
   signVanishAgain: () => async () => ({ signed: new ArrayBuffer(1) }),
@@ -80,6 +81,8 @@ jest.mock('../../modules/ghost-nfc', () => ({
 }));
 
 jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, write: async () => {} }) }));
+// The Vanish screen's balance is not known here.
+jest.mock('../../lib/home/read-account', () => ({ readAccountZero: () => new Promise(() => {}) }));
 const mockBack = jest.fn();
 jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: mockBack }) }));
 

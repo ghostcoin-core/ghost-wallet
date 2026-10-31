@@ -31,6 +31,7 @@ const mockLookUp = jest.fn(async () => ({ status: 'found', amountWei: '200000000
 jest.mock('../../lib/vanish/actions', () => ({
   CARD_KEY: { card: true },
   minimumVanish: async () => 10n ** 17n,
+  vanishFee: async () => 1000n,
   startVanish: async () => ({ sequence: mockSequence, words: [...mockKeyWords] }),
   lookUpKey: (...args: unknown[]) => mockLookUp(...(args as [])),
   signVanishAgain: () => async () => ({ signed: new ArrayBuffer(1) }),

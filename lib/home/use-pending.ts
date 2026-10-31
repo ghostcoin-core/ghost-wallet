@@ -10,7 +10,15 @@ import { AppState } from 'react-native';
 import { advanceSend, asSendKit } from '../send/send-payment';
 import { signVanishAgain } from '../vanish/actions';
 import { advance } from '../vanish/payments';
-import { moveAlone, openShared, pendingPayments, subscribePending, type PendingPayment } from '../vanish/pending';
+import {
+  moveAlone,
+  openShared,
+  pendingPayments,
+  stopIfShort,
+  stoppedVanish,
+  subscribePending,
+  type PendingPayment,
+} from '../vanish/pending';
 import { paymentKit, treeAtTip, type PaymentKit } from '../vanish/use-payment';
 
 export const MOVE_PENDING_EVERY_MS = 10_000;
@@ -18,8 +26,9 @@ export const MOVE_PENDING_EVERY_MS = 10_000;
 /** Moves each pending payment once; a failed move is tried again next time. */
 async function movePending(kit: PaymentKit, pending: readonly PendingPayment[]) {
   for (const payment of pending) {
-    if (payment.held || payment.otherNetwork) {
-      // Nothing is signed before the key is written down, nor for another chain.
+    if (payment.held || payment.otherNetwork || stoppedVanish(payment.id) !== null) {
+      // Nothing is signed before the key is written down, nor for another
+      // chain, nor again for a Vanish the account could not pay for.
       continue;
     }
     const sequence = openShared(kit, payment.id);
@@ -38,8 +47,10 @@ async function movePending(kit: PaymentKit, pending: readonly PendingPayment[]) 
         }
         return advance(kit.node, sequence, null, (await treeAtTip(kit)).tree);
       });
-    } catch {
-      // The payment is saved; the next move tries again.
+    } catch (error) {
+      // The payment is saved; the next move tries again, unless the account
+      // cannot pay for this Vanish: then it is held stopped.
+      stopIfShort(payment.id, error, kit.nodeUrl);
     }
   }
 }

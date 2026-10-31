@@ -11,6 +11,7 @@
 // in this memory only as long as the core holds the key: they go when the
 // key is confirmed written down or the Vanish is cancelled, and with the app.
 import type { CorePaymentSequence, CorePaymentStore, VanishBindings } from '../../modules/ghost-core';
+import { failureReason } from '../node/failure-reason';
 import { OTHER_NETWORK_TEXT, decodeDetails, onOtherChain } from './payments';
 import { sendStatusLabel, sendStatusOf } from '../send/payment-status';
 import { hasReached } from '../send/reached';
@@ -36,6 +37,8 @@ let held: HeldVanish | null = null;
 let reopened: string | null = null;
 const sequences = new Map<string, CorePaymentSequence>();
 const moving = new Set<string>();
+/** Vanishes the node refused for lack of funds, with why: never moved again here. */
+const stopped = new Map<string, string>();
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -125,8 +128,45 @@ function idTime(id: string): number {
 /** Forgets the object of a payment whose record is removed. */
 export function forgetShared(id: string) {
   sequences.delete(id);
+  stopped.delete(id);
   notify();
 }
+
+/**
+ * Holds Vanish `id` stopped: the account was short of its amount and fee.
+ * Neither its screen nor Home moves it again, so a later top-up does not send
+ * it by itself; the person can only cancel it.
+ */
+export function stopVanish(id: string, reason: string) {
+  stopped.set(id, reason);
+  notify();
+}
+
+/** Whether the node (or the balance check before signing) found the account short of funds. */
+export function shortOfFunds(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  return /insufficient ?(funds|balance)|not enough|exceeds balance|balance too low/.test(message.toLowerCase());
+}
+
+/**
+ * After a failed move of payment `id`: a Vanish the account is short of funds
+ * for is held stopped (true); anything else is tried again (false).
+ */
+export function stopIfShort(id: string, error: unknown, nodeUrl: string): boolean {
+  if (kindOfId(id) !== 'vanish' || !shortOfFunds(error)) {
+    return false;
+  }
+  stopVanish(id, failureReason(error, nodeUrl));
+  return true;
+}
+
+/** Why Vanish `id` was stopped, or null when it was not. */
+export function stoppedVanish(id: string): string | null {
+  return stopped.get(id) ?? null;
+}
+
+/** How Home lists a Vanish held stopped. */
+export const STOPPED_TEXT = 'Stopped, not enough GHOST. Open it to cancel.';
 
 /** Asks the next screen of its kind to open payment `id`. */
 export function reopenPayment(id: string) {
@@ -260,11 +300,13 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
       otherNetwork,
       stepText: otherNetwork
         ? OTHER_NETWORK_TEXT
-        : keyStep
-          ? heldStepText(keyStep)
-          : kind === 'send'
-            ? sendStatusLabel(sendStatusOf(step, hasReached(id)))
-            : statusLabel(status, kind),
+        : stopped.has(id)
+          ? STOPPED_TEXT
+          : keyStep
+            ? heldStepText(keyStep)
+            : kind === 'send'
+              ? sendStatusLabel(sendStatusOf(step, hasReached(id)))
+              : statusLabel(status, kind),
     });
   }
   return pending.sort((a, b) => b.at - a.at);
@@ -276,4 +318,5 @@ export function resetPending() {
   reopened = null;
   sequences.clear();
   moving.clear();
+  stopped.clear();
 }

@@ -4,6 +4,8 @@
 import type { CorePaymentSequence } from '../../modules/ghost-core';
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { buildNetwork } from '../network/build-network';
+import { getAccountState } from '../node/rpc';
+import { coversVanish } from './amount';
 import { spentBuffers, type CoinTree } from './coin-tree';
 import {
   buffer,
@@ -37,6 +39,25 @@ export async function minimumVanish(kit: PaymentKit): Promise<bigint> {
   const window = kit.core.feeWindow(BigInt(tip));
   const reference = await kit.node.block(Number(window.referenceHeight));
   return BigInt(kit.core.minVanishWei(reference.baseFeePerGas.toString()));
+}
+
+/** The most a Vanish pays in fee now: its gas limit at the max fee it is signed with. */
+export async function vanishFee(kit: PaymentKit): Promise<bigint> {
+  const tip = await kit.node.tipHeight();
+  const [block, priority] = await Promise.all([kit.node.block(tip), kit.node.maxPriorityFeePerGas()]);
+  return vanishMaxFeePerGas(block.baseFeePerGas, priority) * kit.core.vanishGasLimit();
+}
+
+function vanishMaxFeePerGas(baseFeePerGas: bigint, priority: bigint): bigint {
+  return 2n * baseFeePerGas + priority;
+}
+
+/** The balance of `account` at block `blockHash`, from the kit's reader or the node. */
+async function balanceAt(kit: PaymentKit, account: string, blockHash: string): Promise<bigint> {
+  if (kit.balance) {
+    return kit.balance(account, blockHash);
+  }
+  return (await getAccountState(kit.nodeUrl, account, blockHash)).balance;
 }
 
 /**
@@ -86,6 +107,17 @@ export function signVanishAgain(kit: PaymentKit, sequence: CorePaymentSequence):
       kit.node.block(tip),
       kit.node.maxPriorityFeePerGas(),
     ]);
+    const maxFeePerGas = vanishMaxFeePerGas(block.baseFeePerGas, priority);
+    const gasLimit = kit.core.vanishGasLimit();
+    // Never signed while the account cannot pay for it: after a restart a
+    // Vanish refused for lack of funds is refused here, not sent again.
+    if (record.intent.identity.tag === 'AccountNonce') {
+      const account = bytesToHex(record.intent.identity.inner.account);
+      const balance = await balanceAt(kit, account, block.hash);
+      if (!coversVanish(BigInt(details.amountWei), balance, maxFeePerGas * gasLimit)) {
+        throw new Error('not enough GHOST in this account for the amount and its fee');
+      }
+    }
     const signed = kit.core.signVanish({
       chainId,
       genesisHash: buffer(genesis.hash),
@@ -93,8 +125,8 @@ export function signVanishAgain(kit: PaymentKit, sequence: CorePaymentSequence):
       commitData: buffer(details.commitData),
       amountWei: details.amountWei,
       maxPriorityFeePerGas: priority,
-      maxFeePerGas: 2n * block.baseFeePerGas + priority,
-      gasLimit: kit.core.vanishGasLimit(),
+      maxFeePerGas,
+      gasLimit,
     });
     return { signed: signed.envelope };
   };

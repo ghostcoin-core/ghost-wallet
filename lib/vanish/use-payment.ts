@@ -10,7 +10,7 @@ import { coinTreeAt, type CoinTree } from './coin-tree';
 import { vanishNode, type VanishNode } from './node';
 import { advance, type Rebuild } from './payments';
 import { documentPaymentFiles, paymentStore } from './payment-store';
-import { moveAlone } from './pending';
+import { moveAlone, stopIfShort, stoppedVanish } from './pending';
 import { isFinal, statusOfStep, type PaymentStatus } from './status-mapping';
 
 export const MOVE_EVERY_MS = 3_000;
@@ -20,6 +20,8 @@ export type PaymentKit = {
   store: CorePaymentStore;
   node: VanishNode;
   nodeUrl: string;
+  /** Reads an account's balance at a block; the node's `eth_getBalance` when not set. */
+  balance?: (account: string, blockHash: string) => Promise<bigint>;
 };
 
 /** The core, the store and the node; null in a build without the native core. */
@@ -48,6 +50,8 @@ export type PaymentView = {
   step: number | string;
   needsKey: boolean;
   error: string | null;
+  /** A Vanish the account could not pay for: held stopped, `error` says why. */
+  stopped?: boolean;
 };
 
 /**
@@ -77,9 +81,18 @@ export function usePayment(
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     async function move(payment: CorePaymentSequence, tools: PaymentKit) {
+      let id = '';
       try {
+        id = payment.record().id;
+        const stoppedWhy = stoppedVanish(id);
+        if (stoppedWhy !== null) {
+          // Held stopped (here or by Home): never moved again.
+          const step = payment.step();
+          setMoved({ of: payment, view: { ...initialView(step), error: stoppedWhy, stopped: true } });
+          return;
+        }
         // Home may be moving this payment right now: then this move waits for the next.
-        const next = await moveAlone(payment.record().id, async () => {
+        const next = await moveAlone(id, async () => {
           const tree = withTree ? (await treeAtTip(tools)).tree : null;
           return advance(tools.node, payment, rebuildRef.current, tree);
         });
@@ -102,13 +115,22 @@ export function usePayment(
         if (stopped) {
           return;
         }
-        // The payment is saved; the next move tries again.
+        // The payment is saved; the next move tries again, unless the account
+        // cannot pay for this Vanish: then it stops here.
         const message = failureReason(error, tools.nodeUrl);
+        const stop = stopIfShort(id, error, tools.nodeUrl);
         const step = payment.step();
         setMoved((current) => ({
           of: payment,
-          view: current?.of === payment ? { ...current.view, error: message } : { ...initialView(step), error: message },
+          view: {
+            ...(current?.of === payment ? current.view : initialView(step)),
+            error: message,
+            ...(stop ? { stopped: true } : {}),
+          },
         }));
+        if (stop) {
+          return;
+        }
       }
       timer = setTimeout(() => void move(payment, tools), MOVE_EVERY_MS);
     }
