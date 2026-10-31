@@ -1,12 +1,14 @@
 // The steps of a Vanish and of a Summon or Claim that talk to both the native
 // core and the node: preparing a Vanish, signing it (again), finding a key's
 // coins and proving a reveal (again, when its fee window passed).
-import type { CorePaymentSequence } from '../../modules/ghost-core';
+import type { CorePaymentSequence, KeyCoins } from '../../modules/ghost-core';
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { buildNetwork } from '../network/build-network';
 import { getAccountState } from '../node/rpc';
 import { coversVanish } from './amount';
+import { readSpentMarkers, type SpentHint } from './coin-pages';
 import { spentBuffers, type CoinTree } from './coin-tree';
+import type { VanishNode } from './node';
 import {
   buffer,
   decodeDetails,
@@ -144,7 +146,29 @@ export type KeyLookup = {
   feeWei: string;
   tree: CoinTree;
   tip: number;
+  /**
+   * What the spent markers say, read in the background after the lookup:
+   * unchecked, and never waited on, so Summon is never held for it.
+   */
+  spentHint?: Promise<SpentHint>;
 };
+
+/**
+ * Reads every spent marker page of the node that served `tree`, in the
+ * background, and fills `tree.spent` with them: a hint, unchecked. Asks the
+ * core again whether the key's coins are among them; any failure is no hint.
+ */
+function startSpentHint(node: VanishNode, tree: CoinTree, find: (tree: CoinTree) => KeyCoins): Promise<SpentHint> {
+  return readSpentMarkers(node, tree.hash)
+    .then((markers): SpentHint => {
+      if (markers === null) {
+        return { checked: false, spent: null };
+      }
+      tree.spent = markers;
+      return { checked: false, spent: find(tree).status === 'spent' };
+    })
+    .catch((): SpentHint => ({ checked: false, spent: null }));
+}
 
 /** The key a tapped card handed to the native core; JavaScript never holds it. */
 export const CARD_KEY = { card: true } as const;
@@ -163,17 +187,19 @@ export async function lookUpKey(kit: PaymentKit, key: KeySource): Promise<KeyLoo
     typeof key === 'string'
       ? kit.core.findKeyCoins(key, chainId, tree.leaves, spentBuffers(tree))
       : kit.core.findCardKeyCoins(chainId, tree.leaves, spentBuffers(tree));
-  let { tree, tip } = await treeAtTip(kit, chainId, { keyText: typeof key === 'string' ? key : null });
+  let { tree, tip, node } = await treeAtTip(kit, chainId, { keyText: typeof key === 'string' ? key : null });
   let coins = find(tree);
   if (coins.status !== 'found' && tree.complete === false) {
     // The pages the buckets named show no unspent coin: the key may have more
     // coins than one batch of lookup tags reaches. Every page decides.
-    ({ tree, tip } = await treeAtTip(kit, chainId, { complete: true }));
+    ({ tree, tip, node } = await treeAtTip(kit, chainId, { complete: true }));
     coins = find(tree);
   }
   const window = kit.core.feeWindow(BigInt(tip));
   const reference = await kit.node.block(Number(window.referenceHeight));
-  return { ...coins, feeWei: kit.core.revealFeeWei(reference.baseFeePerGas.toString()), tree, tip };
+  // Started only once the lookup is done, and not waited on.
+  const spentHint = coins.status === 'found' ? startSpentHint(node ?? kit.node, tree, find) : undefined;
+  return { ...coins, feeWei: kit.core.revealFeeWei(reference.baseFeePerGas.toString()), tree, tip, spentHint };
 }
 
 /**

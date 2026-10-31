@@ -100,6 +100,8 @@ export type NodeBucket = { bits: number; prefix: number; entries: NodeBucketEntr
 
 /** The tree kind of the coin tree, as `ghost_` calls name it. */
 export const COIN_KIND = 'coin';
+/** The tree kind of the spent markers: pages of them are a hint, not checkable on their own. */
+export const MARKER_KIND = 'coin-markers';
 const NOTE_BYTES = 156;
 const SALT_BYTES = 16;
 
@@ -169,6 +171,25 @@ export function parseBucket(raw: unknown, treeIndex: number, bits: number, prefi
   };
 }
 
+/** The markers of a `ghost_getTreePage` page of the marker tree; null when it is not laid out as one. */
+export function parseMarkerPage(raw: unknown, treeIndex: number, page: number): string[] | null {
+  const value = (raw ?? {}) as Record<string, unknown>;
+  try {
+    if (value.kind !== MARKER_KIND || smallNumber(value.treeIndex, 'tree index') !== treeIndex) {
+      return null;
+    }
+    if (smallNumber(value.page, 'page number') !== page || !Array.isArray(value.entries)) {
+      return null;
+    }
+    return value.entries.map((entry: unknown) => {
+      const fields = (entry ?? {}) as Record<string, unknown>;
+      return hash(typeof entry === 'string' ? entry : (fields.marker ?? fields.leaf), 'spent marker');
+    });
+  } catch {
+    return null;
+  }
+}
+
 export type VanishNode = {
   chainId(): Promise<bigint>;
   /** The tip's header: its height, hash and `coinTreeRoot`. */
@@ -179,6 +200,12 @@ export type VanishNode = {
   pageSets(treeIndex: number, sets: number[][], anchorHash: string): Promise<NodePage[][]>;
   /** The buckets of `prefixes` (`ghost_getNoteBucket`), all in one batch. */
   noteBuckets(treeIndex: number, bits: number, prefixes: number[], anchorHash: string): Promise<NodeBucket[]>;
+  /**
+   * Every spent marker of tree `treeIndex` as of block `anchorHash`: the
+   * marker tree's page roots, then all its pages (`ghost_getTreePage`) in one
+   * batch, so no request names a marker. Unchecked: a hint only.
+   */
+  markerPages(treeIndex: number, anchorHash: string): Promise<string[]>;
   tipHeight(): Promise<number>;
   /** Blocks `from` to `to`, with their transactions, and every receipt of them. */
   blocks(from: number, to: number): Promise<{ block: NodeBlock; receipts: NodeReceipt[] }[]>;
@@ -249,6 +276,29 @@ export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
         ]),
       );
       return answers.map((answer, i) => parseBucket(answer, treeIndex, bits, prefixes[i]));
+    },
+    async markerPages(treeIndex, anchorHash) {
+      const [roots] = await call([['ghost_getPageRoots', [MARKER_KIND, hexQuantity(treeIndex), anchorHash]]]);
+      if (!Array.isArray(roots)) {
+        throw new Error('the node sent malformed spent marker page roots');
+      }
+      if (roots.length === 0) {
+        return [];
+      }
+      const pages = roots.map((_, page) => page);
+      const answers = await call(
+        pages.map((page): [string, unknown[]] => [
+          'ghost_getTreePage',
+          [MARKER_KIND, hexQuantity(treeIndex), hexQuantity(page), anchorHash],
+        ]),
+      );
+      return answers.flatMap((answer, i) => {
+        const markers = parseMarkerPage(answer, treeIndex, pages[i]);
+        if (markers === null) {
+          throw new Error('the node sent a malformed spent marker page');
+        }
+        return markers;
+      });
     },
     async blocks(from, to) {
       const heights = Array.from({ length: Math.max(0, to - from + 1) }, (_, i) => hexQuantity(from + i));
