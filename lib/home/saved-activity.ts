@@ -5,7 +5,7 @@
 // step it is at (lib/vanish/pending.ts), so no payment shows twice.
 import type { CorePaymentRecord, CorePaymentStore, VanishBindings } from '../../modules/ghost-core';
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
-import { decodeDetails } from '../vanish/payments';
+import { decodeDetails, onOtherChain } from '../vanish/payments';
 import { kindOfId, openShared } from '../vanish/pending';
 import { stepName } from '../vanish/status-mapping';
 import { activityStateFromStep, sortActivity, type ActivityItem } from './activity';
@@ -86,7 +86,12 @@ export function savedActivity(kit: Kit | null): ActivityItem[] {
       continue;
     }
     try {
-      const item = savedActivityItem(id, sequence.record(), sequence.step());
+      const record = sequence.record();
+      if (onOtherChain(record)) {
+        // It settled (or failed) on another chain than the one this build shows.
+        continue;
+      }
+      const item = savedActivityItem(id, record, sequence.step());
       if (item) {
         items.push(item);
       }
@@ -129,7 +134,14 @@ export function savedCredits(kit: Kit | null): Map<string, SavedCredit> {
   for (const id of savedIds(kit)) {
     const record = kit ? recordOf(kit, id) : null;
     const details = record ? decodeDetails(record.intent.details) : null;
-    if (!record || !details || (details.kind !== 'summon' && details.kind !== 'claim') || !/^[0-9]+$/.test(details.amountWei)) {
+    if (
+      !record ||
+      !details ||
+      (details.kind !== 'summon' && details.kind !== 'claim') ||
+      !/^[0-9]+$/.test(details.amountWei) ||
+      // A credit on another chain explains nothing in this one's balance.
+      onOtherChain(record)
+    ) {
       continue;
     }
     const amounts = [details.amountWei];

@@ -5,7 +5,16 @@ import type { CorePaymentSequence } from '../../modules/ghost-core';
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { buildNetwork } from '../network/build-network';
 import { spentBuffers, type CoinTree } from './coin-tree';
-import { buffer, decodeDetails, newPaymentId, revealIntent, vanishIntent, type PaymentDetails, type Rebuild } from './payments';
+import {
+  buffer,
+  decodeDetails,
+  newPaymentId,
+  onOtherChain,
+  revealIntent,
+  vanishIntent,
+  type PaymentDetails,
+  type Rebuild,
+} from './payments';
 import type { PaymentKit } from './use-payment';
 import { treeAtTip } from './use-payment';
 
@@ -49,6 +58,7 @@ export async function startVanish(
     amountWei: commit.amountWei,
     nonce: nonce.toString(),
     at: Date.now(),
+    chainId: chainId.toString(),
   };
   try {
     const sequence = kit.core.PaymentSequence.start(kit.store, newPaymentId('vanish'), vanishIntent(account, nonce, details));
@@ -62,7 +72,11 @@ export async function startVanish(
 /** Signs the Vanish of `sequence` (again) with the fees of the tip. Needs no key. */
 export function signVanishAgain(kit: PaymentKit, sequence: CorePaymentSequence): Rebuild {
   return async (tip) => {
-    const details = decodeDetails(sequence.record().intent.details);
+    const record = sequence.record();
+    if (onOtherChain(record)) {
+      throw new Error('this Vanish was saved on another network');
+    }
+    const details = decodeDetails(record.intent.details);
     if (!details || details.kind !== 'vanish') {
       throw new Error('the saved Vanish cannot be read');
     }
@@ -162,6 +176,8 @@ export async function startReveal(
     feeWei: proved.feeWei,
     marker: proved.marker,
     at: Date.now(),
+    // The node was checked to be this build's chain when it was proved.
+    chainId: buildNetwork.chainId.toString(),
   };
   const sequence = kit.core.PaymentSequence.start(kit.store, newPaymentId(kind), revealIntent(kind, proved.marker, details));
   // The key (typed, or on its card) is the backup: nothing more to save before sending.
@@ -174,7 +190,11 @@ export async function startReveal(
 /** A new proof of the same coin, for a fee window that moved. Needs the key typed (or its card tapped) again after a restart. */
 export function proveRevealAgain(kit: PaymentKit, sequence: CorePaymentSequence, key: KeySource, account: string): Rebuild {
   return async () => {
-    const details = decodeDetails(sequence.record().intent.details);
+    const record = sequence.record();
+    if (onOtherChain(record)) {
+      throw new Error('this Summon was saved on another network');
+    }
+    const details = decodeDetails(record.intent.details);
     if (!details || (details.kind !== 'summon' && details.kind !== 'claim')) {
       throw new Error('the saved Summon cannot be read');
     }

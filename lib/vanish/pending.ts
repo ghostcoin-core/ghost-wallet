@@ -11,7 +11,7 @@
 // in this memory only as long as the core holds the key: they go when the
 // key is confirmed written down or the Vanish is cancelled, and with the app.
 import type { CorePaymentSequence, CorePaymentStore, VanishBindings } from '../../modules/ghost-core';
-import { decodeDetails } from './payments';
+import { OTHER_NETWORK_TEXT, decodeDetails, onOtherChain } from './payments';
 import { sendStatusLabel, sendStatusOf } from '../send/payment-status';
 import { hasReached } from '../send/reached';
 import { isFinal, statusLabel, statusOfStep, stepName, type PaymentStatus, type SavedKind } from './status-mapping';
@@ -196,9 +196,19 @@ export type PendingPayment = {
   status: PaymentStatus;
   /** Set while the core still holds the Vanish's new key. */
   held: HeldStep | null;
+  /** Saved for another chain than this build's: listed, never moved. */
+  otherNetwork: boolean;
   /** The step it is at, in words. */
   stepText: string;
 };
+
+function savedOnOtherChain(sequence: CorePaymentSequence): boolean {
+  try {
+    return onOtherChain(sequence.record());
+  } catch {
+    return false;
+  }
+}
 
 export function heldStepText(step: HeldStep): string {
   return step === 'card' ? 'Put the Phantom Key on a card' : 'Write down the Phantom Key';
@@ -239,6 +249,7 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
       continue;
     }
     const amount = paymentAmountWei(sequence);
+    const otherNetwork = savedOnOtherChain(sequence);
     pending.push({
       id,
       kind,
@@ -246,11 +257,14 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
       at: paymentAt(sequence, id),
       status,
       held: keyStep,
-      stepText: keyStep
-        ? heldStepText(keyStep)
-        : kind === 'send'
-          ? sendStatusLabel(sendStatusOf(step, hasReached(id)))
-          : statusLabel(status, kind),
+      otherNetwork,
+      stepText: otherNetwork
+        ? OTHER_NETWORK_TEXT
+        : keyStep
+          ? heldStepText(keyStep)
+          : kind === 'send'
+            ? sendStatusLabel(sendStatusOf(step, hasReached(id)))
+            : statusLabel(status, kind),
     });
   }
   return pending.sort((a, b) => b.at - a.at);
