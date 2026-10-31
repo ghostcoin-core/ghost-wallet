@@ -84,7 +84,7 @@ export function usePayment(
       let id = '';
       try {
         id = payment.record().id;
-        const stoppedWhy = stoppedVanish(id);
+        const stoppedWhy = stoppedVanish(id, tools.store);
         if (stoppedWhy !== null) {
           // Held stopped (here or by Home): never moved again.
           const step = payment.step();
@@ -112,13 +112,13 @@ export function usePayment(
           }
         }
       } catch (error) {
+        // The payment is saved; the next move tries again, unless the account
+        // cannot pay for this Vanish: then it stops, even if the screen was left.
+        const stop = stopIfShort(id, error, tools.nodeUrl, tools.store);
         if (stopped) {
           return;
         }
-        // The payment is saved; the next move tries again, unless the account
-        // cannot pay for this Vanish: then it stops here.
         const message = failureReason(error, tools.nodeUrl);
-        const stop = stopIfShort(id, error, tools.nodeUrl);
         const step = payment.step();
         setMoved((current) => ({
           of: payment,

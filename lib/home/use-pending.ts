@@ -26,7 +26,7 @@ export const MOVE_PENDING_EVERY_MS = 10_000;
 /** Moves each pending payment once; a failed move is tried again next time. */
 async function movePending(kit: PaymentKit, pending: readonly PendingPayment[]) {
   for (const payment of pending) {
-    if (payment.held || payment.otherNetwork || stoppedVanish(payment.id) !== null) {
+    if (payment.held || payment.otherNetwork || stoppedVanish(payment.id, kit.store) !== null) {
       // Nothing is signed before the key is written down, nor for another
       // chain, nor again for a Vanish the account could not pay for.
       continue;
@@ -50,7 +50,7 @@ async function movePending(kit: PaymentKit, pending: readonly PendingPayment[]) 
     } catch (error) {
       // The payment is saved; the next move tries again, unless the account
       // cannot pay for this Vanish: then it is held stopped.
-      stopIfShort(payment.id, error, kit.nodeUrl);
+      stopIfShort(payment.id, error, kit.nodeUrl, kit.store);
     }
   }
 }

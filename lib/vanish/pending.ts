@@ -12,6 +12,7 @@
 // key is confirmed written down or the Vanish is cancelled, and with the app.
 import type { CorePaymentSequence, CorePaymentStore, VanishBindings } from '../../modules/ghost-core';
 import { failureReason } from '../node/failure-reason';
+import { refusedMarks } from './payment-store';
 import { OTHER_NETWORK_TEXT, decodeDetails, onOtherChain } from './payments';
 import { sendStatusLabel, sendStatusOf } from '../send/payment-status';
 import { hasReached } from '../send/reached';
@@ -135,10 +136,16 @@ export function forgetShared(id: string) {
 /**
  * Holds Vanish `id` stopped: the account was short of its amount and fee.
  * Neither its screen nor Home moves it again, so a later top-up does not send
- * it by itself; the person can only cancel it.
+ * it by itself; the person can only cancel it. With `store`, the stop is
+ * saved beside the payment and holds after a restart too.
  */
-export function stopVanish(id: string, reason: string) {
+export function stopVanish(id: string, reason: string, store?: CorePaymentStore | null) {
   stopped.set(id, reason);
+  try {
+    refusedMarks(store)?.markRefused(id, reason);
+  } catch {
+    // Still held stopped here; the check before signing guards a restart.
+  }
   notify();
 }
 
@@ -152,17 +159,46 @@ export function shortOfFunds(error: unknown): boolean {
  * After a failed move of payment `id`: a Vanish the account is short of funds
  * for is held stopped (true); anything else is tried again (false).
  */
-export function stopIfShort(id: string, error: unknown, nodeUrl: string): boolean {
+export function stopIfShort(id: string, error: unknown, nodeUrl: string, store?: CorePaymentStore | null): boolean {
   if (kindOfId(id) !== 'vanish' || !shortOfFunds(error)) {
     return false;
   }
-  stopVanish(id, failureReason(error, nodeUrl));
+  stopVanish(id, failureReason(error, nodeUrl), store);
   return true;
 }
 
-/** Why Vanish `id` was stopped, or null when it was not. */
-export function stoppedVanish(id: string): string | null {
-  return stopped.get(id) ?? null;
+/**
+ * Why Vanish `id` was stopped, or null when it was not. With `store`, a stop
+ * saved before a restart counts too, and is held here from then on.
+ */
+export function stoppedVanish(id: string, store?: CorePaymentStore | null): string | null {
+  const known = stopped.get(id);
+  if (known !== undefined) {
+    return known;
+  }
+  if (kindOfId(id) !== 'vanish') {
+    return null;
+  }
+  const saved = savedRefusal(id, store);
+  if (saved !== null) {
+    stopped.set(id, saved);
+  }
+  return saved;
+}
+
+/** Why Vanish `id` was refused, as saved beside it; null when it was not. */
+export function savedRefusal(id: string, store?: CorePaymentStore | null): string | null {
+  const marks = refusedMarks(store);
+  if (!marks) {
+    return null;
+  }
+  let reason: string | null;
+  try {
+    reason = marks.refusedReason(id);
+  } catch {
+    return null;
+  }
+  return reason === null ? null : reason || STOPPED_TEXT;
 }
 
 /** How Home lists a Vanish held stopped. */
@@ -300,7 +336,7 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
       otherNetwork,
       stepText: otherNetwork
         ? OTHER_NETWORK_TEXT
-        : stopped.has(id)
+        : stoppedVanish(id, kit.store) !== null
           ? STOPPED_TEXT
           : keyStep
             ? heldStepText(keyStep)
