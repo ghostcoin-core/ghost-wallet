@@ -191,6 +191,8 @@ export function parseMarkerPage(raw: unknown, treeIndex: number, page: number): 
 }
 
 export type VanishNode = {
+  /** The node's address: what notes and salts kept on this phone say they came from. */
+  readonly url?: string;
   chainId(): Promise<bigint>;
   /** The tip's header: its height, hash and `coinTreeRoot`. */
   anchor(): Promise<NodeAnchor>;
@@ -224,6 +226,7 @@ export type VanishNode = {
 export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
   const call = (calls: [string, unknown[]][]) => rpcBatch(url, calls, fetchImpl);
   return {
+    url,
     async chainId() {
       const [id] = await call([['eth_chainId', []]]);
       return quantity(id, 'chain id');

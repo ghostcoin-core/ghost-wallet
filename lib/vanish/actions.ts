@@ -187,12 +187,14 @@ export async function lookUpKey(kit: PaymentKit, key: KeySource): Promise<KeyLoo
     typeof key === 'string'
       ? kit.core.findKeyCoins(key, chainId, tree.leaves, spentBuffers(tree))
       : kit.core.findCardKeyCoins(chainId, tree.leaves, spentBuffers(tree));
-  let { tree, tip, node } = await treeAtTip(kit, chainId, { keyText: typeof key === 'string' ? key : null });
+  let { tree, tip, node, reusedNotes } = await treeAtTip(kit, chainId, { keyText: typeof key === 'string' ? key : null });
   let coins = find(tree);
-  if (coins.status !== 'found' && tree.complete === false) {
+  if (coins.status !== 'found' && (tree.complete === false || reusedNotes)) {
     // The pages the buckets named show no unspent coin: the key may have more
-    // coins than one batch of lookup tags reaches. Every page decides.
-    ({ tree, tip, node } = await treeAtTip(kit, chainId, { complete: true }));
+    // coins than one batch of lookup tags reaches. Or notes kept from before
+    // were used, and no root covers notes: a node could have sent them wrong.
+    // Every page decides, with kept notes read again.
+    ({ tree, tip, node } = await treeAtTip(kit, chainId, { complete: true, freshNotes: reusedNotes === true }));
     coins = find(tree);
   }
   const window = kit.core.feeWindow(BigInt(tip));

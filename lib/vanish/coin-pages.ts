@@ -15,7 +15,10 @@
 // against the header's `coinTreeRoot`; any mismatch ends the lookup and the
 // node's data is dropped, never kept and never patched. Checked pages are kept
 // on this phone by chain and tree, so a later lookup reads only pages whose
-// root changed: the new last page, or the pages a reorg rewrote.
+// root changed: the new last page, or the pages a reorg rewrote. The roots
+// cover only the leaves: the notes and salts kept with them are the word of the
+// node that sent them, used again only with that node, and read again when a
+// lookup on them finds nothing.
 //
 // A node whose data is refused is dropped and the read starts again at the
 // next node the build lists (`readCoinTreeFrom`).
@@ -47,9 +50,17 @@ const MALFORMED_TEXT = 'the node sent a malformed coin tree page';
 
 export type PagesCore = Pick<VanishBindings, 'checkCoinPages' | 'noteBucketBits' | 'keyNoteBuckets' | 'keyBucketPositions'>;
 
-/** A page checked against `root`, as kept on this phone. */
-export type SavedPage = { page: number; root: string; filled: number; entries: NodePageEntry[] };
-export type SavedPages = { roots: string[]; pages: SavedPage[] };
+/**
+ * What a node sent with a page's leaves: its notes and salts. No root covers
+ * them, so they are kept as that node's word only (`source`), and never used
+ * for a lookup on another node.
+ */
+export type PagePayload = { source: string; notes: string[]; salts: (string | null)[] };
+/** A page kept on this phone: its leaves, checked against `root`, apart from the notes and salts of the node that sent them. */
+export type SavedPage = { page: number; root: string; filled: number; leaves: string[]; payload: PagePayload };
+/** The layout of the saved file: a file of any other layout is not read, and is written over. */
+export const SAVED_PAGES_VERSION = 2;
+export type SavedPages = { version: typeof SAVED_PAGES_VERSION; roots: string[]; pages: SavedPage[] };
 
 export type PageCache = {
   load(): SavedPages | null;
@@ -61,7 +72,14 @@ export type PageReadOptions = {
   keyText?: string | null;
   /** Every leaf of the tree, as proving needs: no buckets. */
   complete?: boolean;
+  /** Reads every page's notes and salts from the node again, whatever was kept. */
+  freshNotes?: boolean;
 };
+
+/** Where a node's pages are said to come from: its address. */
+function sourceOf(node: VanishNode): string {
+  return node.url ?? '';
+}
 
 function buffer(hex: string): ArrayBuffer {
   const bytes = hexToBytes(hex);
@@ -71,25 +89,36 @@ function buffer(hex: string): ArrayBuffer {
 const HEX32 = /^0x[0-9a-f]{64}$/;
 const HEX = /^0x([0-9a-f]{2})*$/;
 
-function readEntry(raw: unknown): NodePageEntry | null {
-  const entry = (raw ?? {}) as Record<string, unknown>;
-  if (typeof entry.leaf !== 'string' || !HEX32.test(entry.leaf) || typeof entry.note !== 'string' || !HEX.test(entry.note)) {
+const isHex32 = (value: unknown): value is string => typeof value === 'string' && HEX32.test(value);
+const isHex = (value: unknown): value is string => typeof value === 'string' && HEX.test(value);
+
+function readPayload(raw: unknown, filled: number): PagePayload | null {
+  const payload = (raw ?? {}) as Record<string, unknown>;
+  if (
+    typeof payload.source !== 'string' ||
+    !Array.isArray(payload.notes) ||
+    !Array.isArray(payload.salts) ||
+    payload.notes.length !== filled ||
+    payload.salts.length !== filled ||
+    !payload.notes.every(isHex) ||
+    !payload.salts.every((salt) => salt === null || isHex(salt))
+  ) {
     return null;
   }
-  if (entry.salt === undefined) {
-    return { leaf: entry.leaf, note: entry.note };
-  }
-  return typeof entry.salt === 'string' && HEX.test(entry.salt) ? { leaf: entry.leaf, note: entry.note, salt: entry.salt } : null;
+  return { source: payload.source, notes: payload.notes, salts: payload.salts as (string | null)[] };
 }
 
-/** What a saved file holds, or null when it is not saved pages. */
+/**
+ * What a saved file holds, or null when it is not saved pages of this layout:
+ * a file of an older layout, which kept notes as if a root covered them, is
+ * dropped whole.
+ */
 export function readSavedPages(raw: unknown): SavedPages | null {
   const value = (raw ?? {}) as Record<string, unknown>;
-  if (!Array.isArray(value.roots) || !Array.isArray(value.pages)) {
+  if (value.version !== SAVED_PAGES_VERSION || !Array.isArray(value.roots) || !Array.isArray(value.pages)) {
     return null;
   }
-  const roots = value.roots.filter((root): root is string => typeof root === 'string' && HEX32.test(root));
-  if (roots.length !== value.roots.length) {
+  if (!value.roots.every(isHex32)) {
     return null;
   }
   const pages: SavedPage[] = [];
@@ -97,21 +126,48 @@ export function readSavedPages(raw: unknown): SavedPages | null {
     const page = (rawPage ?? {}) as Record<string, unknown>;
     if (
       typeof page.page !== 'number' ||
-      typeof page.root !== 'string' ||
+      !isHex32(page.root) ||
       typeof page.filled !== 'number' ||
-      !Array.isArray(page.entries) ||
-      page.entries.length !== page.filled
+      !Array.isArray(page.leaves) ||
+      page.leaves.length !== page.filled ||
+      !page.leaves.every(isHex32)
     ) {
       return null;
     }
-    const entries = page.entries.map(readEntry);
-    if (entries.some((entry) => entry === null)) {
+    const payload = readPayload(page.payload, page.filled);
+    if (!payload) {
       return null;
     }
-    pages.push({ page: page.page, root: page.root, filled: page.filled, entries: entries as NodePageEntry[] });
+    pages.push({ page: page.page, root: page.root, filled: page.filled, leaves: page.leaves, payload });
   }
-  return { roots, pages };
+  return { version: SAVED_PAGES_VERSION, roots: value.roots, pages };
 }
+
+/** A checked page as kept: its leaves apart from what `source` sent with them. */
+function savedPage(page: HeldPage): SavedPage {
+  return {
+    page: page.page,
+    root: page.root,
+    filled: page.filled,
+    leaves: page.entries.map((entry) => entry.leaf),
+    payload: { source: page.source, notes: page.entries.map((entry) => entry.note), salts: page.entries.map((entry) => entry.salt ?? null) },
+  };
+}
+
+/** A kept page as a lookup reads it: each leaf with its node's note and salt. */
+function heldPage(saved: SavedPage): HeldPage {
+  const entries = saved.leaves.map((leaf, i): NodePageEntry => {
+    const salt = saved.payload.salts[i];
+    return salt === null ? { leaf, note: saved.payload.notes[i] } : { leaf, note: saved.payload.notes[i], salt };
+  });
+  return { page: saved.page, root: saved.root, filled: saved.filled, entries, source: saved.payload.source };
+}
+
+/** The tree at the tip; `reusedNotes` when some of its notes and salts were kept from an earlier read. */
+export type CoinTreeRead = { tree: CoinTree; tip: number; reusedNotes?: boolean };
+
+/** A page checked against `root` during a lookup, with the node it came from. */
+type HeldPage = NodePage & { root: string; source: string };
 
 const kept = new Map<string, SavedPages>();
 
@@ -199,7 +255,7 @@ export async function readCoinTree(
   node: VanishNode,
   cache: PageCache,
   options: PageReadOptions = {},
-): Promise<{ tree: CoinTree; tip: number }> {
+): Promise<CoinTreeRead> {
   const anchor: NodeAnchor = await node.anchor();
   const roots = await ask(() => node.pageRoots(TREE_INDEX, anchor.hash));
   if (roots.length >= TREE_PAGES) {
@@ -210,17 +266,30 @@ export async function readCoinTree(
   const rootBuffers = roots.map(buffer);
   const headerRoot = buffer(anchor.coinTreeRoot);
 
-  /** Pages already checked, still under the same root. */
-  const pages = new Map<number, SavedPage>();
+  const source = sourceOf(node);
+  /** Pages already checked, still under the same root, with notes and salts this node sent. */
+  const pages = new Map<number, HeldPage>();
+  /**
+   * Pages kept with another node's notes and salts (or set aside by
+   * `freshNotes`): read again from this node before use, since no root
+   * covers what came with the leaves, and kept as they were until then.
+   */
+  const others = new Map<number, SavedPage>();
   const saved = cache.load();
   for (const page of saved?.pages ?? []) {
     if (page.page < pageCount && roots[page.page] === page.root) {
-      pages.set(page.page, page);
+      if (page.payload.source === source && !options.freshNotes) {
+        pages.set(page.page, heldPage(page));
+      } else {
+        others.set(page.page, page);
+      }
     }
   }
+  /** Whether notes this node sent before are used again: then a key not found may be found in fresh ones. */
+  const reusedNotes = pages.size > 0;
   let fetched = false;
 
-  const check = (fresh: NodePage[]) => {
+  const check =(fresh: NodePage[]) => {
     const checked: CoreCoinPage[] = fresh.map((page) => ({ page: page.page, leaves: page.entries.map((entry) => buffer(entry.leaf)) }));
     try {
       core.checkCoinPages(rootBuffers, checked, headerRoot);
@@ -244,7 +313,8 @@ export async function readCoinTree(
       }
       check(fresh);
       for (const page of fresh) {
-        pages.set(page.page, { ...page, root: roots[page.page] });
+        pages.set(page.page, { ...page, root: roots[page.page], source });
+        others.delete(page.page);
       }
       fetched = fetched || fresh.length > 0;
     }
@@ -316,16 +386,19 @@ export async function readCoinTree(
     check([]);
   }
 
-  // Pages whose root changed (the old last page, or pages a reorg rewrote) are dropped.
-  if (fetched || saved?.pages.length !== pages.size || saved?.roots.join() !== roots.join()) {
-    cache.save({ roots, pages: [...pages.values()].sort((a, b) => a.page - b.page) });
+  // Pages whose root changed (the old last page, or pages a reorg rewrote) are
+  // dropped; a page read again here keeps this node's notes and salts only.
+  const keep = [...[...pages.values()].map(savedPage), ...others.values()].sort((a, b) => a.page - b.page);
+  if (fetched || saved?.pages.length !== keep.length || saved?.roots.join() !== roots.join()) {
+    cache.save({ version: SAVED_PAGES_VERSION, roots, pages: keep });
   }
 
   const held = range(pageCount).filter((page) => pages.has(page));
-  const leaves = held.flatMap((page) => (pages.get(page) as SavedPage).entries.map(leafOf));
+  const leaves = held.flatMap((page) => (pages.get(page) as HeldPage).entries.map(leafOf));
   return {
     tree: { height: anchor.height, hash: anchor.hash, leaves, spent: [], spentBy: {}, complete: held.length === pageCount },
     tip: anchor.height,
+    reusedNotes,
   };
 }
 
@@ -345,7 +418,7 @@ export async function readCoinTreeFrom(
   cache: PageCache,
   chainId: bigint,
   options: PageReadOptions = {},
-): Promise<{ tree: CoinTree; tip: number; node: VanishNode }> {
+): Promise<CoinTreeRead & { node: VanishNode }> {
   let first: unknown = null;
   for (const [i, node] of nodes.entries()) {
     try {
