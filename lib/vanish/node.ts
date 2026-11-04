@@ -2,7 +2,7 @@
 // local test chain serves. The node's answers are its report: the core checks
 // what it can (the proof, the leaves it rebuilds), and nothing here proves
 // the rest.
-import { rpcBatch, SEND_TIMEOUT_MS, type FetchLike } from '../node/rpc';
+import { fromNode, isRefusal, rpcBatch, SEND_TIMEOUT_MS, type FetchLike } from '../node/rpc';
 
 export type NodeBlock = {
   height: number;
@@ -198,6 +198,173 @@ export function parseMarkerPage(raw: unknown): string[] | null {
   }
 }
 
+/** The type byte of an account transaction (a send, a Vanish, a cancel). */
+export const ACCOUNT_TX_TYPE = 0x52;
+/** The type byte of a private transaction (a Summon or a Claim). */
+export const PRIVATE_TX_TYPE = 0x50;
+
+type RlpItem = Uint8Array | RlpItem[];
+
+function rlpLength(bytes: Uint8Array, at: number, size: number): number {
+  if (size > 6 || at + size > bytes.length) {
+    throw new Error('the signed transaction does not read');
+  }
+  let length = 0;
+  for (let i = 0; i < size; i++) {
+    length = length * 256 + bytes[at + i];
+  }
+  return length;
+}
+
+/** One RLP item of `bytes` from `at`, and where it ends. */
+function rlpItem(bytes: Uint8Array, at: number): { item: RlpItem; end: number } {
+  if (at >= bytes.length) {
+    throw new Error('the signed transaction does not read');
+  }
+  const first = bytes[at];
+  let start: number;
+  let length: number;
+  let list: boolean;
+  if (first < 0x80) {
+    return { item: bytes.subarray(at, at + 1), end: at + 1 };
+  } else if (first <= 0xb7) {
+    [start, length, list] = [at + 1, first - 0x80, false];
+  } else if (first <= 0xbf) {
+    [start, length, list] = [at + 1 + (first - 0xb7), rlpLength(bytes, at + 1, first - 0xb7), false];
+  } else if (first <= 0xf7) {
+    [start, length, list] = [at + 1, first - 0xc0, true];
+  } else {
+    [start, length, list] = [at + 1 + (first - 0xf7), rlpLength(bytes, at + 1, first - 0xf7), true];
+  }
+  const end = start + length;
+  if (end > bytes.length) {
+    throw new Error('the signed transaction does not read');
+  }
+  if (!list) {
+    return { item: bytes.subarray(start, end), end };
+  }
+  const items: RlpItem[] = [];
+  for (let next = start; next < end; ) {
+    const read = rlpItem(bytes, next);
+    if (read.end > end) {
+      throw new Error('the signed transaction does not read');
+    }
+    items.push(read.item);
+    next = read.end;
+  }
+  return { item: items, end };
+}
+
+function bytesHex(bytes: Uint8Array): string {
+  return `0x${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function rlpQuantity(item: RlpItem): bigint {
+  if (!(item instanceof Uint8Array) || item.length > 32) {
+    throw new Error('the signed transaction does not read');
+  }
+  return item.length === 0 ? 0n : BigInt(bytesHex(item));
+}
+
+function signedBytes(signed: string): Uint8Array {
+  const hex = data(signed, 'signed transaction');
+  const bytes = new Uint8Array((hex.length - 2) / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(2 + 2 * i, 4 + 2 * i), 16);
+  }
+  return bytes;
+}
+
+/**
+ * What a signed account transaction (`0x52 || rlp([...])`) pays and does: the
+ * fields of a type-2 transaction, in their order, as the node shows it. Throws
+ * when the bytes are not one.
+ */
+export type AccountTxFields = {
+  chainId: bigint;
+  nonce: bigint;
+  maxPriorityFeePerGas: bigint;
+  maxFeePerGas: bigint;
+  gas: bigint;
+  to: string | null;
+  value: bigint;
+  data: string;
+};
+
+export function readAccountTx(signed: string): AccountTxFields {
+  const bytes = signedBytes(signed);
+  if (bytes[0] !== ACCOUNT_TX_TYPE) {
+    throw new Error('the signed transaction is not an account transaction');
+  }
+  const { item, end } = rlpItem(bytes, 1);
+  if (end !== bytes.length || !Array.isArray(item) || item.length < 8) {
+    throw new Error('the signed transaction does not read');
+  }
+  const [chainId, nonce, priority, maxFee, gas, to, value, input] = item;
+  if (!(to instanceof Uint8Array) || (to.length !== 0 && to.length !== 20) || !(input instanceof Uint8Array)) {
+    throw new Error('the signed transaction does not read');
+  }
+  return {
+    chainId: rlpQuantity(chainId),
+    nonce: rlpQuantity(nonce),
+    maxPriorityFeePerGas: rlpQuantity(priority),
+    maxFeePerGas: rlpQuantity(maxFee),
+    gas: rlpQuantity(gas),
+    to: to.length === 0 ? null : bytesHex(to),
+    value: rlpQuantity(value),
+    data: bytesHex(input),
+  };
+}
+
+/**
+ * The `eth_estimateGas` call of a signed transaction: an account transaction
+ * as the call it makes from `from` (its gas and fee caps included, so the
+ * node checks the account can pay them), a private one as its type and payload.
+ */
+export function estimateCall(signed: string, from: string | null): Record<string, string> {
+  const bytes = signedBytes(signed);
+  if (bytes[0] === ACCOUNT_TX_TYPE) {
+    if (!from || !/^0x[0-9a-f]{40}$/i.test(from)) {
+      throw new Error('the sender of the signed transaction is not known');
+    }
+    const tx = readAccountTx(signed);
+    const call: Record<string, string> = {
+      from: from.toLowerCase(),
+      gas: hexQuantity(tx.gas),
+      maxFeePerGas: hexQuantity(tx.maxFeePerGas),
+      maxPriorityFeePerGas: hexQuantity(tx.maxPriorityFeePerGas),
+      value: hexQuantity(tx.value),
+      input: tx.data,
+      data: tx.data,
+    };
+    if (tx.to !== null) {
+      call.to = tx.to;
+    }
+    return call;
+  }
+  if (bytes[0] === PRIVATE_TX_TYPE && bytes.length > 1) {
+    const payload = bytesHex(bytes.subarray(1));
+    return { type: hexQuantity(PRIVATE_TX_TYPE), input: payload, data: payload };
+  }
+  throw new Error('the signed transaction is of a type this app does not send');
+}
+
+/**
+ * Why a payment was not sent: the node's check before sending refused it
+ * (`refused`, its message the node's own reason), or the node could not be
+ * asked. Either way nothing was sent.
+ */
+export type SendCheckError = Error & { notSent: true; refused: boolean };
+
+export function sendCheckError(message: string, refused: boolean): SendCheckError {
+  return Object.assign(new Error(message), { notSent: true as const, refused });
+}
+
+/** Whether `error` stopped a payment before it was sent (`checkSend`). */
+export function stoppedBeforeSend(error: unknown): error is SendCheckError {
+  return error instanceof Error && (error as Partial<SendCheckError>).notSent === true;
+}
+
 export type VanishNode = {
   /** The node's address: what notes and salts kept on this phone say they came from. */
   readonly url?: string;
@@ -227,6 +394,13 @@ export type VanishNode = {
   rawTransaction(hash: string): Promise<string>;
   nonce(address: string): Promise<bigint>;
   maxPriorityFeePerGas(): Promise<bigint>;
+  /**
+   * Asks the node to run the signed transaction (`eth_estimateGas`) before it
+   * is sent, `from` its sender (null for a Summon or Claim). Resolves when the
+   * node would run it; throws a `SendCheckError` when it refuses (with its
+   * reason) or cannot be asked. Every send goes through this first.
+   */
+  checkSend(bytes: string, from: string | null): Promise<void>;
   /** Sends a signed transaction, with the send time limit (`SEND_TIMEOUT_MS`), not a read's. */
   sendRaw(bytes: string): Promise<string>;
 };
@@ -357,6 +531,26 @@ export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
         return quantity(tip, 'priority fee');
       } catch {
         return 1_000_000_000n;
+      }
+    },
+    async checkSend(bytes, from) {
+      let call: Record<string, string>;
+      try {
+        call = estimateCall(bytes, from);
+      } catch (error) {
+        throw fromNode(sendCheckError(`the node could not check it: ${(error as Error).message}`, false), url);
+      }
+      try {
+        // A reveal is about 1.3 MB: its check gets the send time limit too.
+        const [gas] = await rpcBatch(url, [['eth_estimateGas', [call, 'latest']]], fetchImpl, SEND_TIMEOUT_MS);
+        quantity(gas, 'gas estimate');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // The node's refusal keeps its own words (`the node refused a call: …`).
+        throw fromNode(
+          isRefusal(error) ? sendCheckError(message, true) : sendCheckError(`the node could not check it: ${message}`, false),
+          url,
+        );
       }
     },
     async sendRaw(bytes) {

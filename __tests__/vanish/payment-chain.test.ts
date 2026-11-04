@@ -71,6 +71,7 @@ function fakeKit() {
     known: jest.fn(async (hashes: string[]) => hashes.map(() => false)),
     nonce: jest.fn(async () => 4n),
     maxPriorityFeePerGas: jest.fn(async () => 1n),
+    checkSend: jest.fn(async (_bytes: string, _from: string | null) => {}),
     sendRaw: jest.fn(async () => `0x${'cc'.repeat(32)}`),
   };
   const core = {
@@ -111,7 +112,17 @@ function fakeKit() {
   return { kit, core, node, saved };
 }
 
-const NODE_ASKED = ['chainId', 'tipHeight', 'block', 'receipts', 'known', 'nonce', 'maxPriorityFeePerGas', 'sendRaw'] as const;
+const NODE_ASKED = [
+  'chainId',
+  'tipHeight',
+  'block',
+  'receipts',
+  'known',
+  'nonce',
+  'maxPriorityFeePerGas',
+  'checkSend',
+  'sendRaw',
+] as const;
 
 function expectNodeUntouched(node: ReturnType<typeof fakeKit>['node']) {
   for (const method of NODE_ASKED) {

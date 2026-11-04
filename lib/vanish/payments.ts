@@ -20,9 +20,11 @@ import { bytesToHex, hexToBytes } from '../../modules/ghost-core/account-lookup'
 import { GHOST_DEV_CHAIN_ID, buildNetwork } from '../network/build-network';
 import type { CoinTree } from './coin-tree';
 import type { NodeReceipt, VanishNode } from './node';
+import { isCancel, noteNotUnmined, noteUnmined } from './pending';
 import {
   statusOfRecovery,
   statusOfStep,
+  stepName,
   type PaymentStatus,
   type RecoveryTag,
   type RevealKind,
@@ -172,7 +174,11 @@ export async function chainSnapshot(node: VanishNode, record: CorePaymentRecord,
       // A Vanish's nonce taken by another transaction shows as a refused send.
       return identity.tag === 'RevealMarker' && usedBy ? buffer(usedBy) : undefined;
     },
-    effectApplied(intent) {
+    effectApplied(intent, transactionHash) {
+      if (isCancel(bytesToHex(transactionHash))) {
+        // A cancel in a block is the payment not done: the amount did not move.
+        return false;
+      }
       if (intent.identity.tag === 'RevealMarker' && tree && marker) {
         // The marker is spent in the tree as of a block at or after the receipt.
         return tree.spent.includes(marker) || tree.height < tip;
@@ -188,6 +194,40 @@ export async function chainSnapshot(node: VanishNode, record: CorePaymentRecord,
 /** Makes a new attempt: a Vanish signed again, or a reveal proved again. */
 export type Rebuild = (tip: number) => Promise<{ signed: ArrayBuffer; validUntil?: bigint }>;
 
+/** The account that signs `record`'s transactions; null for a Summon or Claim, which have none. */
+export function senderOf(record: Pick<CorePaymentRecord, 'intent'>): string | null {
+  const { identity } = record.intent;
+  return identity.tag === 'AccountNonce' ? bytesToHex(identity.inner.account) : null;
+}
+
+/**
+ * Sends a new attempt: the node checks the signed bytes first
+ * (`VanishNode.checkSend`), and only once it would take them are they saved
+ * as an attempt, marked sent and broadcast. A refusal leaves the payment as
+ * it was, never marked sent.
+ */
+export async function sendAttempt(
+  node: VanishNode,
+  sequence: CorePaymentSequence,
+  signed: ArrayBuffer,
+  validUntil?: bigint,
+): Promise<void> {
+  await node.checkSend(bytesToHex(signed), senderOf(sequence.record()));
+  sequence.addAttempt(signed, validUntil);
+  await node.sendRaw(bytesToHex(sequence.markSent()));
+}
+
+/**
+ * Sends the newest saved attempt again, checked by the node first. It was
+ * checked before it was saved; a payment saved signed but not sent (the app
+ * was closed in between) is marked sent here, as the bytes are only read so.
+ */
+export async function resendNewest(node: VanishNode, sequence: CorePaymentSequence): Promise<void> {
+  const bytes = bytesToHex(sequence.markSent());
+  await node.checkSend(bytes, senderOf(sequence.record()));
+  await node.sendRaw(bytes);
+}
+
 export type Advance = {
   status: PaymentStatus;
   step: number | string;
@@ -197,7 +237,26 @@ export type Advance = {
   needsBackup: boolean;
   /** Saved for another chain than this build's: nothing was asked, signed or sent. */
   otherNetwork?: boolean;
+  /** Sent, and in no block `STUCK_BLOCKS` blocks on (status `stuck`). */
+  stuck?: boolean;
+  /** Stuck, with an account nonce a cancel can take: the screen offers Cancel. */
+  cancellable?: boolean;
 };
+
+/**
+ * After a move of `sequence`: whether it is sent and still in no block, noted
+ * at tip `tip`. Only a payment the node took (sent, with no receipt) counts.
+ */
+export function noteMove(sequence: CorePaymentSequence, tip: number): { stuck: boolean; cancellable: boolean } {
+  const record = sequence.record();
+  if (stepName(record.step) !== 'Sent') {
+    noteNotUnmined(record.id);
+    return { stuck: false, cancellable: false };
+  }
+  const nonce = record.intent.identity.tag === 'AccountNonce';
+  const stuck = noteUnmined(record.id, record.attempts.length, tip, nonce);
+  return { stuck, cancellable: stuck && nonce };
+}
 
 export function recoveryTag(tag: string): RecoveryTag {
   const known: RecoveryTag[] = ['BackUp', 'Sign', 'Send', 'Rebuild', 'Wait', 'Done'];
@@ -226,9 +285,14 @@ export async function advance(
   const view = await chainSnapshot(node, record, tree);
   const recovery = sequence.recover(view);
   const tag = recoveryTag(recovery.tag);
+  const tip = Number(view.tipHeight());
   const result = (needsKey = false, needsBackup = false): Advance => {
     const step = sequence.step();
-    return { status: needsKey || needsBackup ? statusOfRecovery(tag, step) : statusOfStep(step), step, needsKey, needsBackup };
+    if (needsKey || needsBackup) {
+      return { status: statusOfRecovery(tag, step), step, needsKey, needsBackup };
+    }
+    const { stuck, cancellable } = noteMove(sequence, tip);
+    return { status: stuck ? 'stuck' : statusOfStep(step), step, needsKey, needsBackup, stuck, cancellable };
   };
   switch (tag) {
     case 'BackUp':
@@ -238,13 +302,13 @@ export async function advance(
       if (!rebuild) {
         return result(true);
       }
-      const { signed, validUntil } = await rebuild(Number(view.tipHeight()));
-      sequence.addAttempt(signed, validUntil);
-      await node.sendRaw(bytesToHex(sequence.markSent()));
+      const { signed, validUntil } = await rebuild(tip);
+      // Checked by the node before it is saved: a refusal is never marked sent.
+      await sendAttempt(node, sequence, signed, validUntil);
       return result();
     }
     case 'Send':
-      await node.sendRaw(bytesToHex(sequence.markSent()));
+      await resendNewest(node, sequence);
       return result();
     case 'Wait':
     case 'Done':

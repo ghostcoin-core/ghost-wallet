@@ -21,7 +21,7 @@ import {
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { buildNetwork } from '../network/build-network';
 import { checkedChainId } from '../vanish/actions';
-import { vanishNode } from '../vanish/node';
+import { readAccountTx, vanishNode } from '../vanish/node';
 import { documentPaymentFiles, paymentStore } from '../vanish/payment-store';
 import {
   PAYMENT_KIND,
@@ -31,12 +31,15 @@ import {
   decodeDetails,
   encodeDetails,
   newPaymentId,
+  noteMove,
   onOtherChain,
   recoveryTag,
+  resendNewest,
   savedChainId,
+  sendAttempt,
   type SendDetails,
 } from '../vanish/payments';
-import { openShared, paymentsChanged, shared } from '../vanish/pending';
+import { isStuck, markCancel, openShared, paymentsChanged, shared, unmarkCancel } from '../vanish/pending';
 import { stepName } from '../vanish/status-mapping';
 import type { PaymentKit } from '../vanish/use-payment';
 import { nonceUsedBy } from './node';
@@ -276,12 +279,16 @@ export async function sendChainView(kit: SendKit, record: CorePaymentRecord): Pr
 export type SendAdvance = {
   status: SendStatus;
   step: number | string;
+  /** The node took it, and `STUCK_BLOCKS` blocks on it is in none: it can be cancelled. */
+  cancellable?: boolean;
 };
 
-/** Saves the send as sent, then broadcasts its saved bytes; the node took them. */
+/**
+ * Broadcasts the send's newest saved attempt, checked by the node first; the
+ * node took it.
+ */
 async function broadcast(kit: SendKit, sequence: CorePaymentSequence) {
-  const bytes = sequence.markSent();
-  await kit.node.sendRaw(bytesToHex(bytes));
+  await resendNewest(kit.node, sequence);
   markReached(sequence.record().id);
 }
 
@@ -310,8 +317,9 @@ export async function advanceSend(kit: SendKit, sequence: CorePaymentSequence): 
       if (!details) {
         throw new Error('the saved send cannot be read');
       }
-      sequence.addAttempt(await signSend(kit, details));
-      await broadcast(kit, sequence);
+      // Checked by the node before it is saved: a refusal stays queued, never sent.
+      await sendAttempt(kit.node, sequence, await signSend(kit, details));
+      markReached(record.id);
       break;
     }
     case 'Send':
@@ -325,7 +333,90 @@ export async function advanceSend(kit: SendKit, sequence: CorePaymentSequence): 
       break;
   }
   const step = sequence.step();
-  return { step, status: sendStatusOf(step, hasReached(record.id)) };
+  const reached = hasReached(record.id);
+  // Only a send the node took counts its blocks: a queued one is not late.
+  const { stuck, cancellable } = reached ? noteMove(sequence, Number(view.tipHeight())) : { stuck: false, cancellable: false };
+  return { step, status: sendStatusOf(step, reached, stuck), cancellable };
+}
+
+/** Whole wei a cancel sends to the account itself: the core signs no send of nothing. */
+export const CANCEL_WEI = 1n;
+
+/** How much more a cancel pays than the attempt it replaces, in percent, at the least. */
+export const CANCEL_FEE_BUMP_PERCENT = 15n;
+
+function bumped(fee: bigint): bigint {
+  // Rounded up, so it is never less than the bump.
+  return (fee * (100n + CANCEL_FEE_BUMP_PERCENT) + 99n) / 100n;
+}
+
+/**
+ * Cancels a payment the node took and has not mined in `STUCK_BLOCKS` blocks
+ * (a send or a Vanish): signs a send of `CANCEL_WEI` from its account to the
+ * same account with the same nonce, at a fee at least 15% above the stuck
+ * attempt's (both the fee cap and the priority fee), and sends it the way
+ * every attempt goes: checked by the node first. Only when the person taps
+ * Cancel. Whichever of the two is mined first counts; a cancel that lands
+ * shows the payment as not done.
+ */
+export async function cancelStuck(kit: SendKit, sequence: CorePaymentSequence): Promise<void> {
+  const record = sequence.record();
+  if (onOtherChain(record)) {
+    throw new Error('this payment was saved on another network');
+  }
+  const { identity } = record.intent;
+  if (identity.tag !== 'AccountNonce') {
+    throw new Error('a Summon or Claim has no place in an account to cancel');
+  }
+  if (stepName(record.step) !== 'Sent' || !isStuck(record.id)) {
+    throw new Error('only a payment the node has not mined yet can be cancelled');
+  }
+  const newest = record.attempts[record.attempts.length - 1];
+  const stuckBytes = newest ? kit.store.loadPayload(record.id, newest.transactionHash) : undefined;
+  if (!stuckBytes) {
+    throw new Error('the payment to cancel is not saved on this phone');
+  }
+  const account = bytesToHex(identity.inner.account);
+  const stuck = readAccountTx(bytesToHex(stuckBytes));
+  const chainId = await checkedChainId(kit);
+  if (stuck.chainId !== chainId || stuck.nonce !== identity.inner.nonce) {
+    throw new Error('the payment to cancel does not read as this payment');
+  }
+  const tip = await kit.node.tipHeight();
+  const [genesis, block, priority] = await Promise.all([
+    kit.node.block(0),
+    kit.node.block(tip),
+    kit.node.maxPriorityFeePerGas(),
+  ]);
+  const maxPriorityFeePerGas = priority > bumped(stuck.maxPriorityFeePerGas) ? priority : bumped(stuck.maxPriorityFeePerGas);
+  const now = 2n * block.baseFeePerGas + maxPriorityFeePerGas;
+  const maxFeePerGas = now > bumped(stuck.maxFeePerGas) ? now : bumped(stuck.maxFeePerGas);
+  const signed = kit.core.signSend({
+    chainId,
+    genesisHash: buffer(genesis.hash),
+    nonce: identity.inner.nonce,
+    recipient: buffer(account),
+    amountWei: CANCEL_WEI.toString(),
+    maxPriorityFeePerGas,
+    maxFeePerGas,
+    gasLimit: kit.core.testSendGasLimit(),
+  });
+  if (bytesToHex(signed.sender) !== account) {
+    throw new Error("this phone's account is not the one that made this payment");
+  }
+  // Marked before it is saved, so a cancel that lands is never read as the payment.
+  const hash = bytesToHex(signed.transactionHash);
+  markCancel(hash);
+  try {
+    await sendAttempt(kit.node, sequence, signed.envelope);
+  } catch (error) {
+    if (!sequence.record().attempts.some((attempt) => bytesToHex(attempt.transactionHash) === hash)) {
+      // Refused by the check, or not signed into the payment: no such attempt.
+      unmarkCancel(hash);
+    }
+    throw error;
+  }
+  paymentsChanged();
 }
 
 export type RecentRecipient = { address: string; amountWei: string; at: number };
@@ -357,5 +448,6 @@ export function recentRecipients(kit: Pick<PaymentKit, 'core' | 'store'>, limit 
 
 /** The status of a saved send as it stands, without asking the node. */
 export function savedSendStatus(sequence: CorePaymentSequence): SendStatus {
-  return sendStatusOf(sequence.step(), hasReached(sequence.record().id));
+  const { id } = sequence.record();
+  return sendStatusOf(sequence.step(), hasReached(id), isStuck(id));
 }

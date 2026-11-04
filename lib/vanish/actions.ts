@@ -244,8 +244,16 @@ export const ALREADY_SUMMONED_TEXT = 'These coins were already summoned.';
 /** How a node refuses a reveal whose marker is spent. */
 const SPENT_REFUSAL = /already spent|marker (is )?(already )?(spent|used)|spent marker/i;
 
+/** A node's refusal of a reveal, as the screen says it: a coin already spent reads as such. */
+function revealRefusal(error: unknown): unknown {
+  // The lookup never waits on a spent check: the node is what refuses a coin already spent.
+  return error instanceof Error && SPENT_REFUSAL.test(error.message) ? new Error(ALREADY_SUMMONED_TEXT) : error;
+}
+
 /**
- * Proves the reveal, saves it with its marker as identity, and sends it. Only
+ * Proves the reveal, has the node check it (`checkSend`), then saves it with
+ * its marker as identity and sends it. A check the node refuses, or that
+ * cannot reach the node, fails it with nothing saved or sent. After that only
  * the node's refusal fails it: a send that timed out or lost its connection
  * may have reached the node, so the saved payment is returned as sending, and
  * the payment mover sends it again or finds its receipt.
@@ -258,6 +266,12 @@ export async function startReveal(
 ): Promise<CorePaymentSequence> {
   const kind = outWei === null ? 'summon' : 'claim';
   const proved = await proveReveal(kit, key, account, outWei);
+  try {
+    // A private transaction has no sender.
+    await kit.node.checkSend(bytesToHex(proved.envelope), null);
+  } catch (error) {
+    throw revealRefusal(error);
+  }
   const details: PaymentDetails = {
     kind,
     amountWei: proved.outWei,
@@ -278,11 +292,7 @@ export async function startReveal(
       // Saved with its attempt and marked sent before it went: not lost.
       return sequence;
     }
-    // The lookup never waits on a spent check: the node is what refuses a coin already spent.
-    if (error instanceof Error && SPENT_REFUSAL.test(error.message)) {
-      throw new Error(ALREADY_SUMMONED_TEXT);
-    }
-    throw error;
+    throw revealRefusal(error);
   }
   return sequence;
 }
