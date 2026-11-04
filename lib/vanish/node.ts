@@ -102,7 +102,11 @@ export type NodeBucket = { bits: number; prefix: number; entries: NodeBucketEntr
 export const COIN_KIND = 'coin';
 /** The tree kind of the spent markers: pages of them are a hint, not checkable on their own. */
 export const MARKER_KIND = 'coin-markers';
-const NOTE_BYTES = 156;
+/**
+ * A tree note as the node serves it: version 3, 380 bytes. A reveal's 156-byte
+ * remainder note is served zero-padded to the same 380 bytes.
+ */
+export const NOTE_BYTES = 380;
 const SALT_BYTES = 16;
 
 function sized(value: unknown, bytes: number, what: string): string {
