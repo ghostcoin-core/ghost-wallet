@@ -33,10 +33,17 @@ const mockSequence = {
   markBackedUp: jest.fn(),
 };
 const mockStore = { list: () => [], remove: jest.fn() };
+const SENT_VIEW = { status: 'sent', step: 3, needsKey: false, error: null };
+let mockView: Record<string, unknown> = SENT_VIEW;
 jest.mock('../../lib/vanish/use-payment', () => ({
   paymentKit: () => ({ core: mockCore, store: mockStore, node: {}, nodeUrl: 'http://127.0.0.1:8547' }),
-  usePayment: (_kit: unknown, sequence: unknown) =>
-    sequence ? { status: 'sent', step: 3, needsKey: false, error: null } : null,
+  usePayment: (_kit: unknown, sequence: unknown) => (sequence ? mockView : null),
+}));
+
+const mockCancel = jest.fn(async (_kit: unknown, _sequence: unknown) => {});
+jest.mock('../../lib/send/send-payment', () => ({
+  asSendKit: (kit: unknown) => kit,
+  cancelStuck: (kit: unknown, sequence: unknown) => mockCancel(kit, sequence),
 }));
 
 const mockStartVanish = jest.fn(async () => ({ sequence: mockSequence, words: [...mockKeyWords] }));
@@ -87,6 +94,63 @@ function sideBySide(testID: string): boolean {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockView = SENT_VIEW;
+});
+
+/** Makes a key, checks its three words and sends the Vanish: the screen shows its progress. */
+async function vanishSent() {
+  fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
+  await act(async () => {
+    fireEvent.press(screen.getByTestId('vanish-make-key'));
+  });
+  fireEvent.press(screen.getByTestId('vanish-saved'));
+  for (const field of screen.getAllByTestId(/^vanish-check-\d+$/)) {
+    const position = Number(field.props.testID.replace('vanish-check-', ''));
+    fireEvent.changeText(field, mockKeyWords[position - 1]);
+  }
+  fireEvent.press(screen.getByTestId('vanish-send'));
+}
+
+describe('a Vanish the node took but has not mined in 10 blocks', () => {
+  it('shows "Not mined yet", never Sent, says the Phantom Key holds nothing, and cancels only on a tap', async () => {
+    mockView = { status: 'stuck', step: 3, needsKey: false, error: null, stuck: true, cancellable: true };
+    renderOn('iPhone', VanishScreen);
+    await vanishSent();
+
+    expect(screen.getByTestId('progress-stuck')).toHaveTextContent('Not mined yet');
+    expect(screen.queryByTestId('progress-sent')).toBeNull();
+    expect(screen.getByTestId('payment-status')).toHaveTextContent(/Not mined yet: 10 blocks went by/);
+    expect(screen.getByTestId('payment-status')).toHaveTextContent(/The Phantom Key holds nothing until it is/);
+    expect(mockCancel).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('vanish-not-mined-cancel'));
+    });
+    expect(mockCancel).toHaveBeenCalledTimes(1);
+    expect(mockCancel.mock.calls[0][1]).toBe(mockSequence);
+  });
+
+  it('says why a cancel did not go out', async () => {
+    mockView = { status: 'stuck', step: 3, needsKey: false, error: null, stuck: true, cancellable: true };
+    mockCancel.mockRejectedValueOnce(
+      Object.assign(new Error('the node refused a call: replacement transaction underpriced'), { notSent: true, refused: true }),
+    );
+    renderOn('iPhone', VanishScreen);
+    await vanishSent();
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('vanish-not-mined-cancel'));
+    });
+    expect(screen.getByTestId('vanish-cancel-error')).toHaveTextContent(
+      /The Vanish could not be cancelled\. Not sent: the test node checked it first and would not take it\./,
+    );
+  });
+
+  it('offers no Cancel while it is only Sent', async () => {
+    renderOn('iPhone', VanishScreen);
+    await vanishSent();
+    expect(screen.getByTestId('progress-sent')).toBeOnTheScreen();
+    expect(screen.queryByTestId('vanish-not-mined-cancel')).toBeNull();
+  });
 });
 
 describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {

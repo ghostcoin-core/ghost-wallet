@@ -6,23 +6,25 @@
 //
 // "Sent" means the node said it holds the send. A send saved while the node
 // was out of reach, or whose broadcast did not get through, is queued: it goes
-// out by itself once the node answers, and never twice.
-import { stepName } from '../vanish/status-mapping';
+// out by itself once the node answers, and never twice. A send the node took
+// that is in no block `STUCK_BLOCKS` blocks on is "Not mined yet", never Sent.
+import { NOT_MINED_LABEL, STUCK_BLOCKS, notMinedText, stepName } from '../vanish/status-mapping';
 
-export type SendStatus = 'queued' | 'sent' | 'in-block' | 'settled' | 'failed' | 'conflicted';
+export type SendStatus = 'queued' | 'sent' | 'stuck' | 'in-block' | 'settled' | 'failed' | 'conflicted';
 
 /**
  * The status of a send at saved step `step`. `reached` is whether the node
- * has said it holds the newest attempt (it took the broadcast, or lists it).
+ * has said it holds the newest attempt (it took the broadcast, or lists it);
+ * `stuck`, whether it has been in no block for `STUCK_BLOCKS` blocks since.
  */
-export function sendStatusOf(step: number | string, reached: boolean): SendStatus {
+export function sendStatusOf(step: number | string, reached: boolean, stuck = false): SendStatus {
   switch (stepName(step)) {
     case 'Prepared':
     case 'BackedUp':
     case 'Signed':
       return 'queued';
     case 'Sent':
-      return reached ? 'sent' : 'queued';
+      return reached ? (stuck ? 'stuck' : 'sent') : 'queued';
     case 'Included':
       return 'in-block';
     case 'Settled':
@@ -48,6 +50,8 @@ export function sendStatusLabel(status: SendStatus): string {
       return 'Queued';
     case 'sent':
       return 'Sent';
+    case 'stuck':
+      return NOT_MINED_LABEL;
     case 'in-block':
       return 'In a block';
     case 'settled':
@@ -66,6 +70,8 @@ export function sendStageNote(status: SendStatus): string {
       return 'Saved on this phone. It goes out when the test node can be reached.';
     case 'sent':
       return 'The test node has it';
+    case 'stuck':
+      return `The test node has it, but ${STUCK_BLOCKS} blocks went by without it`;
     case 'in-block':
       return 'Usually in under a minute';
     case 'settled':
@@ -105,6 +111,9 @@ export function sendProgressRows(status: SendStatus): SendProgressRow[] {
       return [row('sent', 'done'), row('in-block', 'done'), row('failed', 'current')];
     case 'conflicted':
       return [row('conflicted', 'current')];
+    case 'stuck':
+      // It stands where Sent would, and is never shown as Sent.
+      return [row('stuck', 'current'), row('in-block', 'waiting'), row('settled', 'waiting')];
     default: {
       const at = PROGRESS.indexOf(status);
       return PROGRESS.map((stage, index) =>
@@ -124,6 +133,8 @@ export function sendStatusDetail(status: SendStatus): string {
     case 'sent':
     case 'in-block':
       return SAFE_TO_CLOSE;
+    case 'stuck':
+      return notMinedText('send');
     case 'settled':
       return 'Settled. The GHOST is with the recipient.';
     case 'failed':
@@ -137,6 +148,7 @@ export function sendStatusDetail(status: SendStatus): string {
 export function sendHeadline(status: SendStatus): string {
   switch (status) {
     case 'queued':
+    case 'stuck':
       return 'You are sending';
     case 'failed':
     case 'conflicted':

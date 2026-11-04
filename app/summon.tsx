@@ -29,7 +29,15 @@ import type { SpentHint } from '../lib/vanish/coin-pages';
 import { keyFieldRule } from '../lib/vanish/field-rules';
 import { decodeDetails } from '../lib/vanish/payments';
 import { newestShared, openShared, paymentsChanged, shared, takeReopened } from '../lib/vanish/pending';
-import { arrivedText, isFinal, lookupMessage, screenDone, statusOfStep, type RevealKind } from '../lib/vanish/status-mapping';
+import {
+  arrivedText,
+  isFinal,
+  lookupMessage,
+  notSentReason,
+  screenDone,
+  statusOfStep,
+  type RevealKind,
+} from '../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import { normaliseKeyText, parseWordsCheck } from '../lib/vanish/word-validation';
 import { checkKeyWords, type CorePaymentSequence } from '../modules/ghost-core';
@@ -207,10 +215,11 @@ export default function SummonScreen() {
           paymentsChanged();
         },
         (failure) => {
-          // Only a failure before sending, or the node's refusal: a send that
-          // timed out comes back above as a payment still sending.
+          // Only a failure before sending (the node's check refused it, or
+          // could not be asked), or the node's refusal: a send that timed out
+          // comes back above as a payment still sending.
           setProving(false);
-          setError(`The coins could not be summoned. ${failureReason(failure, kit.nodeUrl)}`);
+          setError(`The coins could not be summoned. ${notSentReason(failure, kit.nodeUrl)}`);
         },
       );
     }, 50);

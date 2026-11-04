@@ -5,14 +5,13 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { vanishCore, type CorePaymentSequence, type CorePaymentStore, type VanishBindings } from '../../modules/ghost-core';
-import { failureReason } from '../node/failure-reason';
 import { buildNetwork, type BuildNetwork } from '../network/build-network';
 import { devicePageCache, readCoinTreeFrom, type CoinTreeRead, type PageCache, type PageReadOptions } from './coin-pages';
 import { vanishNode, type VanishNode } from './node';
 import { advance, type Rebuild } from './payments';
 import { documentPaymentFiles, paymentStore } from './payment-store';
 import { moveAlone, stopIfShort, stoppedVanish } from './pending';
-import { isFinal, statusOfStep, type PaymentStatus } from './status-mapping';
+import { isFinal, notSentReason, statusOfStep, type PaymentStatus } from './status-mapping';
 
 export const MOVE_EVERY_MS = 3_000;
 
@@ -76,6 +75,10 @@ export type PaymentView = {
   error: string | null;
   /** A Vanish the account could not pay for: held stopped, `error` says why. */
   stopped?: boolean;
+  /** The node took it and `STUCK_BLOCKS` blocks went by with it in none (status `stuck`). */
+  stuck?: boolean;
+  /** Stuck, and a cancel can take its place: the screen offers Cancel. */
+  cancellable?: boolean;
 };
 
 /**
@@ -142,7 +145,8 @@ export function usePayment(
         if (stopped) {
           return;
         }
-        const message = failureReason(error, tools.nodeUrl);
+        // A payment the node checked and refused, or could not check, was not sent: it says so.
+        const message = notSentReason(error, tools.nodeUrl);
         const step = payment.step();
         setMoved((current) => ({
           of: payment,

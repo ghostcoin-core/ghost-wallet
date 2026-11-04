@@ -84,6 +84,7 @@ const mockNode = {
   known: jest.fn(async (hashes: string[]) => hashes.map(() => false)),
   nonce: jest.fn(async () => 2n),
   maxPriorityFeePerGas: jest.fn(async () => 1n),
+  checkSend: jest.fn(async (_bytes: string, _from: string | null) => {}),
   sendRaw: jest.fn(async (_bytes: string) => `0x${'cc'.repeat(32)}`),
 };
 // What the node says the account holds when a Vanish is signed.

@@ -237,6 +237,7 @@ function fakeKit(online: { value: boolean }, saved: Record<string, Fake> = {}) {
     known: jest.fn((hashes: string[]) => reachable(hashes.map(() => pendingOnNode))),
     nonce: jest.fn(() => reachable(5n)),
     maxPriorityFeePerGas: jest.fn(() => reachable(1_000_000_000n)),
+    checkSend: jest.fn((_bytes: string, _from: string | null) => reachable(undefined)),
     sendRaw: jest.fn(() => reachable(OTHER_TX)),
     blocks: jest.fn(),
     rawTransaction: jest.fn(),

@@ -11,12 +11,23 @@
 // in this memory only as long as the core holds the key: they go when the
 // key is confirmed written down or the Vanish is cancelled, and with the app.
 import type { CorePaymentSequence, CorePaymentStore, VanishBindings } from '../../modules/ghost-core';
+import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { failureReason } from '../node/failure-reason';
 import { refusedMarks } from './payment-store';
 import { OTHER_NETWORK_TEXT, decodeDetails, onOtherChain } from './payments';
 import { sendStatusLabel, sendStatusOf } from '../send/payment-status';
 import { hasReached } from '../send/reached';
-import { isFinal, statusLabel, statusOfStep, stepName, type PaymentStatus, type SavedKind } from './status-mapping';
+import { jsonFile, type JsonFile } from '../storage';
+import {
+  NOT_MINED_LABEL,
+  STUCK_BLOCKS,
+  isFinal,
+  statusLabel,
+  statusOfStep,
+  stepName,
+  type PaymentStatus,
+  type SavedKind,
+} from './status-mapping';
 
 /** Where a Vanish stood while the core still held its new key. */
 export type HeldStep = 'save' | 'check' | 'card';
@@ -130,6 +141,7 @@ function idTime(id: string): number {
 export function forgetShared(id: string) {
   sequences.delete(id);
   stopped.delete(id);
+  unmined.delete(id);
   notify();
 }
 
@@ -199,6 +211,107 @@ export function savedRefusal(id: string, store?: CorePaymentStore | null): strin
     return null;
   }
   return reason === null ? null : reason || STOPPED_TEXT;
+}
+
+/** A payment the node took and has not mined: since which tip, with how many attempts, as of which tip. */
+type Unmined = { since: number; attempts: number; tip: number };
+const unmined = new Map<string, Unmined>();
+
+/**
+ * Notes that payment `id` is sent and in no block at tip `tip`, with
+ * `attempts` attempts, and says whether it is stuck: `STUCK_BLOCKS` blocks
+ * went by since it was first seen so. With `newAttemptRestarts` (a payment
+ * with an account nonce), a new attempt, such as a cancel, counts again from
+ * here. Kept in memory: after a restart it counts from the first move.
+ */
+export function noteUnmined(id: string, attempts: number, tip: number, newAttemptRestarts: boolean): boolean {
+  const known = unmined.get(id);
+  const wasStuck = known !== undefined && known.tip - known.since >= STUCK_BLOCKS;
+  const fresh = !known || tip < known.since || (newAttemptRestarts && known.attempts !== attempts);
+  const next = fresh ? { since: tip, attempts, tip } : { since: known.since, attempts, tip: Math.max(tip, known.tip) };
+  unmined.set(id, next);
+  const stuck = next.tip - next.since >= STUCK_BLOCKS;
+  if (stuck !== wasStuck) {
+    notify();
+  }
+  return stuck;
+}
+
+/** Payment `id` is in a block, final, or not sent: it is not waiting for one. */
+export function noteNotUnmined(id: string) {
+  const known = unmined.get(id);
+  if (known && unmined.delete(id) && known.tip - known.since >= STUCK_BLOCKS) {
+    notify();
+  }
+}
+
+/** Whether payment `id` was last seen sent and not mined for `STUCK_BLOCKS` blocks. */
+export function isStuck(id: string): boolean {
+  const known = unmined.get(id);
+  return known !== undefined && known.tip - known.since >= STUCK_BLOCKS;
+}
+
+/**
+ * The attempts that are cancels (a send of 1 wei to the payment's own
+ * account with its nonce), by transaction hash. One that lands means the
+ * payment did not happen. Kept in a small file so it holds after a restart.
+ * Hashes only, nothing secret.
+ */
+let cancelFile: JsonFile = jsonFile('payments-cancels.json');
+let cancels: Set<string> | null = null;
+
+function cancelHashes(): Set<string> {
+  if (!cancels) {
+    const raw = cancelFile.read();
+    cancels = new Set(Array.isArray(raw) ? raw.filter((hash): hash is string => typeof hash === 'string') : []);
+  }
+  return cancels;
+}
+
+function saveCancels() {
+  void cancelFile.write([...cancelHashes()]).catch(() => {
+    // Kept in memory; the next cancel writes the file again.
+  });
+}
+
+/** Remembers that the attempt `hash` is a cancel. */
+export function markCancel(hash: string) {
+  cancelHashes().add(hash.toLowerCase());
+  saveCancels();
+}
+
+/** Forgets a cancel that was never sent. */
+export function unmarkCancel(hash: string) {
+  if (cancelHashes().delete(hash.toLowerCase())) {
+    saveCancels();
+  }
+}
+
+/** Whether the attempt `hash` is a cancel. */
+export function isCancel(hash: string): boolean {
+  return cancelHashes().has(hash.toLowerCase());
+}
+
+/** Whether the newest attempt of `sequence` is a cancel still waiting for a block. */
+export function cancelWaiting(sequence: CorePaymentSequence | null): boolean {
+  try {
+    const record = sequence?.record();
+    const newest = record?.attempts?.[record.attempts.length - 1];
+    return !!record && !!newest && stepName(record.step) === 'Sent' && isCancel(bytesToHex(newest.transactionHash));
+  } catch {
+    return false;
+  }
+}
+
+/** Starts the cancels again from `next` (or the real file); for tests. */
+export function resetCancels(next?: JsonFile) {
+  cancelFile = next ?? jsonFile('payments-cancels.json');
+  cancels = null;
+}
+
+/** How Home lists a payment the node took and has not mined in `STUCK_BLOCKS` blocks. */
+export function notMinedStepText(kind: SavedKind): string {
+  return kind === 'vanish' ? `${NOT_MINED_LABEL}. The Phantom Key holds nothing yet.` : `${NOT_MINED_LABEL}.`;
 }
 
 /** How Home lists a Vanish held stopped. */
@@ -340,7 +453,9 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
           ? STOPPED_TEXT
           : keyStep
             ? heldStepText(keyStep)
-            : kind === 'send'
+            : stepName(step) === 'Sent' && isStuck(id)
+              ? notMinedStepText(kind)
+              : kind === 'send'
               ? sendStatusLabel(sendStatusOf(step, hasReached(id)))
               : statusLabel(status, kind),
     });
@@ -355,4 +470,5 @@ export function resetPending() {
   sequences.clear();
   moving.clear();
   stopped.clear();
+  unmined.clear();
 }

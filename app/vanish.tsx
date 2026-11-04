@@ -40,11 +40,13 @@ import { useHome } from '../lib/home/use-home';
 import { useLayout } from '../lib/layout';
 import { failureReason } from '../lib/node/failure-reason';
 import { pickCheckPositions } from '../lib/onboarding/word-check';
+import { asSendKit, cancelStuck } from '../lib/send/send-payment';
 import { amountMessage } from '../lib/send/validation';
 import { useSettings } from '../lib/settings/settings';
 import { minimumVanish, signVanishAgain, startVanish, vanishFee } from '../lib/vanish/actions';
 import { coversVanish, parseGhostAmount } from '../lib/vanish/amount';
 import {
+  cancelWaiting,
   forgetShared,
   heldKey,
   heldVanish,
@@ -58,7 +60,7 @@ import {
   takeReopened,
   type HeldVanish,
 } from '../lib/vanish/pending';
-import { isFinal, screenDone, statusOfStep, stepName } from '../lib/vanish/status-mapping';
+import { CANCEL_SENT_TEXT, isFinal, notSentReason, screenDone, statusOfStep, stepName } from '../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import type { CorePaymentSequence } from '../modules/ghost-core';
 import { CardCancelled, cardsSupported, putPhantomKeyOnCard } from '../modules/ghost-nfc';
@@ -147,6 +149,8 @@ export default function VanishScreen() {
   const [writing, setWriting] = useState(false);
   // Never remembered: every check starts unticked.
   const [skip, setSkip] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!kit) {
@@ -343,7 +347,30 @@ export default function VanishScreen() {
     router.back();
   }
 
+  /**
+   * Replaces a Vanish the node took but has not mined with a send of 1 wei to
+   * this account, same nonce, higher fee: only on the person's tap, and checked
+   * by the node before it is sent like every attempt.
+   */
+  async function cancelNotMined() {
+    const sends = kit ? asSendKit(kit) : null;
+    if (!sends || !sequence || cancelling) {
+      return;
+    }
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      await cancelStuck(sends, sequence);
+    } catch (failure) {
+      setCancelError(`The Vanish could not be cancelled. ${notSentReason(failure, sends.nodeUrl)}`);
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   const unavailable = !kit || !address;
+  const canCancel = phase.name === 'sending' && payment?.cancellable === true && kit !== null && asSendKit(kit) !== null;
+  const cancelSent = phase.name === 'sending' && payment?.status === 'sent' && cancelWaiting(sequence);
 
   return (
     <Screen
@@ -527,7 +554,28 @@ export default function VanishScreen() {
             <TextButton label="Leave" onPress={() => router.back()} testID="vanish-leave" />
           </>
         ) : phase.name === 'sending' ? (
-          <PaymentExit final={payment ? screenDone(payment.status) : false} onLeave={() => router.back()} testPrefix="vanish" />
+          <>
+            {cancelSent ? (
+              <Text accessibilityLiveRegion="polite" style={textStyles.body} testID="vanish-cancel-sent">
+                {CANCEL_SENT_TEXT}
+              </Text>
+            ) : null}
+            {canCancel ? (
+              <Button
+                label={cancelling ? 'Cancelling' : 'Cancel'}
+                secondary
+                disabled={cancelling}
+                onPress={() => void cancelNotMined()}
+                testID="vanish-not-mined-cancel"
+              />
+            ) : null}
+            {cancelError ? (
+              <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="vanish-cancel-error">
+                {cancelError}
+              </Text>
+            ) : null}
+            <PaymentExit final={payment ? screenDone(payment.status) : false} onLeave={() => router.back()} testPrefix="vanish" />
+          </>
         ) : null}
       </Column>
     </Screen>

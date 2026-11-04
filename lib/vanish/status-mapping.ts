@@ -1,14 +1,25 @@
 // Where a Vanish, Summon or Claim stands, as its screen shows it. The native
 // core's step sequence (`core/src/step_sequence.rs`) saves every step; this
 // file maps its steps, and what `recover` says to do next, to the progress the
-// person sees: proving, sent, in a block, settled, or failed.
+// person sees: proving, sent, not mined yet, in a block, settled, or failed.
+import { failureReason } from '../node/failure-reason';
 
 export type RevealKind = 'vanish' | 'summon' | 'claim';
 
 /** Every kind of payment this phone saves: these and plain sends (lib/send/). */
 export type SavedKind = RevealKind | 'send';
 
-export type PaymentStatus = 'proving' | 'sent' | 'in-block' | 'settled' | 'failed';
+/**
+ * `stuck`: the node took it, but `STUCK_BLOCKS` blocks went by and it is in
+ * none. It is never shown as plain Sent then.
+ */
+export type PaymentStatus = 'proving' | 'sent' | 'stuck' | 'in-block' | 'settled' | 'failed';
+
+/** How many blocks a payment the node took may go unmined before it shows as not mined yet. */
+export const STUCK_BLOCKS = 10;
+
+/** The label of a payment the node took but has not mined in `STUCK_BLOCKS` blocks. */
+export const NOT_MINED_LABEL = 'Not mined yet';
 
 /** The core's `Step`, in its declared order. */
 export const STEP_NAMES = [
@@ -92,6 +103,8 @@ export function statusLabel(status: PaymentStatus, kind: RevealKind): string {
       return kind === 'vanish' ? 'Signing' : 'Proving on this phone';
     case 'sent':
       return 'Sent';
+    case 'stuck':
+      return NOT_MINED_LABEL;
     case 'in-block':
       return 'In a block';
     case 'settled':
@@ -102,6 +115,8 @@ export function statusLabel(status: PaymentStatus, kind: RevealKind): string {
 }
 
 const PROGRESS: readonly PaymentStatus[] = ['proving', 'sent', 'in-block', 'settled'];
+/** The same stages for a payment not mined yet: it stands where Sent would. */
+const STUCK_PROGRESS: readonly PaymentStatus[] = ['proving', 'stuck', 'in-block', 'settled'];
 
 export type ProgressRow = {
   status: PaymentStatus;
@@ -114,8 +129,9 @@ export function progressRows(status: PaymentStatus, kind: RevealKind): ProgressR
   if (status === 'failed') {
     return [{ status: 'failed', label: statusLabel('failed', kind), state: 'current' }];
   }
-  const at = PROGRESS.indexOf(status);
-  return PROGRESS.map((stage, index) => ({
+  const stages = status === 'stuck' ? STUCK_PROGRESS : PROGRESS;
+  const at = stages.indexOf(status);
+  return stages.map((stage, index) => ({
     status: stage,
     label: statusLabel(stage, kind),
     state: index < at || (stage === 'settled' && status === 'settled') ? 'done' : index === at ? 'current' : 'waiting',
@@ -167,16 +183,58 @@ export function statusDetail(status: PaymentStatus, kind: RevealKind, step?: num
         : 'Making the proof on this phone. This can take a minute.';
     case 'sent':
       return 'Safe to close the app. It never pays twice.';
+    case 'stuck':
+      return notMinedText(kind);
     case 'in-block':
       // In a block is one confirmation; no live count is asked of the node.
       return kind === 'vanish' ? `${arrivedText(status, kind)} ${settlingLine(1)}` : settlingLine(1);
     case 'settled':
       return arrivedText(status, kind) ?? '';
     case 'failed':
-      return step !== undefined && stepName(step) === 'Conflicted'
-        ? 'Another payment used these coins first. Nothing more is sent.'
+      if (step !== undefined && stepName(step) === 'Conflicted') {
+        return 'Another payment used these coins first. Nothing more is sent.';
+      }
+      // A Vanish that never landed (or whose cancel did) put nothing in its key.
+      return kind === 'vanish'
+        ? 'The chain did not take it. Nothing more is sent. The Phantom Key holds nothing.'
         : 'The chain did not take it. Nothing more is sent.';
   }
+}
+
+/**
+ * What a payment not mined in `STUCK_BLOCKS` blocks says. A Vanish's Phantom
+ * Key holds nothing until its commit is in a block, and it can be cancelled;
+ * a Summon or Claim has no place in an account to replace, so it cannot.
+ */
+export function notMinedText(kind: SavedKind): string {
+  const late = `Not mined yet: ${STUCK_BLOCKS} blocks went by and it is in none of them.`;
+  switch (kind) {
+    case 'vanish':
+      return `${late} The Phantom Key holds nothing until it is. Cancel sends 1 wei to your own account in its place, at a higher fee.`;
+    case 'send':
+      return `${late} No GHOST has moved yet.`;
+    default:
+      return `${late} The coins are still in the Phantom Key.`;
+  }
+}
+
+/** What the Vanish screen says while its cancel waits for a block. */
+export const CANCEL_SENT_TEXT = 'Cancel sent. The Phantom Key holds nothing; whichever is mined first counts.';
+
+/**
+ * Why a payment was not sent, from an error of the check before sending
+ * (lib/vanish/node.ts `checkSend`): the node's own reason when it refused it,
+ * or that the node could not be asked. Any other error reads as usual.
+ */
+export function notSentReason(error: unknown, nodeUrl: string): string {
+  const reason = failureReason(error, nodeUrl);
+  const check = error as { notSent?: unknown; refused?: unknown } | null;
+  if (!(error instanceof Error) || check?.notSent !== true) {
+    return reason;
+  }
+  return check.refused === true
+    ? `Not sent: the test node checked it first and would not take it. ${reason}`
+    : `Not sent: the test node could not check it first, so nothing was sent. ${reason}`;
 }
 
 /** What the coin lookup found (`KeyCoins.status` in core/src/vanish.rs). */
