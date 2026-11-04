@@ -13,9 +13,10 @@ crate-type = ["lib", "staticlib"]
 
 [dependencies]
 # Ghost's own client library, pinned to a commit. All derivation happens there.
-ghost-client = { git = "https://github.com/ghostcoin-core/ghost", rev = "385b4dcb5904c175ec1a5d8793c3406162a10ae4" }
+# Version 3: 430-byte commit data and 380-byte notes, as Ghost's node accepts.
+ghost-client = { git = "https://github.com/ghostcoin-core/ghost", rev = "c65650a106f436fc06b8359d8fea44bcb6be6dd6" }
 # Ghost's reveal prover and verifier, from the same commit as ghost-client.
-ghost-proofs = { git = "https://github.com/ghostcoin-core/ghost", rev = "385b4dcb5904c175ec1a5d8793c3406162a10ae4" }
+ghost-proofs = { git = "https://github.com/ghostcoin-core/ghost", rev = "c65650a106f436fc06b8359d8fea44bcb6be6dd6" }
 # The fixed generator of the Summon benchmark's test chain (a seeded StdRng,
 # as Ghost's own client tests use). Same version as ghost-client's tests.
 # `sys_rng` is the operating system's random source, read on every hedged

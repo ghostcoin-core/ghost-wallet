@@ -5,7 +5,10 @@
 //! own verifier.
 
 use ghost_client::account::{SeedError, WalletSeed, verify_envelope};
-use ghost_client::{KeyFormat, PhantomKey};
+use ghost_client::{
+    Commitment, KeyFormat, NOTE_BYTES, PhantomKey, REVEAL_NOTE_BYTES, SALTED_COMMIT_DATA_BYTES,
+    SALTED_COMMIT_FORMAT_VERSION, decrypt_note,
+};
 use ghost_proofs::verify_salted_coin_reveal;
 use ghost_wallet_core::{
     CHECKED_KEY_WORDS, COMMIT_DATA_BYTES, COMMIT_ENTRY, CoinLeaf, ENVELOPE_BYTES, FeeWindow, KeyVault, PRIVATE_TX_TYPE, RevealRequest,
@@ -160,12 +163,16 @@ fn the_key_field_refuses_account_words_by_name() {
 // --- Vanish ----------------------------------------------------------------
 
 #[test]
-fn a_vanish_commit_is_the_206_bytes_of_ghosts_web_app() {
+fn a_vanish_commit_is_the_430_bytes_of_ghost_version_3() {
     let key = key(2);
     let commit = vanish_commit_with(&key, TEST_CHAIN_ID, ONE_GHOST, &mut rng(3)).unwrap();
-    assert_eq!(COMMIT_DATA_BYTES, 206);
-    assert_eq!(commit.commit_data.len(), 206);
-    assert_eq!(&commit.commit_data[..2], &[0x00, 0x02]);
+    // Ghost's node accepts only version 3: 2 + 32 + 16 + 380 bytes.
+    assert_eq!(COMMIT_DATA_BYTES, 430);
+    assert_eq!(COMMIT_DATA_BYTES, SALTED_COMMIT_DATA_BYTES);
+    assert_eq!(NOTE_BYTES, 380);
+    assert_eq!(commit.commit_data.len(), 430);
+    assert_eq!(&commit.commit_data[..2], &[0x00, 0x03]);
+    assert_eq!(commit.commit_data[..2], SALTED_COMMIT_FORMAT_VERSION);
     assert_eq!(commit.amount_wei, ONE_GHOST.to_string());
 
     // The chain's leaf, rebuilt from the data and the amount paid, is the commit's.
@@ -173,6 +180,27 @@ fn a_vanish_commit_is_the_206_bytes_of_ghosts_web_app() {
     assert_eq!(leaf.commitment, commit.commitment);
     assert_eq!(leaf.salt.as_deref(), Some(&commit.commit_data[34..50]));
     assert_eq!(leaf.note, commit.commit_data[50..].to_vec());
+    assert_eq!(leaf.note.len(), 380);
+
+    // The note is a version-3 note Ghost's own reader opens, with the empty
+    // capsule, and it holds the coin: number 0 of the amount, under its salt.
+    let commitment = Commitment::from_bytes(commit.commitment.as_slice().try_into().unwrap());
+    let note: [u8; NOTE_BYTES] = leaf.note.as_slice().try_into().unwrap();
+    let contents = decrypt_note(&key.note_key(), TEST_CHAIN_ID, &commitment, &note).ok().expect("a version-3 note");
+    assert_eq!((contents.number, contents.amount.wei()), (0, ONE_GHOST));
+    assert_eq!(contents.salt.as_bytes().as_slice(), &commit.commit_data[34..50]);
+    // Sealed for this chain only.
+    assert!(decrypt_note(&key.note_key(), TEST_CHAIN_ID + 1, &commitment, &note).is_err());
+
+    // Version-2 commit data (the old 206 bytes) is refused, as the node refuses it.
+    let mut old = commit.commit_data[..206].to_vec();
+    old[1] = 2;
+    assert!(matches!(commit_leaf(old.clone(), commit.amount_wei.clone()), Err(VanishError::Malformed { .. })));
+    let seed = WalletSeed::from_bytes(COUNTING);
+    assert!(matches!(sign_vanish_with(&seed, 0, &vanish_send(old), &mut rng(3)), Err(VanishError::Malformed { .. })));
+    // The gas floor counts all 430 data bytes.
+    assert!(VANISH_MIN_GAS >= 16 * 430);
+    assert!(VANISH_GAS_LIMIT >= VANISH_MIN_GAS);
 
     // Another amount makes another leaf: the amount is bound in.
     let other = commit_leaf(commit.commit_data.clone(), (ONE_GHOST - 1).to_string()).unwrap();
@@ -183,7 +211,7 @@ fn a_vanish_commit_is_the_206_bytes_of_ghosts_web_app() {
     let mut wrong_version = commit.commit_data.clone();
     wrong_version[1] = 1;
     assert!(matches!(commit_leaf(wrong_version, commit.amount_wei.clone()), Err(VanishError::Malformed { .. })));
-    assert!(matches!(commit_leaf(commit.commit_data[..205].to_vec(), commit.amount_wei), Err(VanishError::Malformed { .. })));
+    assert!(matches!(commit_leaf(commit.commit_data[..429].to_vec(), commit.amount_wei), Err(VanishError::Malformed { .. })));
 }
 
 #[test]
@@ -360,6 +388,12 @@ fn claim_part_then_summon_the_rest_back_to_the_account() {
     assert_eq!(shown.marker, proved.marker);
     assert_eq!(shown.leaf.commitment, claim.reveal.remainder.to_vec());
     assert_eq!(shown.leaf.salt, None);
+    // The envelope keeps the 156-byte remainder note; the tree holds it padded
+    // with zeros to the 380 bytes of every note, as the node stores it.
+    assert_eq!(REVEAL_NOTE_BYTES, 156);
+    assert_eq!(shown.leaf.note.len(), NOTE_BYTES);
+    assert_eq!(&shown.leaf.note[..156], &proved.envelope[ENVELOPE_BYTES - 156..]);
+    assert!(shown.leaf.note[156..].iter().all(|byte| *byte == 0));
     spent.push(shown.marker);
     leaves.push(shown.leaf);
 

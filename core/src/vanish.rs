@@ -2,9 +2,10 @@
 //!
 //! Vanish: [`prepare_vanish`] draws a fresh Phantom Key from the operating
 //! system's random source and makes its coin commit number 0 with Ghost's own
-//! client: the 206-byte commit data (version `0x0002`, the fingerprint `F`,
-//! the per-coin salt and the 156-byte note sealed under the key's note key),
-//! the same bytes Ghost's web app sends. As in Ghost's web app, the key is
+//! client: the 430-byte commit data (version `0x0003`, the fingerprint `F`,
+//! the per-coin salt and the 380-byte version-3 note sealed under the key's
+//! note key, with the empty policy capsule), the same bytes Ghost's web app
+//! sends and the only commit data Ghost's node accepts. As in Ghost's web app, the key is
 //! written down before anything is sent: it is held in native memory only
 //! while [`take_phantom_key_words`] hands its 24 words to the screen that
 //! shows them (once) and [`check_phantom_key_word`] checks three of them typed
@@ -23,7 +24,9 @@
 //! [`commit_leaf`] for each Vanish, [`reveal_leaf`] for each reveal.
 //! [`find_key_coins`] looks the key up in it with Ghost's `restore_coins`, and
 //! [`prove_key_reveal`] proves the reveal here, on the phone, and lays out the
-//! private transaction (`0x50`) of spec 07.
+//! private transaction (`0x50`) of spec 07. A reveal still carries a 156-byte
+//! (version-2) remainder note; the coin tree holds it zero-padded to the 380
+//! bytes of every tree note, so [`reveal_leaf`] pads it as the node does.
 //!
 //! Nothing here logs, prints or formats a key, its words or a signature: no
 //! type holding one implements `Debug`, errors hold reasons and positions
@@ -37,9 +40,10 @@ use ghost_client::account::{AccountTx, WalletSeed};
 use ghost_client::commit::salted_coin_commitment;
 use ghost_client::reveal::{ChainParams, CoinReveal, Proof};
 use ghost_client::{
-    Amount, Commitment, Current, Fingerprint, KeyError, KeyFormat, Marker, NOTE_BYTES, NoteContents, PhantomKey,
-    RevealTerms, Rule, SALT_BYTES, Salt, TreeLeaf, encrypt_note, full_reveal, partial_reveal, restore_coins,
-    salted_commit_data,
+    Amount, Capsule, Commitment, Current, Fingerprint, KeyError, KeyFormat, Marker, NOTE_BYTES, NoteContents,
+    PhantomKey, REVEAL_NOTE_BYTES, RevealTerms, Rule, SALT_BYTES, SALTED_COMMIT_DATA_BYTES,
+    SALTED_COMMIT_FORMAT_VERSION, Salt, TreeLeaf, encrypt_note, full_reveal, pad_reveal_note, partial_reveal,
+    restore_coins, salted_commit_data,
 };
 use ghost_proofs::PROTOCOL_VERSION_1;
 use rand::CryptoRng;
@@ -53,10 +57,13 @@ use crate::summon::root_and_path;
 pub const COMMIT_ENTRY: [u8; 20] = [
     0x67, 0x68, 0x6f, 0x73, 0x74, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05,
 ];
-/// The commit data's layout version.
-pub const COMMIT_VERSION: [u8; 2] = [0x00, 0x02];
-/// Version, `F`, the salt and the note.
-pub const COMMIT_DATA_BYTES: usize = 2 + 32 + SALT_BYTES + NOTE_BYTES;
+/// The commit data's layout version, Ghost's: version 3 (`0x0003`).
+pub const COMMIT_VERSION: [u8; 2] = SALTED_COMMIT_FORMAT_VERSION;
+/// Version, `F`, the salt and the 380-byte note: 430 bytes.
+pub const COMMIT_DATA_BYTES: usize = SALTED_COMMIT_DATA_BYTES;
+/// Where the note starts in the commit data.
+const COMMIT_NOTE_AT: usize = 2 + 32 + SALT_BYTES;
+const _: () = assert!(COMMIT_DATA_BYTES == COMMIT_NOTE_AT + NOTE_BYTES);
 /// The gas limit of a Vanish: the cap of Ghost's web app. Unused gas is not
 /// paid.
 pub const VANISH_GAS_LIMIT: u64 = 500_000;
@@ -67,8 +74,8 @@ pub const PRIVATE_TX_VERSION: [u8; 2] = [0x00, 0x01];
 /// The proof field, zero-padded.
 pub const PROOF_FIELD_BYTES: usize = 1_310_720;
 /// The payload: version, chain, marker, root, remainder, recipient, out, fee,
-/// proof and note.
-pub const PAYLOAD_BYTES: usize = 2 + 8 + 32 + 32 + 32 + 20 + 32 + 32 + PROOF_FIELD_BYTES + NOTE_BYTES;
+/// proof and the 156-byte remainder note.
+pub const PAYLOAD_BYTES: usize = 2 + 8 + 32 + 32 + 32 + 20 + 32 + 32 + PROOF_FIELD_BYTES + REVEAL_NOTE_BYTES;
 /// The type byte and the payload.
 pub const ENVELOPE_BYTES: usize = 1 + PAYLOAD_BYTES;
 /// The gas every private transaction uses, `G_PRIV`.
@@ -80,7 +87,7 @@ pub const MIN_VANISH_FEES: u128 = 4;
 
 const MARKER_AT: usize = 1 + 2 + 8;
 const REMAINDER_AT: usize = MARKER_AT + 32 + 32;
-const NOTE_AT: usize = ENVELOPE_BYTES - NOTE_BYTES;
+const NOTE_AT: usize = ENVELOPE_BYTES - REVEAL_NOTE_BYTES;
 
 /// Why a Vanish, a lookup or a reveal could not be made. Never holds a key,
 /// its words or a signature.
@@ -415,7 +422,8 @@ pub fn vanish_commit_with<R: CryptoRng + ?Sized>(
         .map_err(|error| VanishError::Amount { reason: error.to_string() })?;
     let salt = Salt::from_bytes(*commit.salt.as_bytes());
     let contents = NoteContents::salted_coin(0, amount, Rule::EMPTY, salt);
-    let note = encrypt_note(&key.note_key(), chain_id, &commit.commitment, &contents, rng);
+    // A version-3 note: the coin's fields and the empty policy capsule.
+    let note = encrypt_note(&key.note_key(), chain_id, &commit.commitment, &contents, &Capsule::empty(), rng);
     let data = salted_commit_data(&commit.fingerprint, &commit.salt, &note);
     Ok(VanishCommit {
         commit_data: data.to_vec(),
@@ -612,10 +620,10 @@ pub struct RevealedLeaf {
 
 fn check_commit_data(data: &[u8]) -> Result<(), VanishError> {
     if data.len() != COMMIT_DATA_BYTES {
-        return Err(malformed("the commit data is not 206 bytes"));
+        return Err(malformed("the commit data is not 430 bytes"));
     }
     if data[..2] != COMMIT_VERSION {
-        return Err(malformed("the commit data is not version 2"));
+        return Err(malformed("the commit data is not version 3"));
     }
     Ok(())
 }
@@ -629,12 +637,14 @@ pub fn commit_leaf(commit_data: Vec<u8>, amount_wei: String) -> Result<CoinLeaf,
     let commitment = salted_coin_commitment(&Fingerprint::from_bytes(fingerprint), amount);
     Ok(CoinLeaf {
         commitment: commitment.as_bytes().to_vec(),
-        note: commit_data[34 + SALT_BYTES..].to_vec(),
-        salt: Some(commit_data[34..34 + SALT_BYTES].to_vec()),
+        note: commit_data[COMMIT_NOTE_AT..].to_vec(),
+        salt: Some(commit_data[34..COMMIT_NOTE_AT].to_vec()),
     })
 }
 
-/// The marker and remainder leaf of a private transaction's envelope.
+/// The marker and remainder leaf of a private transaction's envelope. The
+/// envelope's 156-byte remainder note is zero-padded to the tree's 380 bytes,
+/// as the node stores it.
 #[uniffi::export]
 pub fn reveal_leaf(envelope: Vec<u8>) -> Result<RevealedLeaf, VanishError> {
     if envelope.len() != ENVELOPE_BYTES || envelope[0] != PRIVATE_TX_TYPE {
@@ -643,11 +653,13 @@ pub fn reveal_leaf(envelope: Vec<u8>) -> Result<RevealedLeaf, VanishError> {
     if envelope[1..3] != PRIVATE_TX_VERSION {
         return Err(malformed("not a version 1 private transaction"));
     }
+    let note: &[u8; REVEAL_NOTE_BYTES] =
+        envelope[NOTE_AT..].try_into().map_err(|_| malformed("the remainder note is not 156 bytes"))?;
     Ok(RevealedLeaf {
         marker: envelope[MARKER_AT..MARKER_AT + 32].to_vec(),
         leaf: CoinLeaf {
             commitment: envelope[REMAINDER_AT..REMAINDER_AT + 32].to_vec(),
-            note: envelope[NOTE_AT..].to_vec(),
+            note: pad_reveal_note(note).to_vec(),
             salt: None,
         },
     })
@@ -660,7 +672,7 @@ fn tree_leaves(leaves: &[CoinLeaf]) -> Result<Vec<TreeLeaf>, VanishError> {
             let commitment: [u8; 32] =
                 leaf.commitment.as_slice().try_into().map_err(|_| malformed("a leaf is not 32 bytes"))?;
             let note: [u8; NOTE_BYTES] =
-                leaf.note.as_slice().try_into().map_err(|_| malformed("a note is not 156 bytes"))?;
+                leaf.note.as_slice().try_into().map_err(|_| malformed("a note is not 380 bytes"))?;
             let salt = match &leaf.salt {
                 None => None,
                 Some(salt) => Some(Salt::from_bytes(

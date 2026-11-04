@@ -22,7 +22,7 @@ import {
 } from '../../lib/vanish/coin-pages';
 import { failureReason } from '../../lib/node/failure-reason';
 import { failedNodeUrl } from '../../lib/node/rpc';
-import { vanishNode } from '../../lib/vanish/node';
+import { NOTE_BYTES, parseBucket, parsePage, vanishNode } from '../../lib/vanish/node';
 import type { PaymentKit } from '../../lib/vanish/use-payment';
 import { buildNetwork } from '../../lib/network/build-network';
 import type { CoinLeaf, CoreCoinPage, VanishBindings } from '../../modules/ghost-core';
@@ -38,7 +38,8 @@ const OUR_TAGS = Array.from({ length: 16 }, (_, number) => 0xa0b000 + number * 0
 const hex32 = (n: number, salt = 0) => `0x${(salt * 0x1000000 + n).toString(16).padStart(64, '0')}`;
 const sha = (parts: string[]) => `0x${createHash('sha256').update(parts.join('|')).digest('hex')}`;
 const tagOf = (note: string) => parseInt(note.slice(2, 8), 16);
-const noteWith = (tag: number, filler: string) => `0x${tag.toString(16).padStart(6, '0')}${filler.repeat(153)}`;
+/** A version-3 note of 380 bytes, its lookup tag first. */
+const noteWith = (tag: number, filler: string) => `0x${tag.toString(16).padStart(6, '0')}${filler.repeat(377)}`;
 
 function bucketBits(n: number): number {
   return n < 2 * PAGE ? 0 : Math.min(24, Math.floor(Math.log2(n / PAGE)));
@@ -171,7 +172,7 @@ function fakeNode(
               page === options.tamperPage && i === 5
                 ? { ...entry, leaf: hex32(99_999) }
                 : page === options.zeroNotesPage
-                  ? { ...entry, note: `0x${'00'.repeat(156)}` }
+                  ? { ...entry, note: `0x${'00'.repeat(380)}` }
                   : entry,
             ),
           })),
@@ -396,6 +397,53 @@ describe("finding a key's coins from the node's coin tree pages", () => {
     const fake = fakeNode(treeOf(5_000));
     const node = { ...fake.node, pageSets: async () => [[{ page: 0, filled: 99, entries: treeOf(99) }]] };
     await expect(readCoinTree(fakeCore(), node, memoryCache(), {})).rejects.toThrow(/malformed/);
+  });
+});
+
+describe('version-3 coin pages: 380-byte notes', () => {
+  const page = (note: string) => ({
+    kind: 'coin',
+    treeIndex: '0x0',
+    page: '0x0',
+    filled: '0x1',
+    entries: [{ leaf: hex32(1), note, salt: `0x${'33'.repeat(16)}` }],
+  });
+  const bucket = (note: string) => ({
+    kind: 'coin',
+    treeIndex: '0x0',
+    bits: '0x1',
+    prefix: '0x0',
+    entries: [{ leaf: hex32(1), note, position: '0x2' }],
+  });
+  const v3 = noteWith(0x123456, 'ab');
+  const v2 = `0x${'12'.repeat(156)}`;
+
+  it("reads the node's 380-byte notes, as Ghost version 3 serves them", () => {
+    expect(NOTE_BYTES).toBe(380);
+    expect((v3.length - 2) / 2).toBe(380);
+    expect(parsePage(page(v3), 0, 0).entries[0]).toEqual({ leaf: hex32(1), note: v3, salt: `0x${'33'.repeat(16)}` });
+    expect(parseBucket(bucket(v3), 0, 1, 0).entries[0]).toEqual({ leaf: hex32(1), note: v3, position: 2 });
+    // A reveal's 156-byte remainder note, served zero-padded to 380 bytes.
+    const padded = `${v2}${'00'.repeat(224)}`;
+    expect(parsePage(page(padded), 0, 0).entries[0].note).toBe(padded);
+  });
+
+  it('refuses a version-2 note of 156 bytes, and a note one byte short or long', () => {
+    for (const note of [v2, v3.slice(0, -2), `${v3}00`]) {
+      expect(() => parsePage(page(note), 0, 0)).toThrow(/malformed coin note/);
+      expect(() => parseBucket(bucket(note), 0, 1, 0)).toThrow(/malformed coin note/);
+    }
+  });
+
+  it('finds a coin on a node serving 380-byte notes, and refuses a node still serving 156-byte ones', async () => {
+    const leaves = treeOf(100, [42]);
+    const fake = fakeNode(leaves);
+    const { tree } = await readCoinTree(fakeCore(), fake.node, memoryCache(), { keyText: OURS });
+    expect(found(tree.leaves)).toBe('found');
+    expect(tree.leaves[42].note.byteLength).toBe(380);
+
+    const old = leaves.map((entry) => ({ ...entry, note: `0x${entry.note.slice(2, 2 + 2 * 156)}` }));
+    await expect(readCoinTree(fakeCore(), fakeNode(old).node, memoryCache(), { keyText: OURS })).rejects.toThrow(/malformed/);
   });
 });
 
