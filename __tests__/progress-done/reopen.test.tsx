@@ -67,6 +67,11 @@ jest.mock('../../lib/vanish/actions', () => ({
   minimumVanish: () => new Promise(() => {}),
   vanishFee: () => new Promise(() => {}),
   startVanish: () => mockStartVanish(),
+  startCardVanish: async () => {
+    const sequence = mockSequence('vanish-card', 0, VANISH);
+    mockSaved[sequence.id] = sequence;
+    return { sequence };
+  },
   lookUpKey: jest.fn(),
   signVanishAgain: () => async () => ({ signed: new ArrayBuffer(1) }),
   proveRevealAgain: () => async () => ({ signed: new ArrayBuffer(1) }),
@@ -179,22 +184,23 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(screen.getByTestId('vanish-leave-note')).toBeOnTheScreen();
   });
 
-  it('returns to the card step when left before the card was written', async () => {
+  it('returns to the card step of a card Vanish when left before the card was written', async () => {
     const first = renderOn(device);
-    await makeKey();
-    fireEvent.press(screen.getByTestId('vanish-saved'));
-    typeCheckWords();
+    mockCore.forgetPhantomKey.mockClear();
+    fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
     mockPut.mockRejectedValueOnce(new CardCancelled());
     await act(async () => {
-      fireEvent.press(screen.getByTestId('vanish-card'));
+      fireEvent.press(screen.getByTestId('vanish-make-card'));
     });
     expect(screen.getByTestId('vanish-card-retry')).toBeOnTheScreen();
     leave(first);
     expect(mockCore.confirmPhantomKeySaved).not.toHaveBeenCalled();
+    expect(mockCore.forgetPhantomKey).not.toHaveBeenCalled();
 
     renderOn(device);
-    expect(screen.getByTestId('vanish-card-hold')).toHaveTextContent('The card was not written. Nothing has been sent yet.');
+    expect(screen.getByTestId('vanish-card-hold')).toHaveTextContent('No card holds this key yet. Nothing has been sent.');
     expect(screen.queryByTestId('phantom-key')).toBeNull();
+    expect(screen.queryAllByTestId(/^vanish-check-\d+$/)).toEqual([]);
     await act(async () => {
       fireEvent.press(screen.getByTestId('vanish-card-retry'));
     });
