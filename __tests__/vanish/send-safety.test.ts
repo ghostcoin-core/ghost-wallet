@@ -695,6 +695,52 @@ describe('cancelling a payment not mined yet', () => {
     expect((await advance(kit.node, sequence, null, null)).stuck).toBe(false);
   });
 
+  it.each([
+    ['an inflated priority fee', { priority: 1_000_000_000_000n, baseFee: 3n }],
+    ['an inflated base fee', { priority: 1n, baseFee: 1_000_000_000_000n }],
+    ['a priority fee just above the cap', { priority: 4n, baseFee: 3n }],
+  ])('signs and sends nothing when the node quotes %s, however affordable', async (_what, quote) => {
+    const tip = { height: 300 };
+    const { kit, sequence, core, node } = stuckVanish(tip);
+    await makeStuck(kit, sequence, tip);
+    node.maxPriorityFeePerGas.mockResolvedValue(quote.priority);
+    node.block.mockImplementation(async (height: number) => ({ height, hash: GENESIS, baseFeePerGas: quote.baseFee, transactions: [] }));
+
+    await expect(cancelStuck(kit, sequence)).rejects.toThrow(/asks for a higher fee than a cancel pays.*nothing was signed or sent/);
+    expect(core.signSend).not.toHaveBeenCalled();
+    expect(node.checkSend).not.toHaveBeenCalled();
+    expect(node.sendRaw).not.toHaveBeenCalled();
+    expect(sequence.addAttempt).toHaveBeenCalledTimes(1);
+    expect(isCancel(CANCEL_HASH)).toBe(false);
+  });
+
+  it('signs the fees set on this phone, not the node’s quote, when the quote is below them', async () => {
+    const tip = { height: 300 };
+    const { kit, sequence, core, node } = stuckVanish(tip);
+    await makeStuck(kit, sequence, tip);
+    // A quote under the caps (3 and 23) is only a check: the caps are what is signed.
+    node.maxPriorityFeePerGas.mockResolvedValue(3n);
+    node.block.mockImplementation(async (height: number) => ({ height, hash: GENESIS, baseFeePerGas: 10n, transactions: [] }));
+
+    await cancelStuck(kit, sequence);
+    const [send] = core.signSend.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(send).toMatchObject({ maxPriorityFeePerGas: 3n, maxFeePerGas: 23n });
+  });
+
+  it('cancels a payment once at most, so its fee is never raised again and again', async () => {
+    const tip = { height: 300 };
+    const { kit, sequence, core } = stuckVanish(tip);
+    await makeStuck(kit, sequence, tip);
+    await cancelStuck(kit, sequence);
+    // The cancel itself sits for 10 blocks too.
+    await advance(kit.node, sequence, null, null);
+    tip.height += STUCK_BLOCKS;
+    expect((await advance(kit.node, sequence, null, null)).stuck).toBe(true);
+
+    await expect(cancelStuck(kit, sequence)).rejects.toThrow(/already waiting/);
+    expect(core.signSend).toHaveBeenCalledTimes(1);
+  });
+
   it('sends nothing when the node refuses the cancel', async () => {
     const tip = { height: 300 };
     const { kit, sequence, node } = stuckVanish(tip);
