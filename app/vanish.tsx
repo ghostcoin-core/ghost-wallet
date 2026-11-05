@@ -7,7 +7,13 @@
 // The person may tick "Skip the check" instead of typing the words (unticked
 // every time); the core then drops the key unchecked. Once the words were
 // shown the key can also be put on a blank NTAG 424 card before the core
-// drops it, with no word check: the card is never the only copy.
+// drops it, with no word check.
+// On a phone that reads cards, the amount step also offers a card Vanish:
+// the core makes a card-only key whose words are never shown, typed or held
+// here; it goes straight to a blank card (written and read back), the core
+// drops it, and only then is the Vanish signed and sent. The card is the only
+// copy, like cash. A card that is not written sends nothing: try another
+// blank card, or cancel the Vanish (the core forgets the key).
 // Once the Commit is in a block the coins show as in the Phantom Key and Done
 // shows; settling goes on and Activity shows Settled later. Before that the
 // person may leave, and Home lists it as pending. Leaving before the key is written
@@ -32,7 +38,7 @@ import {
   Title,
 } from '../components/ui';
 import { SkipCheckBox } from '../components/skip-check';
-import { PaymentExit, PaymentProgress, PhantomKeyWords } from '../components/vanish-ui';
+import { CardOnlyNotice, PaymentExit, PaymentProgress, PhantomKeyWords } from '../components/vanish-ui';
 import { WordField } from '../components/word-field';
 import { accountZeroAddress } from '../lib/account';
 import { formatGhost } from '../lib/home/balance-format';
@@ -43,7 +49,7 @@ import { pickCheckPositions } from '../lib/onboarding/word-check';
 import { asSendKit, cancelStuck } from '../lib/send/send-payment';
 import { amountMessage } from '../lib/send/validation';
 import { useSettings } from '../lib/settings/settings';
-import { minimumVanish, signVanishAgain, startVanish, vanishFee } from '../lib/vanish/actions';
+import { minimumVanish, signVanishAgain, startCardVanish, startVanish, vanishFee } from '../lib/vanish/actions';
 import { coversVanish, parseGhostAmount } from '../lib/vanish/amount';
 import {
   cancelWaiting,
@@ -64,7 +70,24 @@ import {
 import { CANCEL_SENT_TEXT, isFinal, notSentReason, screenDone, statusOfStep, stepName } from '../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
 import type { CorePaymentSequence } from '../modules/ghost-core';
-import { CardCancelled, cardsSupported, putPhantomKeyOnCard } from '../modules/ghost-nfc';
+import { CardCancelled, CardError, cardsSupported, putPhantomKeyOnCard } from '../modules/ghost-nfc';
+
+/**
+ * Why a card was not written. A card Vanish has no words to fall back on, so
+ * its text never mentions them: nothing was sent, and another blank card or a
+ * cancel are the ways on.
+ */
+function cardFailureText(failure: unknown, cardOnly: boolean): string {
+  if (failure instanceof CardCancelled) {
+    return cardOnly
+      ? 'No card was written. Nothing was sent. Try again with a blank card, or cancel this Vanish.'
+      : 'No card was written. Try again, or Vanish without a card: your key words still work.';
+  }
+  if (cardOnly && failure instanceof CardError && failure.problem === 'write-failed') {
+    return 'The card was moved away before the Phantom Key was written. Nothing was sent. Wipe that card, or use another blank card, and try again.';
+  }
+  return failure instanceof Error ? failure.message : 'The card could not be written.';
+}
 
 function isPrepared(sequence: CorePaymentSequence | null): boolean {
   return sequence !== null && stepName(sequence.step()) === 'Prepared';
@@ -108,8 +131,12 @@ type Phase =
   | { name: 'amount' }
   | { name: 'save'; words: string[] }
   | { name: 'check'; words: string[]; positions: number[] }
-  /** `checked`: the three words were typed back before the card. */
-  | { name: 'card'; checked: boolean; positions: number[] | null }
+  /**
+   * `checked`: the three words were typed back before the card. `cardOnly`: a
+   * card Vanish, whose key's words are never shown; it never leaves for words
+   * or a check.
+   */
+  | { name: 'card'; checked: boolean; positions: number[] | null; cardOnly: boolean }
   | { name: 'sending' };
 
 function resumedPhase(resumed: ReturnType<typeof resumeVanish>): Phase {
@@ -123,7 +150,7 @@ function resumedPhase(resumed: ReturnType<typeof resumeVanish>): Phase {
     case 'check':
       return { name: 'check', words: held.words, positions: held.positions ?? pickCheckPositions() };
     case 'card':
-      return { name: 'card', checked: held.checked === true, positions: held.positions };
+      return { name: 'card', checked: held.checked === true, positions: held.positions, cardOnly: held.cardOnly === true };
     default:
       return { name: 'sending' };
   }
@@ -191,18 +218,35 @@ export default function VanishScreen() {
     } else if (next.name === 'check') {
       holdVanish({ id, step: 'check', words: next.words, positions: next.positions });
     } else {
-      // The words were shown: the card step needs only the key the core holds.
-      holdVanish({ id, step: 'card', words: [], positions: next.positions, checked: next.checked });
+      // The words were shown, or (a card Vanish) never will be: the card step
+      // needs only the key the core holds.
+      holdVanish({
+        id,
+        step: 'card',
+        words: [],
+        positions: next.positions,
+        checked: next.checked,
+        ...(next.cardOnly ? { cardOnly: true } : {}),
+      });
     }
   }
 
-  async function makeKey() {
+  /** Makes the key: shown as words, or (`card`) for a card only, never shown. */
+  async function makeKey(card = false) {
     if (!kit || !address || amount === null || tooSmall || tooMuch) {
       return;
     }
     setBusy(true);
     setError(null);
     try {
+      if (card) {
+        const started = await startCardVanish(kit, address, amount);
+        const made = shared(started.sequence);
+        setSequence(made);
+        keyStep({ name: 'card', checked: false, positions: null, cardOnly: true }, made);
+        void writeCard(made, true);
+        return;
+      }
       const started = await startVanish(kit, address, amount);
       const made = shared(started.sequence);
       setSequence(made);
@@ -251,8 +295,8 @@ export default function VanishScreen() {
    * Drops the key in the core and sends the Vanish. `unchecked` only when the
    * person ticked "Skip the check".
    */
-  function send(unchecked = false) {
-    if (!kit || !sequence) {
+  function send(unchecked = false, of: CorePaymentSequence | null = sequence) {
+    if (!kit || !of) {
       return;
     }
     try {
@@ -261,7 +305,7 @@ export default function VanishScreen() {
       } else {
         kit.core.confirmPhantomKeySaved();
       }
-      sequence.markBackedUp();
+      of.markBackedUp();
     } catch {
       setError('The Vanish could not be saved. Nothing was sent.');
       return;
@@ -288,13 +332,16 @@ export default function VanishScreen() {
       return;
     }
     setTyped({});
-    keyStep({ name: 'card', checked, positions: phase.positions });
+    keyStep({ name: 'card', checked, positions: phase.positions, cardOnly: false });
     void writeCard();
   }
 
-  /** After a card was not written: sends if the words were checked, or goes back to the check. */
+  /**
+   * After a card was not written: sends if the words were checked, or goes
+   * back to the check. Never for a card Vanish: its card is the only copy.
+   */
   function vanishWithoutCard() {
-    if (phase.name !== 'card') {
+    if (phase.name !== 'card' || phase.cardOnly) {
       return;
     }
     if (phase.checked) {
@@ -306,24 +353,23 @@ export default function VanishScreen() {
     keyStep({ name: 'check', words: [], positions: phase.positions ?? pickCheckPositions() });
   }
 
-  async function writeCard() {
+  /**
+   * Writes the key the core holds to a blank card (read back before it
+   * resolves), then has the core drop it and sends. A card not written sends
+   * nothing and keeps the key held.
+   */
+  async function writeCard(of: CorePaymentSequence | null = sequence, cardOnly = phase.name === 'card' && phase.cardOnly) {
     setWriting(true);
     setError(null);
     try {
       await putPhantomKeyOnCard();
     } catch (failure) {
-      setError(
-        failure instanceof CardCancelled
-          ? 'No card was written. Try again, or Vanish without a card: your key words still work.'
-          : failure instanceof Error
-            ? failure.message
-            : 'The card could not be written.',
-      );
+      setError(cardFailureText(failure, cardOnly));
       return;
     } finally {
       setWriting(false);
     }
-    send();
+    send(false, of);
   }
 
   /** Drops a Vanish not signed yet, with its key. Leaving (Back) keeps both. */
@@ -382,6 +428,7 @@ export default function VanishScreen() {
   }
 
   const unavailable = !kit || !address;
+  const canMake = !unavailable && !busy && amount !== null && !tooSmall && !tooMuch;
   const canCancel = phase.name === 'sending' && payment?.cancellable === true && kit !== null && asSendKit(kit) !== null;
   const cancelSent = phase.name === 'sending' && payment?.status === 'sent' && cancelWaiting(sequence);
 
@@ -403,7 +450,9 @@ export default function VanishScreen() {
         {phase.name === 'amount' ? (
           <>
             <Text style={textStyles.body}>
-              Move GHOST from your account into a new Phantom Key. You will write the key down before anything is sent.
+              {cards
+                ? 'Move GHOST from your account into a new Phantom Key. Put the key on a blank card, or write it down, before anything is sent.'
+                : 'Move GHOST from your account into a new Phantom Key. You will write the key down before anything is sent.'}
             </Text>
             <Panel style={styles.form}>
               <Text style={textStyles.quiet}>Amount</Text>
@@ -431,13 +480,32 @@ export default function VanishScreen() {
                 </Text>
               ) : null}
             </Panel>
-            <Button
-              label="Make a Phantom Key"
-              icon="key"
-              disabled={unavailable || busy || amount === null || tooSmall || tooMuch}
-              onPress={() => void makeKey()}
-              testID="vanish-make-key"
-            />
+            {cards ? (
+              <>
+                <Button
+                  label="Put on a card"
+                  icon="key"
+                  disabled={!canMake}
+                  onPress={() => void makeKey(true)}
+                  testID="vanish-make-card"
+                />
+                <Button
+                  label="Write down 24 words"
+                  secondary
+                  disabled={!canMake}
+                  onPress={() => void makeKey()}
+                  testID="vanish-make-key"
+                />
+              </>
+            ) : (
+              <Button
+                label="Make a Phantom Key"
+                icon="key"
+                disabled={!canMake}
+                onPress={() => void makeKey()}
+                testID="vanish-make-key"
+              />
+            )}
           </>
         ) : null}
         {phase.name === 'save' ? (
@@ -500,7 +568,28 @@ export default function VanishScreen() {
             <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" />
           </>
         ) : null}
-        {phase.name === 'card' ? (
+        {phase.name === 'card' && phase.cardOnly ? (
+          <>
+            <CardOnlyNotice />
+            <Text style={textStyles.body} testID="vanish-card-hold">
+              {writing
+                ? 'Hold a blank NTAG 424 DNA card near the top of the iPhone until it says the key is on the card.'
+                : 'No card holds this key yet. Nothing has been sent.'}
+            </Text>
+            {!writing ? (
+              <>
+                <Button
+                  label="Try again with a blank card"
+                  icon="key"
+                  onPress={() => void writeCard()}
+                  testID="vanish-card-retry"
+                />
+                <TextButton label="Cancel this Vanish" onPress={cancel} testID="vanish-cancel" />
+              </>
+            ) : null}
+          </>
+        ) : null}
+        {phase.name === 'card' && !phase.cardOnly ? (
           <>
             <Text style={textStyles.body} testID="vanish-card-hold">
               {writing
@@ -550,9 +639,10 @@ export default function VanishScreen() {
             </Text>
             {cards ? (
               <Text style={textStyles.quiet} testID="vanish-card-note">
-                A blank NTAG 424 DNA card can hold the key too. The card must pass NXP&apos;s genuineness check, gets
-                its own random keys kept in this iPhone&apos;s Keychain, and can be read only on this iPhone. The words
-                stay your backup.
+                Put on a card, the key goes straight to a blank NTAG 424 DNA card and no words are shown: the card is
+                the only copy, and whoever holds it holds the GHOST. The Vanish is sent only once the card holds the
+                key. The card must pass NXP&apos;s genuineness check, gets its own random keys kept in this
+                iPhone&apos;s Keychain, and can be read only on this iPhone.
               </Text>
             ) : null}
           </Panel>
@@ -560,8 +650,8 @@ export default function VanishScreen() {
         {phase.name === 'sending' && payment?.stopped && payment.discardable ? (
           <>
             <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="vanish-stopped">
-              {payment.error} This Vanish is stopped and will not be sent. Nothing of it reached the chain, so the Phantom
-              Key you wrote down holds nothing. Discard it to start a new Vanish.
+              {payment.error} This Vanish is stopped and will not be sent. Nothing of it reached the chain, so its Phantom
+              Key holds nothing. Discard it to start a new Vanish.
             </Text>
             <Button label="Discard this Vanish" onPress={discardStopped} testID="vanish-discard" />
             <TextButton label="Leave" onPress={() => router.back()} testID="vanish-leave" />
@@ -569,8 +659,8 @@ export default function VanishScreen() {
         ) : phase.name === 'sending' && payment?.stopped ? (
           <>
             <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="vanish-stopped">
-              {payment.error} This Vanish is stopped and will not be sent. Cancel it; the Phantom Key you wrote down
-              holds nothing.
+              {payment.error} This Vanish is stopped and will not be sent. Cancel it; its Phantom Key holds
+              nothing.
             </Text>
             <Button label="Cancel the Vanish" onPress={cancelStopped} testID="vanish-stopped-cancel" />
             <TextButton label="Leave" onPress={() => router.back()} testID="vanish-leave" />

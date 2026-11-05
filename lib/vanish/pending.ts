@@ -5,7 +5,8 @@
 //
 // A new Phantom Key is held by the native core until its words are checked
 // (or it is on a card, or the person skipped the check): that key is never
-// lost by leaving. Which step the
+// lost by leaving. A card Vanish's key is never shown: only its card step is
+// kept, with no words. Which step the
 // Vanish was at (the words shown, the check, the card) is kept here while the
 // core holds the key, so reopening the Vanish returns to it. The words stay
 // in this memory only as long as the core holds the key: they go when the
@@ -43,6 +44,11 @@ export type HeldVanish = {
   positions: number[] | null;
   /** At the card step: whether the three words were typed back first (a card needs no check). */
   checked?: boolean;
+  /**
+   * A card Vanish: the core's key is for a card only, its words never shown
+   * (`words` is empty). It returns to the card step, never to words or a check.
+   */
+  cardOnly?: boolean;
 };
 
 type Kit = { core: Pick<VanishBindings, 'PaymentSequence'>; store: CorePaymentStore };

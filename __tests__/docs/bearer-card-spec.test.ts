@@ -148,6 +148,13 @@ describe('docs/bearer-card-spec.md', () => {
     expect(body).toMatch(/\*\*NTAG 424 DNA is carry-to-Claim only\.\*\*/);
     expect(body).toMatch(/never call such a card "sealed" or "safe to accept"/);
     expect(body).toMatch(/not shipped as a bearer feature/);
+    // Card Vanish ships with no words shown; trust for a receiver still waits for the secure element.
+    expect(body).toMatch(/Card Vanish now ships with no words shown/);
+    expect(body).toMatch(/a seal check a receiver can trust still needs the secure-element card type/);
+    const today = flat(section(text, 2, 'Why NTAG 424 DNA cannot be a bearer object'));
+    expect(today).toMatch(/A Vanish to a card shows no words/);
+    expect(today).toMatch(/The card is the only copy\./);
+    expect(today).not.toMatch(/and shows the 24 words to be written down/);
     expect(flat(section(text, 2, 'Design'))).toMatch(/\*\*Carry to Claim: not safe to accept\*\* \(an NTAG 424 DNA card\)/);
   });
 

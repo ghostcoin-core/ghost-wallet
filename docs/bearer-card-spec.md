@@ -27,10 +27,14 @@ outside. So:
 - spending needs the phone to compute a proof from the key's secrets, so the
   key must leave the card in the clear to be used.
 
-Today the app makes the Phantom Key on the phone, seals it under keys saved
-only in the writing phone's Keychain, and shows the 24 words to be written
-down. The writing phone can read the card again at any time, and any other
-phone is told the card was not written on it.
+Today the app makes the Phantom Key on the phone and seals it under keys saved
+only in the writing phone's Keychain. A Vanish to a card shows no words: the
+native core makes a card-only key, never hands its words to the screen or
+checks any of them, writes it to the card and reads it back, and only then
+signs and sends the Vanish. The card is the only copy. A Vanish written down
+as 24 words can still be put on a card as well. The writing phone can read
+the card again at any time, and any other phone is told the card was not
+written on it.
 
 ### NTAG 424 DNA is carry-to-Claim only
 
@@ -38,8 +42,11 @@ phone is told the card was not written on it.
 is a way to carry a key to the person who will Claim it to their own account
 straight away. It must never be shown, described or sold as a bearer object,
 and the app must never call such a card "sealed" or "safe to accept". Whoever
-wrote it may still hold the key. Card Vanish is not shipped as a bearer feature
-until the card type below is built and checked on real hardware.
+wrote it may still hold the key. Card Vanish now ships with no words shown, so
+whoever holds the card holds the coins and a lost card loses them, but it is
+still not shipped as a bearer feature: the writing phone saw the key, and a
+seal check a receiver can trust still needs the secure-element card type
+below, built and checked on real hardware.
 
 ## Card type
 

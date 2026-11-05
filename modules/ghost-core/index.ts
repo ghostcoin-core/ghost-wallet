@@ -80,9 +80,15 @@ export type CoreAccountSend = {
 export type VanishBindings = {
   checkKeyWords(text: string): { verdict: string; position: number };
   prepareVanish(chainId: bigint, amountWei: string): CoreVanishCommit;
+  /**
+   * A Vanish for a card only: the core holds a key whose words are never
+   * handed out or checked (takePhantomKeyWords and checkPhantomKeyWord refuse
+   * it). It goes to a card unshown and is dropped once on the card, the only copy.
+   */
+  prepareCardVanish(chainId: bigint, amountWei: string): CoreVanishCommit;
   takePhantomKeyWords(): string[];
   checkPhantomKeyWord(position: number, word: string): boolean;
-  /** Drops the held key once three words were typed back, or once it was put on a card. */
+  /** Drops the held key once three words were typed back, or once it was put on a card (a card-only key: only then). */
   confirmPhantomKeySaved(): void;
   /** Drops the held key with no word typed back: only when the person ticked "Skip the check". */
   confirmPhantomKeySavedUnchecked(): void;

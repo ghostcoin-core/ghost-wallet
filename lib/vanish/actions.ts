@@ -68,14 +68,41 @@ async function balanceAt(kit: PaymentKit, account: string, blockHash: string): P
  * with the account nonce as its identity. Nothing is signed until the key is
  * written down and checked.
  */
-export async function startVanish(
+export function startVanish(
   kit: PaymentKit,
   account: string,
   amountWei: bigint,
 ): Promise<{ sequence: CorePaymentSequence; words: string[] }> {
+  return startPrepared(kit, account, amountWei, 'words', (sequence) => ({ sequence, words: kit.core.takePhantomKeyWords() }));
+}
+
+/**
+ * Makes a fresh card-only Phantom Key in the core and saves the Vanish as
+ * prepared. Its words are never asked for: they go from the core to the card
+ * only, and the card is the only copy. Nothing is signed until the key is on
+ * the card.
+ */
+export function startCardVanish(
+  kit: PaymentKit,
+  account: string,
+  amountWei: bigint,
+): Promise<{ sequence: CorePaymentSequence }> {
+  return startPrepared(kit, account, amountWei, 'card', (sequence) => ({ sequence }));
+}
+
+async function startPrepared<T>(
+  kit: PaymentKit,
+  account: string,
+  amountWei: bigint,
+  key: 'words' | 'card',
+  then: (sequence: CorePaymentSequence) => T,
+): Promise<T> {
   const chainId = await checkedChainId(kit);
   const nonce = await kit.node.nonce(account);
-  const commit = kit.core.prepareVanish(chainId, amountWei.toString());
+  const commit =
+    key === 'card'
+      ? kit.core.prepareCardVanish(chainId, amountWei.toString())
+      : kit.core.prepareVanish(chainId, amountWei.toString());
   const details: PaymentDetails = {
     kind: 'vanish',
     commitData: bytesToHex(commit.commitData),
@@ -86,7 +113,7 @@ export async function startVanish(
   };
   try {
     const sequence = kit.core.PaymentSequence.start(kit.store, newPaymentId('vanish'), vanishIntent(account, nonce, details));
-    return { sequence, words: kit.core.takePhantomKeyWords() };
+    return then(sequence);
   } catch (error) {
     kit.core.forgetPhantomKey();
     throw error;
