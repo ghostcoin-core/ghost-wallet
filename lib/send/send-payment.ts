@@ -39,7 +39,7 @@ import {
   sendAttempt,
   type SendDetails,
 } from '../vanish/payments';
-import { isStuck, markCancel, openShared, paymentsChanged, shared, unmarkCancel } from '../vanish/pending';
+import { isCancel, isStuck, markCancel, openShared, paymentsChanged, shared, unmarkCancel } from '../vanish/pending';
 import { stepName } from '../vanish/status-mapping';
 import type { PaymentKit } from '../vanish/use-payment';
 import { nonceUsedBy } from './node';
@@ -353,11 +353,14 @@ function bumped(fee: bigint): bigint {
 /**
  * Cancels a payment the node took and has not mined in `STUCK_BLOCKS` blocks
  * (a send or a Vanish): signs a send of `CANCEL_WEI` from its account to the
- * same account with the same nonce, at a fee at least 15% above the stuck
- * attempt's (both the fee cap and the priority fee), and sends it the way
- * every attempt goes: checked by the node first. Only when the person taps
- * Cancel. Whichever of the two is mined first counts; a cancel that lands
- * shows the payment as not done.
+ * same account with the same nonce, at fees 15% above the stuck attempt's
+ * own (both the fee cap and the priority fee, rounded up), and sends it the
+ * way every attempt goes: checked by the node first. The fees are set on this
+ * phone, never taken from the node: when the node quotes more than they are,
+ * nothing is signed. Its most fee is never more than the stuck attempt's most
+ * fee and the bump, and a payment is cancelled once at most. Only when the
+ * person taps Cancel. Whichever of the two is mined first counts; a cancel
+ * that lands shows the payment as not done.
  */
 export async function cancelStuck(kit: SendKit, sequence: CorePaymentSequence): Promise<void> {
   const record = sequence.record();
@@ -373,7 +376,7 @@ export async function cancelStuck(kit: SendKit, sequence: CorePaymentSequence): 
   }
   const newest = record.attempts[record.attempts.length - 1];
   const stuckBytes = newest ? kit.store.loadPayload(record.id, newest.transactionHash) : undefined;
-  if (!stuckBytes) {
+  if (!newest || !stuckBytes) {
     throw new Error('the payment to cancel is not saved on this phone');
   }
   const account = bytesToHex(identity.inner.account);
@@ -382,15 +385,30 @@ export async function cancelStuck(kit: SendKit, sequence: CorePaymentSequence): 
   if (stuck.chainId !== chainId || stuck.nonce !== identity.inner.nonce) {
     throw new Error('the payment to cancel does not read as this payment');
   }
+  if (isCancel(bytesToHex(newest.transactionHash))) {
+    // One cancel per payment: its fee is bounded by the payment's own, never raised again and again.
+    throw new Error('a cancel of this payment is already waiting for a block');
+  }
+  // The fees come from this phone alone: the stuck attempt's own fees, signed
+  // here before, raised by the bump. The node's quotes are never signed: one
+  // above these caps stops the cancel before anything is signed.
+  const maxPriorityFeePerGas = bumped(stuck.maxPriorityFeePerGas);
+  const maxFeePerGas = bumped(stuck.maxFeePerGas);
+  const gasLimit = kit.core.testSendGasLimit();
+  if (maxPriorityFeePerGas > maxFeePerGas || maxFeePerGas * gasLimit > bumped(stuck.maxFeePerGas * stuck.gas)) {
+    throw new Error('a cancel would cost more fee than this payment could, so it is not signed');
+  }
   const tip = await kit.node.tipHeight();
   const [genesis, block, priority] = await Promise.all([
     kit.node.block(0),
     kit.node.block(tip),
     kit.node.maxPriorityFeePerGas(),
   ]);
-  const maxPriorityFeePerGas = priority > bumped(stuck.maxPriorityFeePerGas) ? priority : bumped(stuck.maxPriorityFeePerGas);
-  const now = 2n * block.baseFeePerGas + maxPriorityFeePerGas;
-  const maxFeePerGas = now > bumped(stuck.maxFeePerGas) ? now : bumped(stuck.maxFeePerGas);
+  if (priority > maxPriorityFeePerGas || 2n * block.baseFeePerGas + priority > maxFeePerGas) {
+    throw new Error(
+      `the test node asks for a higher fee than a cancel pays (at most ${CANCEL_FEE_BUMP_PERCENT}% above this payment's own), so nothing was signed or sent`,
+    );
+  }
   const signed = kit.core.signSend({
     chainId,
     genesisHash: buffer(genesis.hash),
@@ -399,7 +417,7 @@ export async function cancelStuck(kit: SendKit, sequence: CorePaymentSequence): 
     amountWei: CANCEL_WEI.toString(),
     maxPriorityFeePerGas,
     maxFeePerGas,
-    gasLimit: kit.core.testSendGasLimit(),
+    gasLimit,
   });
   if (bytesToHex(signed.sender) !== account) {
     throw new Error("this phone's account is not the one that made this payment");
