@@ -33,6 +33,7 @@ jest.mock('../../lib/vanish/actions', () => ({
   minimumVanish: async () => 10n ** 17n,
   vanishFee: async () => 1000n,
   startVanish: async () => ({ sequence: mockSequence, words: [...mockKeyWords] }),
+  startCardVanish: async () => ({ sequence: mockSequence }),
   lookUpKey: (...args: unknown[]) => mockLookUp(...(args as [])),
   signVanishAgain: () => async () => ({ signed: new ArrayBuffer(1) }),
   proveRevealAgain: () => async () => ({ signed: new ArrayBuffer(1) }),
@@ -90,6 +91,15 @@ async function reachCheck() {
   }
 }
 
+async function putOnCard() {
+  // The minimum and fee arrive first, so the buttons are enabled.
+  await act(async () => {});
+  fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
+  await act(async () => {
+    fireEvent.press(screen.getByTestId('vanish-make-card'));
+  });
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockPut.mockResolvedValue({ uidHex: '04518DFAA96180' });
@@ -100,15 +110,12 @@ beforeEach(() => {
 describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   const open = device === 'iPhone Duo open';
 
-  it('puts the checked key on a card while the core still holds it, then sends', async () => {
+  it('puts a card-only key on a card from the amount step while the core still holds it, then sends', async () => {
     renderOn(device, VanishScreen);
     expect(sideBySide('vanish-screen-content')).toBe(open);
-    await reachCheck();
     let finishWrite: () => void = () => {};
     mockPut.mockReturnValue(new Promise<void>((resolve) => (finishWrite = resolve)));
-    await act(async () => {
-      fireEvent.press(screen.getByTestId('vanish-card'));
-    });
+    await putOnCard();
     expect(mockPut).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('vanish-card-hold')).toHaveTextContent(/Hold a blank NTAG 424 DNA card/);
     // The key is dropped only after the card holds it.
@@ -119,30 +126,27 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(screen.getByTestId('payment-progress')).toBeOnTheScreen();
   });
 
-  it('does not put a key on a card when the words typed for it are wrong', async () => {
+  it('offers no card at the words check: the words key is sent only after its check', async () => {
     renderOn(device, VanishScreen);
     await reachCheck();
-    for (const field of screen.getAllByTestId(/^vanish-check-\d+$/)) fireEvent.changeText(field, 'zoo');
-    await act(async () => {
-      fireEvent.press(screen.getByTestId('vanish-card'));
-    });
+    expect(screen.queryByTestId('vanish-card')).toBeNull();
+    fireEvent.press(screen.getByTestId('vanish-send'));
     expect(mockPut).not.toHaveBeenCalled();
-    expect(screen.getByTestId('vanish-error')).toHaveTextContent(/does not match/);
-  });
-
-  it('shows why a card was refused and lets the Vanish go on without it', async () => {
-    renderOn(device, VanishScreen);
-    await reachCheck();
-    mockPut.mockRejectedValue(new CardError('not-genuine'));
-    await act(async () => {
-      fireEvent.press(screen.getByTestId('vanish-card'));
-    });
-    expect(screen.getByTestId('vanish-error')).toHaveTextContent(/NXP genuineness check/);
-    expect(mockCore.confirmPhantomKeySaved).not.toHaveBeenCalled();
-    expect(screen.getByTestId('vanish-card-retry')).toBeOnTheScreen();
-    fireEvent.press(screen.getByTestId('vanish-without-card'));
     expect(mockCore.confirmPhantomKeySaved).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('payment-progress')).toBeOnTheScreen();
+  });
+
+  it('shows why a card was refused, sends nothing, and offers another blank card, never words', async () => {
+    renderOn(device, VanishScreen);
+    mockPut.mockRejectedValue(new CardError('not-genuine'));
+    await putOnCard();
+    expect(screen.getByTestId('vanish-error')).toHaveTextContent(/NXP genuineness check/);
+    expect(mockCore.confirmPhantomKeySaved).not.toHaveBeenCalled();
+    expect(mockSequence.markBackedUp).not.toHaveBeenCalled();
+    expect(screen.getByTestId('vanish-card-retry')).toBeOnTheScreen();
+    expect(screen.queryByTestId('vanish-without-card')).toBeNull();
+    expect(screen.queryAllByTestId(/^vanish-check-\d+$/)).toEqual([]);
+    expect(screen.queryByTestId('payment-progress')).toBeNull();
   });
 
   it('summons from a tapped card without the key reaching the screen, and forgets it on leaving', async () => {
