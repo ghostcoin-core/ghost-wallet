@@ -10,7 +10,7 @@ import { sendProgressRows, sendStatusDetail, sendStatusLabel } from '../../lib/s
 import { resetReached } from '../../lib/send/reached';
 import { CANCEL_WEI, advanceSend, cancelStuck, type SendKit } from '../../lib/send/send-payment';
 import { startReveal } from '../../lib/vanish/actions';
-import { stoppedBeforeSend, vanishNode, type VanishNode } from '../../lib/vanish/node';
+import { stoppedBeforeSend, vanishNode, type NodeReceipt, type VanishNode } from '../../lib/vanish/node';
 import { advance, chainSnapshot, encodeDetails, type PaymentDetails, type SendDetails } from '../../lib/vanish/payments';
 import { isCancel, pendingPayments, resetCancels, resetPending } from '../../lib/vanish/pending';
 import {
@@ -24,8 +24,6 @@ import {
 import { MOVE_EVERY_MS, usePayment, type PaymentKit } from '../../lib/vanish/use-payment';
 import { bytesToHex, hexToBytes } from '../../modules/ghost-core/account-lookup';
 import type { CoreChainView, CorePaymentIntent, CorePaymentRecord, CorePaymentSequence } from '../../modules/ghost-core';
-import type { NodeReceipt } from '../../lib/vanish/node';
-
 jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, write: async () => {} }) }));
 // Which transaction took a send's nonce is not asked here.
 jest.mock('../../lib/send/node', () => ({ nonceUsedBy: async () => null }));
@@ -209,6 +207,8 @@ function fakeSequence(
   let step = start;
   const payloads = new Map<string, string>();
   const attemptHashes: string[] = [];
+  // Set below: `recover` hands the finished stand-in to the caller's rule.
+  let self: FakeSequence | null = null;
   const sequence = {
     attemptHashes,
     record: (): CorePaymentRecord => ({
@@ -220,7 +220,7 @@ function fakeSequence(
       checksum: new ArrayBuffer(32),
     }),
     step: () => step,
-    recover: jest.fn((view: CoreChainView) => recover(sequence as unknown as FakeSequence, view)),
+    recover: jest.fn((view: CoreChainView): { tag: string } => recover(self!, view)),
     markBackedUp: jest.fn(() => {
       step = 'BackedUp';
     }),
@@ -242,7 +242,8 @@ function fakeSequence(
       step = next;
     },
   };
-  return sequence as unknown as FakeSequence;
+  self = sequence as unknown as FakeSequence;
+  return self;
 }
 
 function asStep(sequence: FakeSequence) {
