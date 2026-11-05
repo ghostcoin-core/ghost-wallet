@@ -87,6 +87,31 @@ The build then shows in App Store Connect under TestFlight once Apple has
 processed it. Run prebuild again with `--clean` before going back to a dev
 build (the install script does).
 
+## Patched expo-modules-core (Xcode 27.2)
+
+Xcode 27.2 (27B52), on the Mac Studio since 2026-10-31, crashes the Swift
+compiler on one line of expo-modules-core 58.0.26 while it builds the
+`ExpoModulesCore` pod: `case .failure(let error as any Error):` in
+`ios/Core/Functions/AsyncFunctionDefinition.swift`. The repository carries the
+fix as `patches/expo-modules-core+58.0.26.patch`, which turns that line into
+`case .failure(let error):` and touches nothing else.
+
+`patch-package` (a pinned dev package) applies it from the `postinstall` script
+in `package.json`, so every `pnpm install`, including the
+`pnpm install --frozen-lockfile` of the release and install scripts, patches a
+fresh clone before prebuild and `pod install`. Running it again on an already
+patched tree is harmless. The script passes `--error-on-fail`, so if the patch
+does not apply, `pnpm install` fails with patch-package's error on the Mac
+Studio too (by default patch-package only fails on CI) rather than going on to
+build the crashing source.
+
+When expo-modules-core moves past 58.0.26, patch-package warns that the patch
+was made for another release. Check whether the new release still crashes Xcode
+27.2's compiler: if it builds, delete the patch file; if not, make the same
+one-line change again and save it with `pnpm exec patch-package expo-modules-core`.
+`__tests__/expo-modules-core-patch.test.ts` checks that the patch still applies
+to the installed file and changes only that line.
+
 ## Building by hand
 
 On the Mac Studio:
