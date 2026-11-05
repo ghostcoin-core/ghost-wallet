@@ -1,0 +1,12 @@
+diff --git a/node_modules/expo-modules-core/ios/Core/Functions/AsyncFunctionDefinition.swift b/node_modules/expo-modules-core/ios/Core/Functions/AsyncFunctionDefinition.swift
+--- a/node_modules/expo-modules-core/ios/Core/Functions/AsyncFunctionDefinition.swift
++++ b/node_modules/expo-modules-core/ios/Core/Functions/AsyncFunctionDefinition.swift
+@@ -197,7 +197,7 @@
+         switch consume result {
+         case .success(let value):
+           promise.resolve(value)
+-        case .failure(let error as any Error):
++        case .failure(let error):
+           promise.reject(error)
+         }
+       }
