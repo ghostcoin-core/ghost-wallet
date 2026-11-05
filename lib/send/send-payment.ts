@@ -395,7 +395,10 @@ export async function cancelStuck(kit: SendKit, sequence: CorePaymentSequence): 
   const maxPriorityFeePerGas = bumped(stuck.maxPriorityFeePerGas);
   const maxFeePerGas = bumped(stuck.maxFeePerGas);
   const gasLimit = kit.core.testSendGasLimit();
-  if (maxPriorityFeePerGas > maxFeePerGas || maxFeePerGas * gasLimit > bumped(stuck.maxFeePerGas * stuck.gas)) {
+  // The most a cancel can pay against the most the stuck attempt could, plus
+  // the bump: both on the same rounded fee per gas, so rounding never refuses
+  // a cancel the bump allows.
+  if (maxPriorityFeePerGas > maxFeePerGas || maxFeePerGas * gasLimit > maxFeePerGas * stuck.gas) {
     throw new Error('a cancel would cost more fee than this payment could, so it is not signed');
   }
   const tip = await kit.node.tipHeight();
