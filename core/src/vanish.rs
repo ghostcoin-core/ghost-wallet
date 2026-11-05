@@ -11,7 +11,10 @@
 //! shows them (once) and [`check_phantom_key_word`] checks three of them typed
 //! back; [`confirm_phantom_key_saved`] then drops it. A key put on a card
 //! needs no word check, and a person who ticks "Skip the check" has it
-//! dropped by [`confirm_phantom_key_saved_unchecked`]. It is never saved, so a
+//! dropped by [`confirm_phantom_key_saved_unchecked`]. A card Vanish,
+//! [`prepare_card_vanish`], holds a card-only key instead: its words never
+//! leave the core except onto the card, which is its only copy, and it is
+//! dropped once it is on the card. A key is never saved, so a
 //! kill before then leaves nothing signed and nothing lost. [`sign_vanish`] signs the
 //! account transaction (`0x52`, rescue-key scheme `0x0003`, hedged ML-DSA-44)
 //! that pays the amount to the coin commit entry with that data. It needs no
@@ -108,6 +111,9 @@ pub enum VanishError {
     AlreadyShown,
     /// Too few of the new key's words have been typed back.
     NotChecked { checked: u32, needed: u32 },
+    /// The new key is for a card only: its words never leave the core, and
+    /// it is dropped only once it is on a card.
+    CardOnly,
     /// The key's coin is not in the coin tree this phone rebuilt.
     NotFound,
     /// The key's coin is spent.
@@ -132,6 +138,7 @@ impl fmt::Display for VanishError {
             Self::NotChecked { checked, needed } => {
                 write!(f, "{checked} of the {needed} key words to check have been typed back")
             }
+            Self::CardOnly => f.write_str("the new Phantom Key is for a card only: its words are never shown"),
             Self::NotFound => f.write_str("the key's coin is not in the coin tree"),
             Self::Spent => f.write_str("the key's coin is spent"),
             Self::Account { reason } => write!(f, "the account cannot be read: {reason}"),
@@ -279,6 +286,15 @@ struct HeldKey {
     checked: [bool; 24],
     /// Its words were copied out for a card.
     on_card: bool,
+    /// Made for a card only: its words are never handed out or checked, and
+    /// the card is its only copy.
+    card_only: bool,
+}
+
+impl HeldKey {
+    fn checked_count(&self) -> u32 {
+        self.checked.iter().filter(|checked| **checked).count() as u32
+    }
 }
 
 /// A new Phantom Key: its words handed out once, then three of them typed
@@ -306,16 +322,42 @@ impl KeyVault {
         amount_wei: u128,
         rng: &mut R,
     ) -> Result<VanishCommit, VanishError> {
+        self.prepare_held(chain_id, amount_wei, false, rng)
+    }
+
+    /// [`Self::prepare_with`] for a card-only key: its words are never handed
+    /// out or checked, the card export needs no showing, and it is dropped
+    /// only once it is on a card. Whoever holds the card holds the coin.
+    pub fn prepare_card_with<R: CryptoRng + ?Sized>(
+        &self,
+        chain_id: u64,
+        amount_wei: u128,
+        rng: &mut R,
+    ) -> Result<VanishCommit, VanishError> {
+        self.prepare_held(chain_id, amount_wei, true, rng)
+    }
+
+    fn prepare_held<R: CryptoRng + ?Sized>(
+        &self,
+        chain_id: u64,
+        amount_wei: u128,
+        card_only: bool,
+        rng: &mut R,
+    ) -> Result<VanishCommit, VanishError> {
         let key = PhantomKey::generate(KeyFormat::Words, rng);
         let commit = vanish_commit_with(&key, chain_id, amount_wei, rng)?;
-        *self.lock() = Some(HeldKey { key, shown: false, checked: [false; 24], on_card: false });
+        *self.lock() = Some(HeldKey { key, shown: false, checked: [false; 24], on_card: false, card_only });
         Ok(commit)
     }
 
-    /// The held key's 24 words, once: asking again is refused.
+    /// The held key's 24 words, once: asking again is refused, and a
+    /// card-only key never hands them out.
     pub fn take_words(&self) -> Result<Vec<String>, VanishError> {
         let mut held = self.lock();
         let held = held.as_mut().ok_or(VanishError::NoKeyHeld)?;
+        if held.card_only {
+            return Err(VanishError::CardOnly);
+        }
         if held.shown {
             return Err(VanishError::AlreadyShown);
         }
@@ -325,7 +367,8 @@ impl KeyVault {
     }
 
     /// Whether the held key's word at `position` (1 to 24) is `word`,
-    /// ignoring surrounding spaces and case.
+    /// ignoring surrounding spaces and case. A card-only key is refused: no
+    /// guess at its words is ever answered.
     pub fn check_word(&self, position: u32, word: &str) -> Result<bool, VanishError> {
         let index = position
             .checked_sub(1)
@@ -334,6 +377,9 @@ impl KeyVault {
             .ok_or_else(|| malformed("a key word position is 1 to 24"))?;
         let mut held = self.lock();
         let held = held.as_mut().ok_or(VanishError::NoKeyHeld)?;
+        if held.card_only {
+            return Err(VanishError::CardOnly);
+        }
         let words = held.key.format_words().ok_or_else(|| malformed("the key has no words view"))?;
         let matches = words.as_str().split_whitespace().nth(index).is_some_and(|held| held.eq_ignore_ascii_case(word.trim()));
         if matches {
@@ -344,13 +390,20 @@ impl KeyVault {
 
     /// Once [`CHECKED_KEY_WORDS`] different words were typed back, or the
     /// words were copied out for a card (a card needs no word check), drops
-    /// the key: the person has it, and the phone keeps nothing.
+    /// the key: the person has it, and the phone keeps nothing. A card-only
+    /// key is dropped once it is on a card, and refused before.
     pub fn confirm_saved(&self) -> Result<(), VanishError> {
         let mut held = self.lock();
         let key = held.as_ref().ok_or(VanishError::NoKeyHeld)?;
-        let checked = key.checked.iter().filter(|checked| **checked).count() as u32;
-        if !key.shown || (checked < CHECKED_KEY_WORDS && !key.on_card) {
-            return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
+        if key.card_only {
+            if !key.on_card {
+                return Err(VanishError::CardOnly);
+            }
+        } else {
+            let checked = key.checked_count();
+            if !key.shown || (checked < CHECKED_KEY_WORDS && !key.on_card) {
+                return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
+            }
         }
         *held = None;
         Ok(())
@@ -359,13 +412,17 @@ impl KeyVault {
     /// Drops the key once its words were shown, with none typed back: only
     /// for a person who ticked "Skip the check" and accepted that a mistake
     /// in what they wrote down loses the coins. Words never shown are still
-    /// refused, so a key is never dropped unseen.
+    /// refused, so a key is never dropped unseen, and a card-only key is
+    /// always refused: it is dropped only by [`Self::confirm_saved`] once on
+    /// a card.
     pub fn confirm_saved_unchecked(&self) -> Result<(), VanishError> {
         let mut held = self.lock();
         let key = held.as_ref().ok_or(VanishError::NoKeyHeld)?;
+        if key.card_only {
+            return Err(VanishError::CardOnly);
+        }
         if !key.shown {
-            let checked = key.checked.iter().filter(|checked| **checked).count() as u32;
-            return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
+            return Err(VanishError::NotChecked { checked: key.checked_count(), needed: CHECKED_KEY_WORDS });
         }
         *held = None;
         Ok(())
@@ -381,16 +438,16 @@ impl KeyVault {
         self.lock().is_some()
     }
 
-    /// Runs `use_words` on the held key's words for a card, once they were
-    /// shown (so a card never holds the only copy of a key); no word needs
-    /// typing back. The key stays held, and is marked as on a card when
-    /// `use_words` took the words (returned `Some`).
+    /// Runs `use_words` on the held key's words for a card. A words key must
+    /// have had its words shown first, so its card is never its only copy; a
+    /// card-only key needs no showing, as its card is meant to be the only
+    /// copy, like cash. No word needs typing back. The key stays held, and is
+    /// marked as on a card when `use_words` took the words (returned `Some`).
     pub fn with_card_words<T>(&self, use_words: impl FnOnce(&str) -> Option<T>) -> Result<Option<T>, VanishError> {
         let mut guard = self.lock();
         let held = guard.as_mut().ok_or(VanishError::NoKeyHeld)?;
-        if !held.shown {
-            let checked = held.checked.iter().filter(|checked| **checked).count() as u32;
-            return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
+        if !held.shown && !held.card_only {
+            return Err(VanishError::NotChecked { checked: held.checked_count(), needed: CHECKED_KEY_WORDS });
         }
         let words = held.key.format_words().ok_or_else(|| malformed("the key has no words view"))?;
         let result = use_words(words.as_str());
@@ -450,6 +507,25 @@ pub fn prepare_vanish(chain_id: u64, amount_wei: String) -> Result<VanishCommit,
     let commit = NEW_KEY.prepare_with(chain_id, wei, &mut rng)?;
     if rng.failed {
         // Made with missing randomness: dropped, never shown or sent.
+        NEW_KEY.forget();
+        return Err(VanishError::Randomness);
+    }
+    Ok(commit)
+}
+
+/// [`prepare_vanish`] for a card only: the held key's words are never handed
+/// out or checked ([`take_phantom_key_words`] and [`check_phantom_key_word`]
+/// refuse it), the card export takes it without showing, and
+/// [`confirm_phantom_key_saved`] drops it only once it is on a card. The card
+/// is its only copy.
+#[uniffi::export]
+pub fn prepare_card_vanish(chain_id: u64, amount_wei: String) -> Result<VanishCommit, VanishError> {
+    check_chain(chain_id)?;
+    let wei = parse_wei(&amount_wei)?;
+    let mut rng = OsRandom { failed: false };
+    let commit = NEW_KEY.prepare_card_with(chain_id, wei, &mut rng)?;
+    if rng.failed {
+        // Made with missing randomness: dropped, never put on a card or sent.
         NEW_KEY.forget();
         return Err(VanishError::Randomness);
     }

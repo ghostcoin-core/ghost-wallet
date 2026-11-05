@@ -1,6 +1,6 @@
 // The parts the Vanish and Summon screens share: the Phantom Key's words in
 // their own colour (ink, so they are never mistaken for recovery words on
-// paper), and the payment's progress.
+// paper), what a card Vanish says in their place, and the payment's progress.
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
 import { LOOKING_UP, SLOW_NOTE, useSlowAfter } from '../lib/vanish/lookup-progress';
@@ -10,6 +10,21 @@ import { colors, monoFont } from './theme';
 import { Button, Panel, TextButton, textStyles } from './ui';
 
 export const PHANTOM_KEY_LABEL = 'Phantom Key: holds coins, not your wallet.';
+
+/** What a card Vanish says at its card step: the card is a bearer object, and the only copy. */
+export const CARD_ONLY_TEXT = 'Whoever holds this card holds this GHOST. No words are shown: the card is the only copy.';
+
+/** The card step of a card Vanish: never a word of the key, only what the card is. */
+export function CardOnlyNotice() {
+  return (
+    <Panel style={styles.cardOnly} testID="vanish-card-only">
+      <Text style={textStyles.quiet}>{PHANTOM_KEY_LABEL}</Text>
+      <Text style={textStyles.body} testID="vanish-card-only-text">
+        {CARD_ONLY_TEXT}
+      </Text>
+    </Panel>
+  );
+}
 
 /** The 24 words of a new Phantom Key, numbered, on ink. Nothing here copies or saves them. */
 export function PhantomKeyWords({ words, twoColumns }: { words: readonly string[]; twoColumns: boolean }) {
@@ -145,6 +160,10 @@ export function CoinsBack({ text }: { text: string }) {
 }
 
 const styles = StyleSheet.create({
+  cardOnly: {
+    gap: 8,
+    padding: 16,
+  },
   key: {
     gap: 12,
     padding: 16,

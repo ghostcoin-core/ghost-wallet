@@ -57,7 +57,7 @@ pub use vanish::{
     FeeWindow, KeyCoins, KeyVault, MIN_VANISH_FEES, PRIVATE_TX_GAS, PRIVATE_TX_TYPE, ProvedReveal, RevealRequest,
     RevealedLeaf, SignedVanish, VANISH_GAS_LIMIT, VANISH_MIN_GAS, VanishCommit, VanishError, VanishSend, WordsCheck,
     check_key_words, check_phantom_key_word, classify_words, commit_leaf, confirm_phantom_key_saved,
-    confirm_phantom_key_saved_unchecked, fee_window, find_coins, find_key_coins, forget_phantom_key, min_vanish_wei, parse_wei, prepare_vanish, private_envelope,
+    confirm_phantom_key_saved_unchecked, fee_window, find_coins, find_key_coins, forget_phantom_key, min_vanish_wei, parse_wei, prepare_card_vanish, prepare_vanish, private_envelope,
     prove_key_reveal, prove_reveal_with, reveal_fee, reveal_fee_wei, reveal_leaf, sign_vanish, sign_vanish_with,
     take_phantom_key_words, vanish_commit_with,
 };
