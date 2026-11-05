@@ -14,16 +14,18 @@ const SWIFT = path.join('node_modules', 'expo-modules-core', 'ios', 'Core', 'Fun
 const OLD_LINE = '        case .failure(let error as any Error):';
 const NEW_LINE = '        case .failure(let error):';
 
+// patch-package ships no type declarations, so its internals are loaded
+// through jest.requireActual with the shapes this test relies on.
 type Effect = { type: string; path?: string };
-const { parsePatchFile } = require('patch-package/dist/patch/parse') as {
+const { parsePatchFile } = jest.requireActual<{
   parsePatchFile: (text: string) => Effect[];
-};
-const { executeEffects } = require('patch-package/dist/patch/apply') as {
+}>('patch-package/dist/patch/parse');
+const { executeEffects } = jest.requireActual<{
   executeEffects: (effects: Effect[], opts: { dryRun: boolean; cwd: string; bestEffort: boolean }) => void;
-};
-const { reversePatch } = require('patch-package/dist/patch/reverse') as {
+}>('patch-package/dist/patch/apply');
+const { reversePatch } = jest.requireActual<{
   reversePatch: (effects: Effect[]) => Effect[];
-};
+}>('patch-package/dist/patch/reverse');
 
 const patchText = () => fs.readFileSync(PATCH, 'utf8');
 
