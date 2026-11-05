@@ -6,9 +6,10 @@
 //! the UniFFI bindings do not carry, so JavaScript can neither ask for a key
 //! nor see one:
 //!
-//! - [`ghost_wallet_card_copy_new_key`] copies the words of the key Vanish
-//!   holds, once they were shown (the card is never the only copy), for the
-//!   card module to seal; a key put on a card needs no word typed back;
+//! - [`ghost_wallet_card_copy_new_key`] copies the words of the card-only key
+//!   a card Vanish holds, never shown (the card is its only copy), for the
+//!   card module to seal; a words key, whose words were or could be shown,
+//!   is refused;
 //! - [`ghost_wallet_card_hold_key`] takes the words a card held, checks they
 //!   are a Phantom Key and holds them here.
 //!
@@ -27,7 +28,8 @@ use crate::vanish::{
 /// The key a card handed over: its words, wiped when replaced or forgotten.
 static CARD_KEY: Mutex<Option<String>> = Mutex::new(None);
 
-/// No key is held, or its words were not shown yet.
+/// No card-only key is held: none at all, or a words key, which never goes
+/// on a card.
 pub const CARD_NO_KEY: isize = -1;
 /// The buffer is too small for the words.
 pub const CARD_TOO_SMALL: isize = -2;
@@ -38,8 +40,9 @@ fn card_key() -> MutexGuard<'static, Option<String>> {
     CARD_KEY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Copies the words of the Phantom Key Vanish holds (UTF-8, no terminator)
-/// into `out`, and returns how many bytes were written, or [`CARD_NO_KEY`],
+/// Copies the words of the card-only Phantom Key a card Vanish holds (UTF-8,
+/// no terminator) into `out`, and returns how many bytes were written, or
+/// [`CARD_NO_KEY`] (also for a words key),
 /// [`CARD_TOO_SMALL`] or [`CARD_NULL`]. The key stays held for the Vanish.
 ///
 /// # Safety

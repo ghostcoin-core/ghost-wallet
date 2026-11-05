@@ -9,12 +9,12 @@
 //! written down before anything is sent: it is held in native memory only
 //! while [`take_phantom_key_words`] hands its 24 words to the screen that
 //! shows them (once) and [`check_phantom_key_word`] checks three of them typed
-//! back; [`confirm_phantom_key_saved`] then drops it. A key put on a card
-//! needs no word check, and a person who ticks "Skip the check" has it
-//! dropped by [`confirm_phantom_key_saved_unchecked`]. A card Vanish,
-//! [`prepare_card_vanish`], holds a card-only key instead: its words never
-//! leave the core except onto the card, which is its only copy, and it is
-//! dropped once it is on the card. A key is never saved, so a
+//! back; [`confirm_phantom_key_saved`] then drops it. A person who ticks
+//! "Skip the check" has it dropped by [`confirm_phantom_key_saved_unchecked`].
+//! A words key never goes on a card. A card Vanish, [`prepare_card_vanish`],
+//! holds a card-only key instead: its words never leave the core except onto
+//! the card, which is its only copy, and it is dropped once it is on the
+//! card. A key is never saved, so a
 //! kill before then leaves nothing signed and nothing lost. [`sign_vanish`] signs the
 //! account transaction (`0x52`, rescue-key scheme `0x0003`, hedged ML-DSA-44)
 //! that pays the amount to the coin commit entry with that data. It needs no
@@ -114,6 +114,9 @@ pub enum VanishError {
     /// The new key is for a card only: its words never leave the core, and
     /// it is dropped only once it is on a card.
     CardOnly,
+    /// The new key is a words key: its words were shown, or could be, so it
+    /// never goes on a card. Only a card-only key does.
+    NotCardOnly,
     /// The key's coin is not in the coin tree this phone rebuilt.
     NotFound,
     /// The key's coin is spent.
@@ -139,6 +142,7 @@ impl fmt::Display for VanishError {
                 write!(f, "{checked} of the {needed} key words to check have been typed back")
             }
             Self::CardOnly => f.write_str("the new Phantom Key is for a card only: its words are never shown"),
+            Self::NotCardOnly => f.write_str("the new Phantom Key is a words key: it never goes on a card"),
             Self::NotFound => f.write_str("the key's coin is not in the coin tree"),
             Self::Spent => f.write_str("the key's coin is spent"),
             Self::Account { reason } => write!(f, "the account cannot be read: {reason}"),
@@ -278,13 +282,13 @@ pub struct VanishCommit {
 /// Vanish is sent, as in Ghost's web app.
 pub const CHECKED_KEY_WORDS: u32 = 3;
 
-/// A new Phantom Key, held until three of its words are typed back, it is put
-/// on a card, or the person skips the check.
+/// A new Phantom Key, held until three of its words are typed back or the
+/// person skips the check, or (a card-only key) until it is on a card.
 struct HeldKey {
     key: PhantomKey,
     shown: bool,
     checked: [bool; 24],
-    /// Its words were copied out for a card.
+    /// Its words were copied out for a card: a card-only key only.
     on_card: bool,
     /// Made for a card only: its words are never handed out or checked, and
     /// the card is its only copy.
@@ -388,10 +392,10 @@ impl KeyVault {
         Ok(matches)
     }
 
-    /// Once [`CHECKED_KEY_WORDS`] different words were typed back, or the
-    /// words were copied out for a card (a card needs no word check), drops
-    /// the key: the person has it, and the phone keeps nothing. A card-only
-    /// key is dropped once it is on a card, and refused before.
+    /// Once [`CHECKED_KEY_WORDS`] different words were typed back, drops a
+    /// words key: the person has it, and the phone keeps nothing. A card-only
+    /// key is dropped once it is on a card, and refused before; a words key
+    /// never goes on a card, so it always needs the check (or the skip).
     pub fn confirm_saved(&self) -> Result<(), VanishError> {
         let mut held = self.lock();
         let key = held.as_ref().ok_or(VanishError::NoKeyHeld)?;
@@ -401,7 +405,7 @@ impl KeyVault {
             }
         } else {
             let checked = key.checked_count();
-            if !key.shown || (checked < CHECKED_KEY_WORDS && !key.on_card) {
+            if !key.shown || checked < CHECKED_KEY_WORDS {
                 return Err(VanishError::NotChecked { checked, needed: CHECKED_KEY_WORDS });
             }
         }
@@ -438,16 +442,17 @@ impl KeyVault {
         self.lock().is_some()
     }
 
-    /// Runs `use_words` on the held key's words for a card. A words key must
-    /// have had its words shown first, so its card is never its only copy; a
-    /// card-only key needs no showing, as its card is meant to be the only
-    /// copy, like cash. No word needs typing back. The key stays held, and is
-    /// marked as on a card when `use_words` took the words (returned `Some`).
+    /// Runs `use_words` on the held key's words for a card. Only a card-only
+    /// key goes on a card: its words were never shown and never can be, so
+    /// the card is its only copy, like cash. A words key is always refused,
+    /// shown or not, so no one can keep its words and pass its card off as
+    /// the only copy. The key stays held, and is marked as on a card when
+    /// `use_words` took the words (returned `Some`).
     pub fn with_card_words<T>(&self, use_words: impl FnOnce(&str) -> Option<T>) -> Result<Option<T>, VanishError> {
         let mut guard = self.lock();
         let held = guard.as_mut().ok_or(VanishError::NoKeyHeld)?;
-        if !held.shown && !held.card_only {
-            return Err(VanishError::NotChecked { checked: held.checked_count(), needed: CHECKED_KEY_WORDS });
+        if !held.card_only {
+            return Err(VanishError::NotCardOnly);
         }
         let words = held.key.format_words().ok_or_else(|| malformed("the key has no words view"))?;
         let result = use_words(words.as_str());
@@ -547,8 +552,9 @@ pub fn check_phantom_key_word(position: u32, word: String) -> Result<bool, Vanis
     result
 }
 
-/// Drops the held key once three of its words were typed back (or it was put
-/// on a card); the Vanish is then backed up and may be signed.
+/// Drops the held key once three of its words were typed back (or, a
+/// card-only key, once it was put on a card); the Vanish is then backed up
+/// and may be signed.
 #[uniffi::export]
 pub fn confirm_phantom_key_saved() -> Result<(), VanishError> {
     NEW_KEY.confirm_saved()

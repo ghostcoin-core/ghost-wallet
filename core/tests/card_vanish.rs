@@ -1,7 +1,7 @@
 //! A card Vanish with no words: a card-only Phantom Key never hands its
 //! words out or answers a guess at them, goes to a card without being shown,
-//! and is dropped only once it is on the card. A words key keeps today's rule:
-//! no card before its words were shown.
+//! and is dropped only once it is on the card. A words key never goes on a
+//! card, before or after its words were shown.
 
 use ghost_client::PhantomKey;
 use ghost_wallet_core::{
@@ -78,15 +78,16 @@ fn a_card_copy_that_did_not_fit_leaves_a_card_only_key_unconfirmed() {
 }
 
 #[test]
-fn a_words_key_still_refuses_the_card_until_its_words_were_shown() {
+fn a_words_key_never_goes_on_a_card_shown_or_not() {
     let vault = KeyVault::new();
     vault.prepare_with(TEST_CHAIN_ID, ONE_GHOST, &mut rng(43)).unwrap();
-    assert_eq!(vault.with_card_words(copy), Err(VanishError::NotChecked { checked: 0, needed: CHECKED_KEY_WORDS }));
+    assert_eq!(vault.with_card_words(copy), Err(VanishError::NotCardOnly));
     assert_eq!(vault.confirm_saved(), Err(VanishError::NotChecked { checked: 0, needed: CHECKED_KEY_WORDS }));
-    let words = vault.take_words().unwrap();
-    assert_eq!(vault.with_card_words(copy).unwrap(), Some(words.join(" ")));
-    vault.confirm_saved().unwrap();
-    assert!(!vault.holds_key());
+    vault.take_words().unwrap();
+    assert_eq!(vault.with_card_words(copy), Err(VanishError::NotCardOnly));
+    // The refused export does not stand in for the word check.
+    assert_eq!(vault.confirm_saved(), Err(VanishError::NotChecked { checked: 0, needed: CHECKED_KEY_WORDS }));
+    assert!(vault.holds_key());
 }
 
 #[test]

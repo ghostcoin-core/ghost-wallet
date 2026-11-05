@@ -6,7 +6,6 @@ import { SKIP_CHECK_LABEL } from '../../components/skip-check';
 import { backupStatusStore } from '../../lib/onboarding/backup-status';
 import { encodeDetails } from '../../lib/vanish/payments';
 import { resetPending } from '../../lib/vanish/pending';
-import { CardCancelled } from '../../modules/ghost-nfc';
 
 // Plain list words stand in for a new Phantom Key.
 const mockKeyWords = Array.from({ length: 24 }, (_, i) => ['abandon', 'ability', 'able', 'about'][i % 4]);
@@ -205,36 +204,20 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(screen.getByTestId('vanish-skip-check').props.accessibilityState).toEqual({ checked: false });
   });
 
-  it('puts the key on a card with no word check, then sends', async () => {
+  it('offers no card at the check: the key is sent only once checked or skipped', async () => {
     renderOn(device);
     await reachCheck();
-    expect(disabled('vanish-card')).toBe(false);
-    await act(async () => {
-      fireEvent.press(screen.getByTestId('vanish-card'));
-    });
-    expect(mockPut).toHaveBeenCalledTimes(1);
-    expect(mockCore.checkPhantomKeyWord).not.toHaveBeenCalled();
-    expect(mockCore.confirmPhantomKeySaved).toHaveBeenCalledTimes(1);
-    expect(mockCore.confirmPhantomKeySavedUnchecked).not.toHaveBeenCalled();
-    expect(screen.getByTestId('payment-progress')).toBeOnTheScreen();
-  });
-
-  it('goes back to the check when an unchecked key could not go on a card', async () => {
-    renderOn(device);
-    await reachCheck();
-    const asked = checkPositions();
-    mockPut.mockRejectedValueOnce(new CardCancelled());
-    await act(async () => {
-      fireEvent.press(screen.getByTestId('vanish-card'));
-    });
-    fireEvent.press(screen.getByTestId('vanish-without-card'));
-    // Not sent: the words were never checked and no card holds the key.
-    expect(mockCore.confirmPhantomKeySaved).not.toHaveBeenCalled();
-    expect(checkPositions()).toEqual(asked);
-    expect(screen.getByTestId('vanish-skip-check').props.accessibilityState).toEqual({ checked: false });
+    expect(screen.queryByTestId('vanish-card')).toBeNull();
+    // Ticked or not, there is still no way to a card here.
+    fireEvent.press(screen.getByTestId('vanish-skip-check'));
+    expect(screen.queryByTestId('vanish-card')).toBeNull();
+    fireEvent.press(screen.getByTestId('vanish-skip-check'));
     expect(disabled('vanish-send')).toBe(true);
     typeWords((position) => mockKeyWords[position - 1]);
     fireEvent.press(screen.getByTestId('vanish-send'));
+    expect(mockPut).not.toHaveBeenCalled();
     expect(mockCore.confirmPhantomKeySaved).toHaveBeenCalledTimes(1);
+    expect(mockCore.confirmPhantomKeySavedUnchecked).not.toHaveBeenCalled();
+    expect(screen.getByTestId('payment-progress')).toBeOnTheScreen();
   });
 });
