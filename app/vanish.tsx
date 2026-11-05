@@ -47,6 +47,7 @@ import { minimumVanish, signVanishAgain, startVanish, vanishFee } from '../lib/v
 import { coversVanish, parseGhostAmount } from '../lib/vanish/amount';
 import {
   cancelWaiting,
+  discardVanish,
   forgetShared,
   heldKey,
   heldVanish,
@@ -348,6 +349,18 @@ export default function VanishScreen() {
   }
 
   /**
+   * Removes a Vanish held stopped that never reached the node (its check
+   * refused it): only its saved payment goes. Nothing is signed or sent, and
+   * nothing is asked of the chain: nothing of it was ever mined.
+   */
+  function discardStopped() {
+    if (kit && sequence) {
+      discardVanish(kit, sequence.record().id);
+    }
+    router.back();
+  }
+
+  /**
    * Replaces a Vanish the node took but has not mined with a send of 1 wei to
    * this account, same nonce, higher fee: only on the person's tap, and checked
    * by the node before it is sent like every attempt.
@@ -544,7 +557,16 @@ export default function VanishScreen() {
             ) : null}
           </Panel>
         )}
-        {phase.name === 'sending' && payment?.stopped ? (
+        {phase.name === 'sending' && payment?.stopped && payment.discardable ? (
+          <>
+            <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="vanish-stopped">
+              {payment.error} This Vanish is stopped and will not be sent. Nothing of it reached the chain, so the Phantom
+              Key you wrote down holds nothing. Discard it to start a new Vanish.
+            </Text>
+            <Button label="Discard this Vanish" onPress={discardStopped} testID="vanish-discard" />
+            <TextButton label="Leave" onPress={() => router.back()} testID="vanish-leave" />
+          </>
+        ) : phase.name === 'sending' && payment?.stopped ? (
           <>
             <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="vanish-stopped">
               {payment.error} This Vanish is stopped and will not be sent. Cancel it; the Phantom Key you wrote down

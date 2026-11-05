@@ -237,6 +237,24 @@ export function notSentReason(error: unknown, nodeUrl: string): string {
     : `Not sent: the test node could not check it first, so nothing was sent. ${reason}`;
 }
 
+/**
+ * Whether `error` is the node's check before sending refusing the payment
+ * (with its own reason). A check that could not reach the node is not.
+ */
+export function refusedByCheck(error: unknown): boolean {
+  const check = error as { notSent?: unknown; refused?: unknown } | null;
+  return error instanceof Error && check?.notSent === true && check.refused === true;
+}
+
+/**
+ * Set by `advance` on a check refusal (lib/vanish/payments.ts): true when no
+ * attempt of the payment is in a block or held by the node, so nothing of it
+ * reached the chain.
+ */
+export function refusedNeverSent(error: unknown): boolean {
+  return refusedByCheck(error) && (error as { neverSent?: unknown }).neverSent === true;
+}
+
 /** What the coin lookup found (`KeyCoins.status` in core/src/vanish.rs). */
 export type LookupStatus = 'found' | 'spent' | 'not-found';
 

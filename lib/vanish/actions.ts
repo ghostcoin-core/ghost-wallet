@@ -19,7 +19,7 @@ import {
   type PaymentDetails,
   type Rebuild,
 } from './payments';
-import { stoppedVanish } from './pending';
+import { discardableVanish, stoppedVanish } from './pending';
 import type { PaymentKit } from './use-payment';
 import { treeAtTip } from './use-payment';
 
@@ -100,10 +100,15 @@ export function signVanishAgain(kit: PaymentKit, sequence: CorePaymentSequence):
     if (onOtherChain(record)) {
       throw new Error('this Vanish was saved on another network');
     }
-    // Refused for lack of funds once, it is never signed again, whatever the
-    // balance now: the person can only cancel it.
+    // Refused for lack of funds once, or by the node's check, it is never
+    // signed again, whatever the balance now: the person can only cancel (or
+    // discard) it.
     if (stoppedVanish(record.id, kit.store) !== null) {
-      throw new Error('not enough GHOST for this Vanish when it was sent: it is stopped and will not be sent');
+      throw new Error(
+        discardableVanish(record.id, kit.store)
+          ? 'the node would not take this Vanish when it was checked: it is stopped and will not be sent'
+          : 'not enough GHOST for this Vanish when it was sent: it is stopped and will not be sent',
+      );
     }
     const details = decodeDetails(record.intent.details);
     if (!details || details.kind !== 'vanish') {

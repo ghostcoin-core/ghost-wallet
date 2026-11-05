@@ -10,7 +10,7 @@ import { devicePageCache, readCoinTreeFrom, type CoinTreeRead, type PageCache, t
 import { vanishNode, type VanishNode } from './node';
 import { advance, type Rebuild } from './payments';
 import { documentPaymentFiles, paymentStore } from './payment-store';
-import { moveAlone, stopIfShort, stoppedVanish } from './pending';
+import { discardableVanish, moveAlone, stopIfRefused, stoppedVanish } from './pending';
 import { isFinal, notSentReason, statusOfStep, type PaymentStatus } from './status-mapping';
 
 export const MOVE_EVERY_MS = 3_000;
@@ -73,8 +73,13 @@ export type PaymentView = {
   step: number | string;
   needsKey: boolean;
   error: string | null;
-  /** A Vanish the account could not pay for: held stopped, `error` says why. */
+  /**
+   * A Vanish held stopped, `error` says why: the account could not pay for
+   * it, or the node's check before sending refused it.
+   */
   stopped?: boolean;
+  /** Stopped, and no attempt of it ever reached the node: the screen offers to discard it. */
+  discardable?: boolean;
   /** The node took it and `STUCK_BLOCKS` blocks went by with it in none (status `stuck`). */
   stuck?: boolean;
   /** Stuck, and a cancel can take its place: the screen offers Cancel. */
@@ -116,7 +121,8 @@ export function usePayment(
         if (stoppedWhy !== null) {
           // Held stopped (here or by Home): never moved again.
           const step = payment.step();
-          setMoved({ of: payment, view: { ...initialView(step), error: stoppedWhy, stopped: true } });
+          const discardable = discardableVanish(id, tools.store);
+          setMoved({ of: payment, view: { ...initialView(step), error: stoppedWhy, stopped: true, discardable } });
           return;
         }
         // Home may be moving this payment right now: then this move waits for the next.
@@ -140,8 +146,10 @@ export function usePayment(
         }
       } catch (error) {
         // The payment is saved; the next move tries again, unless the account
-        // cannot pay for this Vanish: then it stops, even if the screen was left.
-        const stop = stopIfShort(id, error, tools.nodeUrl, tools.store);
+        // cannot pay for this Vanish, or the node's check refused one never
+        // sent: then it stops, even if the screen was left. A check that could
+        // not reach the node is tried again.
+        const stop = stopIfRefused(id, error, tools.nodeUrl, tools.store);
         if (stopped) {
           return;
         }
@@ -153,7 +161,7 @@ export function usePayment(
           view: {
             ...(current?.of === payment ? current.view : initialView(step)),
             error: message,
-            ...(stop ? { stopped: true } : {}),
+            ...(stop ? { stopped: true, discardable: discardableVanish(id, tools.store) } : {}),
           },
         }));
         if (stop) {

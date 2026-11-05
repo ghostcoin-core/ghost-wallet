@@ -22,6 +22,7 @@ import type { CoinTree } from './coin-tree';
 import type { NodeReceipt, VanishNode } from './node';
 import { isCancel, noteNotUnmined, noteUnmined } from './pending';
 import {
+  refusedByCheck,
   statusOfRecovery,
   statusOfStep,
   stepName,
@@ -228,6 +229,35 @@ export async function resendNewest(node: VanishNode, sequence: CorePaymentSequen
   await node.sendRaw(bytes);
 }
 
+/**
+ * Runs `send`; when the node's check refuses it, marks the error `neverSent`
+ * if no attempt saved before (`attempts`, by hash) reached the node: `recover`
+ * asked for a send, so none is in a block, and the node holds none of them.
+ * A node that cannot be asked leaves it unmarked.
+ */
+async function noteRefusal(node: VanishNode, attempts: readonly string[], send: () => Promise<void>): Promise<void> {
+  try {
+    await send();
+  } catch (error) {
+    if (refusedByCheck(error)) {
+      Object.assign(error as Error, { neverSent: await noneHeld(node, attempts) });
+    }
+    throw error;
+  }
+}
+
+async function noneHeld(node: VanishNode, attempts: readonly string[]): Promise<boolean> {
+  if (attempts.length === 0) {
+    return true;
+  }
+  try {
+    const held = await node.known([...attempts]);
+    return held.length === attempts.length && held.every((known) => known === false);
+  } catch {
+    return false;
+  }
+}
+
 export type Advance = {
   status: PaymentStatus;
   step: number | string;
@@ -294,6 +324,7 @@ export async function advance(
     const { stuck, cancellable } = noteMove(sequence, tip);
     return { status: stuck ? 'stuck' : statusOfStep(step), step, needsKey, needsBackup, stuck, cancellable };
   };
+  const before = record.attempts.map((attempt) => bytesToHex(attempt.transactionHash));
   switch (tag) {
     case 'BackUp':
       return result(false, true);
@@ -304,11 +335,11 @@ export async function advance(
       }
       const { signed, validUntil } = await rebuild(tip);
       // Checked by the node before it is saved: a refusal is never marked sent.
-      await sendAttempt(node, sequence, signed, validUntil);
+      await noteRefusal(node, before, () => sendAttempt(node, sequence, signed, validUntil));
       return result();
     }
     case 'Send':
-      await resendNewest(node, sequence);
+      await noteRefusal(node, before, () => resendNewest(node, sequence));
       return result();
     case 'Wait':
     case 'Done':

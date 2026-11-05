@@ -22,16 +22,22 @@ export type PaymentFiles = {
 const RECORD = '.record';
 const PAYLOAD = '.tx';
 const REFUSED = '.refused';
+const UNSENT = '.unsent';
 
 /**
- * The Vanishes the node refused for lack of funds. The core checksums a record
- * with its details, so this is kept beside it: a small file holding why,
- * removed with the record. No marker reads as not refused.
+ * The Vanishes held stopped: refused for lack of funds, or refused by the
+ * node's check before sending. The core checksums a record with its details,
+ * so this is kept beside it: a small file holding why (and, for one no
+ * attempt of which ever reached the node, a second one saying so), removed
+ * with the record. No marker reads as not refused.
  */
 export type RefusedMarks = {
-  markRefused(id: string, reason: string): void;
+  /** `neverSent`: no attempt of it is in a block or held by the node, so it may be discarded. */
+  markRefused(id: string, reason: string, neverSent?: boolean): void;
   /** Why payment `id` was refused, or null when it was not. */
   refusedReason(id: string): string | null;
+  /** Whether payment `id` was marked refused and never sent. */
+  refusedNeverSent(id: string): boolean;
 };
 
 export type PaymentStore = CorePaymentStore & RefusedMarks;
@@ -39,7 +45,10 @@ export type PaymentStore = CorePaymentStore & RefusedMarks;
 /** The refused marks of `store`, or null when it keeps none (then nothing is kept across restarts). */
 export function refusedMarks(store: CorePaymentStore | null | undefined): RefusedMarks | null {
   const marks = store as Partial<RefusedMarks> | null | undefined;
-  return marks && typeof marks.markRefused === 'function' && typeof marks.refusedReason === 'function'
+  return marks &&
+    typeof marks.markRefused === 'function' &&
+    typeof marks.refusedReason === 'function' &&
+    typeof marks.refusedNeverSent === 'function'
     ? (marks as RefusedMarks)
     : null;
 }
@@ -92,9 +101,19 @@ export function paymentStore(
       }
       files.remove(`${id}${RECORD}`);
       files.remove(`${id}${REFUSED}`);
+      files.remove(`${id}${UNSENT}`);
     },
-    markRefused(id: string, reason: string) {
+    markRefused(id: string, reason: string, neverSent = false) {
+      // Written before the refusal: a stop is never read as never sent unless it was.
+      if (neverSent) {
+        files.write(`${safeId(id)}${UNSENT}`, new TextEncoder().encode('1'));
+      } else {
+        files.remove(`${safeId(id)}${UNSENT}`);
+      }
       files.write(`${safeId(id)}${REFUSED}`, new TextEncoder().encode(reason));
+    },
+    refusedNeverSent(id: string) {
+      return files.read(`${safeId(id)}${REFUSED}`) !== null && files.read(`${safeId(id)}${UNSENT}`) !== null;
     },
     refusedReason(id: string) {
       const bytes = files.read(`${safeId(id)}${REFUSED}`);

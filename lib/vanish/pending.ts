@@ -22,6 +22,8 @@ import {
   NOT_MINED_LABEL,
   STUCK_BLOCKS,
   isFinal,
+  notSentReason,
+  refusedNeverSent,
   statusLabel,
   statusOfStep,
   stepName,
@@ -49,8 +51,12 @@ let held: HeldVanish | null = null;
 let reopened: string | null = null;
 const sequences = new Map<string, CorePaymentSequence>();
 const moving = new Set<string>();
-/** Vanishes the node refused for lack of funds, with why: never moved again here. */
-const stopped = new Map<string, string>();
+/**
+ * Vanishes held stopped, with why: refused for lack of funds, or refused by
+ * the node's check before sending. Never moved again here. `neverSent`: no
+ * attempt of it reached the node, so it may be discarded.
+ */
+const stopped = new Map<string, { reason: string; neverSent: boolean }>();
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -146,15 +152,17 @@ export function forgetShared(id: string) {
 }
 
 /**
- * Holds Vanish `id` stopped: the account was short of its amount and fee.
- * Neither its screen nor Home moves it again, so a later top-up does not send
- * it by itself; the person can only cancel it. With `store`, the stop is
- * saved beside the payment and holds after a restart too.
+ * Holds Vanish `id` stopped: the account was short of its amount and fee, or
+ * the node's check before sending refused it. Neither its screen nor Home
+ * moves it again, so a later top-up does not send it by itself; the person
+ * can only cancel it, or discard it when it was never sent (`neverSent`).
+ * With `store`, the stop is saved beside the payment and holds after a
+ * restart too.
  */
-export function stopVanish(id: string, reason: string, store?: CorePaymentStore | null) {
-  stopped.set(id, reason);
+export function stopVanish(id: string, reason: string, store?: CorePaymentStore | null, neverSent = false) {
+  stopped.set(id, { reason, neverSent });
   try {
-    refusedMarks(store)?.markRefused(id, reason);
+    refusedMarks(store)?.markRefused(id, reason, neverSent);
   } catch {
     // Still held stopped here; the check before signing guards a restart.
   }
@@ -169,15 +177,28 @@ export function shortOfFunds(error: unknown): boolean {
 
 /**
  * After a failed move of payment `id`: a Vanish the account is short of funds
- * for is held stopped (true); anything else is tried again (false).
+ * for is held stopped (true), and so is one the node's check refused with no
+ * attempt of it ever reaching the node, with the node's reason. Anything else
+ * is tried again (false): a check that could not reach the node, or a refusal
+ * while an earlier attempt may still be out there.
  */
-export function stopIfShort(id: string, error: unknown, nodeUrl: string, store?: CorePaymentStore | null): boolean {
-  if (kindOfId(id) !== 'vanish' || !shortOfFunds(error)) {
+export function stopIfRefused(id: string, error: unknown, nodeUrl: string, store?: CorePaymentStore | null): boolean {
+  if (kindOfId(id) !== 'vanish') {
     return false;
   }
-  stopVanish(id, failureReason(error, nodeUrl), store);
-  return true;
+  if (shortOfFunds(error)) {
+    stopVanish(id, failureReason(error, nodeUrl), store);
+    return true;
+  }
+  if (refusedNeverSent(error)) {
+    stopVanish(id, notSentReason(error, nodeUrl), store, true);
+    return true;
+  }
+  return false;
 }
+
+/** The same stop, by the name Home's mover calls it. */
+export const stopIfShort = stopIfRefused;
 
 /**
  * Why Vanish `id` was stopped, or null when it was not. With `store`, a stop
@@ -186,16 +207,47 @@ export function stopIfShort(id: string, error: unknown, nodeUrl: string, store?:
 export function stoppedVanish(id: string, store?: CorePaymentStore | null): string | null {
   const known = stopped.get(id);
   if (known !== undefined) {
-    return known;
+    return known.reason;
   }
   if (kindOfId(id) !== 'vanish') {
     return null;
   }
   const saved = savedRefusal(id, store);
   if (saved !== null) {
-    stopped.set(id, saved);
+    stopped.set(id, { reason: saved, neverSent: savedNeverSent(id, store) });
   }
   return saved;
+}
+
+/**
+ * Whether Vanish `id` is held stopped and no attempt of it ever reached the
+ * node: nothing of it can be mined, so it may be discarded.
+ */
+export function discardableVanish(id: string, store?: CorePaymentStore | null): boolean {
+  return stoppedVanish(id, store) !== null && stopped.get(id)?.neverSent === true;
+}
+
+/**
+ * Removes Vanish `id` from this phone, on the person's tap, when it is held
+ * stopped and was never sent. Nothing is signed or sent, and nothing is asked
+ * of the chain: nothing of it was ever mined. False when it may not be
+ * discarded; then nothing is removed.
+ */
+export function discardVanish(kit: Pick<Kit, 'store'>, id: string): boolean {
+  if (moving.has(id) || !discardableVanish(id, kit.store)) {
+    return false;
+  }
+  kit.store.remove(id);
+  forgetShared(id);
+  return true;
+}
+
+function savedNeverSent(id: string, store?: CorePaymentStore | null): boolean {
+  try {
+    return refusedMarks(store)?.refusedNeverSent(id) === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Why Vanish `id` was refused, as saved beside it; null when it was not. */
@@ -316,6 +368,9 @@ export function notMinedStepText(kind: SavedKind): string {
 
 /** How Home lists a Vanish held stopped. */
 export const STOPPED_TEXT = 'Stopped, not enough GHOST. Open it to cancel.';
+
+/** How Home lists a Vanish the node's check refused, never sent. */
+export const REFUSED_STOPPED_TEXT = 'Stopped, the test node would not take it. Open it to discard.';
 
 /** Asks the next screen of its kind to open payment `id`. */
 export function reopenPayment(id: string) {
@@ -450,7 +505,9 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
       stepText: otherNetwork
         ? OTHER_NETWORK_TEXT
         : stoppedVanish(id, kit.store) !== null
-          ? STOPPED_TEXT
+          ? discardableVanish(id, kit.store)
+            ? REFUSED_STOPPED_TEXT
+            : STOPPED_TEXT
           : keyStep
             ? heldStepText(keyStep)
             : stepName(step) === 'Sent' && isStuck(id)
