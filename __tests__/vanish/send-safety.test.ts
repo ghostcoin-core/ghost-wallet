@@ -625,7 +625,8 @@ describe(`a payment the node took but has not mined in ${STUCK_BLOCKS} blocks`, 
 describe('cancelling a payment not mined yet', () => {
   const CANCEL_HASH = `0x${'ce'.repeat(32)}`;
 
-  function stuckVanish(tip: { height: number }) {
+  /** A payment stuck on the node: a Vanish, or with `stuck` any account transaction of `intent`. */
+  function stuckVanish(tip: { height: number }, stuck: { tx: AccountTx; intent: CorePaymentIntent } = { tx: VANISH_TX, intent: vanishIntent() }) {
     const node = {
       chainId: jest.fn(async () => CHAIN),
       tipHeight: jest.fn(async () => tip.height),
@@ -637,10 +638,10 @@ describe('cancelling a payment not mined yet', () => {
       sendRaw: jest.fn(async () => `0x${'cc'.repeat(32)}`),
     };
     const cancelBytes = accountTx({ nonce: 4n, maxPriorityFeePerGas: 3n, maxFeePerGas: 23n, gas: 84_256n, to: ACCOUNT, value: 1n, data: '0x' });
-    const sequence = fakeSequence('vanish-20', vanishIntent(), 'BackedUp', inFlight, (signed) =>
+    const sequence = fakeSequence('vanish-20', stuck.intent, 'BackedUp', inFlight, (signed) =>
       signed === cancelBytes ? CANCEL_HASH : `0x${'0a'.repeat(32)}`,
     );
-    sequence.addAttempt(arrayBuffer(VANISH_SIGNED));
+    sequence.addAttempt(arrayBuffer(accountTx(stuck.tx)));
     sequence.markSent();
     const core = {
       testSendGasLimit: () => 84_256n,
@@ -725,6 +726,39 @@ describe('cancelling a payment not mined yet', () => {
     await cancelStuck(kit, sequence);
     const [send] = core.signSend.mock.calls[0] as unknown as [Record<string, unknown>];
     expect(send).toMatchObject({ maxPriorityFeePerGas: 3n, maxFeePerGas: 23n });
+  });
+
+  it('cancels a plain send of the same gas whose fee bump rounds up, never refused for rounding', async () => {
+    const tip = { height: 300 };
+    // 1,000,000,002 wei per gas raised 15% is 1,150,000,002.3: rounded up per gas, the total must still pass.
+    const send: AccountTx = {
+      nonce: 7n,
+      maxPriorityFeePerGas: 1n,
+      maxFeePerGas: 1_000_000_002n,
+      gas: 84_256n,
+      to: RECIPIENT,
+      value: 900n,
+      data: '0x',
+    };
+    const { kit, sequence, core, node } = stuckVanish(tip, { tx: send, intent: sendIntent() });
+    await makeStuck(kit, sequence, tip);
+
+    await cancelStuck(kit, sequence);
+
+    const [signed] = core.signSend.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(signed).toMatchObject({ nonce: 7n, maxFeePerGas: 1_150_000_003n, maxPriorityFeePerGas: 2n, gasLimit: 84_256n });
+    expect(node.sendRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a cancel whose gas would let it pay more than the stuck payment could', async () => {
+    const tip = { height: 300 };
+    const small: AccountTx = { ...VANISH_TX, gas: 50_000n };
+    const { kit, sequence, core, node } = stuckVanish(tip, { tx: small, intent: vanishIntent() });
+    await makeStuck(kit, sequence, tip);
+
+    await expect(cancelStuck(kit, sequence)).rejects.toThrow(/cost more fee than this payment could/);
+    expect(core.signSend).not.toHaveBeenCalled();
+    expect(node.sendRaw).not.toHaveBeenCalled();
   });
 
   it('cancels a payment once at most, so its fee is never raised again and again', async () => {
