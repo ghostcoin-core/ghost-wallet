@@ -1,8 +1,9 @@
 # Ghost Sealed cards
 
-Status: design, with the Seal's card logic built and tested against a
-simulated NTAG 424 DNA. The enclave that runs it, the phone relay, the chain
-check, the card setup and the app screens are separate pieces of work that
+Status: design, with the Seal's card logic and its chain check built and
+tested against a simulated NTAG 424 DNA and fake chain nodes. The enclave
+that runs it (and the proxy through which it reaches real nodes), the phone
+relay, the card setup and the app screens are separate pieces of work that
 build on this document.
 
 ## What a Ghost Sealed card is
@@ -34,8 +35,9 @@ The parts:
 - **The phone**: relays APDUs, sends a fresh random challenge with every
   request, and checks the Seal's signed answers against the Seal's pinned
   public key and code measurement.
-- **The chain check**: tells the Seal whether a coin is paid exactly and
-  final. The Seal only asks it; how it decides is its own design.
+- **The chain check**: tells the Seal whether a coin is paid exactly,
+  settled and still unspent, as two or more independent nodes agree (see
+  [Chain check](#chain-check)).
 
 No elliptic-curve key exists anywhere: the card uses AES, the Seal signs with
 ML-DSA-65 and encrypts with ML-KEM-768, and every derivation is HKDF with
@@ -61,8 +63,10 @@ any session left on the chip.
 4. Read the header frame. It must be Empty with no key in the slot.
 5. Make a Phantom Key inside the Seal with the wallet core's derivation (the
    same calls the app's card Vanish uses: a new card-only key and its coin
-   commit number 0), from the Seal's random source.
-6. Journal the coin (its public commit data) before the card changes.
+   commit number 0), from the Seal's random source. The maker also returns
+   the coin's spend marker.
+6. Journal the coin (its public commit data and its spend marker) before the
+   card changes.
 7. Write the key slot frame, read it back and compare.
 8. Write the header frame (still Empty, key present, the coin, the amount and
    the Open PIN hash if one was asked for), read it back and compare.
@@ -74,7 +78,10 @@ data. Then the Seal is asked to confirm:
 
 10. Read the header (key 2) and the key slot; they must match.
 11. Ask the chain check whether exactly this coin and exactly this amount are
-    paid and final. If not: nothing changes.
+    paid, settled and unspent. With the chain status check installed, the
+    Seal also asks it itself, with the commit data and spend marker from its
+    journal. If not: nothing changes (not paid, filling and waiting to
+    settle, a wrong payment, spent, or can't check right now).
 12. Write the header Sealed, read it back, answer Sealed.
 
 A Fill asked again while one is waiting for its payment hands back the same
@@ -96,6 +103,12 @@ the waiting one is paid.
    instead of answering Sealed. Confirming its Fill again is refused the same
    way. Otherwise a sender could burn the tries on purpose and still hand a
    receiver a fresh Sealed answer for a coin nobody can redeem.
+6. With the chain status check installed, a card that says Sealed is
+   answered Sealed only once the chain check finds its coin (the commit data
+   and spend marker from the Fill journal entry) paid exactly, settled and
+   unspent. Otherwise Check refuses: not settled, spent, can't check right
+   now, or a payment that is not exactly this coin, and never a signed
+   Sealed answer. A journaled Open still answers Opening or Opened first.
 
 ### Open
 
@@ -137,8 +150,9 @@ is refused.
   after an Open fails the receiver's check.
 - **The answer is about this card.** The Seal authenticates the card with
   keys derived for its UID and checks the UID the chip itself reports.
-- **The coin is paid.** The card is marked Sealed only after the chain check
-  confirmed exactly this commit data and exactly this amount.
+- **The coin is paid and still there.** The card is marked Sealed only after
+  the chain check confirmed exactly this commit data and exactly this amount,
+  settled; every Check asks again whether it is still unspent.
 - **An Open is final and visible.** From the moment an Open is journaled,
   every Check answers Opening or Opened, never Sealed. The key slot is wiped
   and the card's keys rotated before the key is released.
@@ -158,7 +172,9 @@ is refused.
 - **The journal store**: it must keep entries durably. It sees only sealed
   bytes, but deleting an Open entry after the key slot was wiped would lose
   that key.
-- **The chain check**: that it confirms only exact, final payments.
+- **The chain nodes**: that the nodes of the release node list do not all
+  lie the same way at once. One node that is wrong, behind or unreachable
+  only stops the answer.
 - **The card's hardware**: that the chip keeps its AES keys, and that one
   WriteData either lands or not.
 - **The phone and the receiver's app**: to send a fresh challenge and check
@@ -326,11 +342,58 @@ Key under AES-256-CBC; the tag is HMAC-SHA3-256 over
 `ghost-seal/v1/open-release` || UID || generation || everything before the
 tag. The shared secret never leaves the Seal.
 
+## Chain check
+
+The chain check (`seal/src/chain_check.rs`) answers one question about a
+card's coin, given its commit data, the card's amount and the coin's spend
+marker. It reuses the wallet core instead of copying it: the leaf a Vanish
+adds (`commit_leaf`), the coin-tree page check (`check_coin_pages`) and the
+settlement depth (`settle_confirmations`).
+
+A node is a `ChainNode`: its network (chain id and genesis), its tip, the
+receipts of the transactions to the coin commit entry that carry the coin's
+fingerprint, the coin-tree page roots and one page as of a block, and
+whether a spend marker is used. It is a trait, so the enclave reaches nodes
+through its outside proxy; nothing in the Seal opens a socket.
+
+From each node, at its tip:
+
+1. The node must follow the Seal's network, or the answer is the wrong
+   chain.
+2. Find the successful Vanish to the coin commit entry signed for this chain
+   id with exactly the card's commit data and exactly the card's amount.
+   Without one, the nearest miss decides: the same commit data with another
+   amount is the wrong amount; the coin's fingerprint with other commit data
+   is wrong commit data; a payment signed for another chain id is the wrong
+   chain; nothing (or only failed transactions) is filling.
+3. The leaf that Vanish adds must be at the receipt's position in a page that
+   `check_coin_pages` checked against the tip header's coin tree root.
+   Anything else is a node whose answers do not fit together.
+4. A used spend marker is spent.
+5. A Vanish block fewer than the safe depth deep is filling, waiting to
+   settle. The safe depth is the wallet's settlement policy, today a flat 3
+   blocks for every amount.
+6. Otherwise: exact, settled and unspent.
+
+`NodeChainCheck` asks every node it holds (at least two, each named once)
+and answers only when all of them give the same tip and the same result. An
+unreachable node, a node whose data fails its check, or any disagreement is
+"can't check right now". It also serves as a Fill confirmation's
+`ChainCheck`: exact and settled and unspent is Paid; filling and can't check
+now are NotYet; a wrong payment or a spent coin is Mismatch.
+
+`Seal::with_chain_status` installs it in the Seal. Installed, it gates every
+Sealed answer of Check and of Fill's confirmation, with the commit data and
+spend marker from the Fill journal entry (the card holds only the coin's
+hash). It is not yet required by `Seal::new`; production entry points
+install it.
+
 ## Journal
 
-The Seal journals a Fill's public commit data before writing the card, and an
-Open (phase, generation, coin, amount, phone key, Phantom Key) before
-changing the card. The store sees only sealed entries: AES-256-CBC under a
+The Seal journals a Fill's public commit data and its coin's spend marker
+before writing the card (a spend marker is public once the coin is spent
+and tells nothing before), and an Open (phase, generation, coin, amount,
+phone key, Phantom Key) before changing the card. The store sees only sealed entries: AES-256-CBC under a
 fresh IV, then HMAC-SHA3-256 over `ghost-seal/v1/journal` || entry kind ||
 UID || IV || ciphertext, both keys from HKDF(M) with the label
 `ghost-seal/v1/journal`.

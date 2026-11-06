@@ -40,6 +40,14 @@ pub enum SealError {
     NotPaid,
     /// The chain check saw a payment that is not exactly this coin.
     PaymentMismatch,
+    /// The coin is paid exactly but its block is not yet deep enough to be
+    /// settled: the card is still filling.
+    NotSettled,
+    /// The coin's spend marker is used: the coin is spent.
+    CoinSpent,
+    /// The chain status could not be checked right now: a node could not be
+    /// reached, or the nodes do not agree.
+    CantCheckNow,
     /// The card has an Open PIN and none was given.
     PinRequired,
     /// The Open PIN was wrong; this many tries are left.
@@ -88,6 +96,9 @@ impl fmt::Display for SealError {
             SealError::FillPending => f.write_str("a Fill on this card waits for its payment"),
             SealError::NotPaid => f.write_str("the payment is not on the chain yet"),
             SealError::PaymentMismatch => f.write_str("the payment on the chain is not exactly this coin"),
+            SealError::NotSettled => f.write_str("the card is filling, waiting for its payment to settle"),
+            SealError::CoinSpent => f.write_str("the card's coin is spent"),
+            SealError::CantCheckNow => f.write_str("the chain cannot be checked right now"),
             SealError::PinRequired => f.write_str("this card needs its Open PIN"),
             SealError::WrongPin { tries_left } => write!(f, "wrong PIN, {tries_left} tries left"),
             SealError::PinLocked => f.write_str("the Open PIN is locked"),

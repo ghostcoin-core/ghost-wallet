@@ -2,8 +2,9 @@
 //! end and runs Fill, Check and Open. It is what later runs inside the
 //! enclave; it has no networking and no cloud code. Everything it needs from
 //! outside (randomness, the clock, the card transport the phone relays, the
-//! chain check, the wallet core's Phantom Key derivation and the journal
-//! store) comes in through a trait.
+//! chain nodes, the wallet core's Phantom Key derivation and the journal
+//! store) comes in through a trait. The chain check (`chain_check`) reuses
+//! the wallet core's coin-tree check, coin leaf code and settlement depth.
 //!
 //! The design, the record layout, the frame and answer formats and the
 //! labels of every key derivation are in `docs/sealed-card.md`.
@@ -19,6 +20,7 @@
 pub mod answer;
 pub mod apdu;
 pub mod card_keys;
+pub mod chain_check;
 pub mod error;
 pub mod flows;
 pub mod journal;
@@ -32,6 +34,10 @@ pub mod traits;
 
 pub use answer::{AnswerBody, AnswerKind, AnswerRejected, AnswerVerifier, SignedAnswer};
 pub use card_keys::{CardKeys, CardUid, card_keys, card_keys_at};
+pub use chain_check::{
+    BlockRef, ChainNode, CoinQuery, CoinStatus, CoinStatusCheck, CoinTreeAt, Network, NodeChainCheck, NodeError,
+    NodeListError, TxOutcome, VanishReceipt,
+};
 pub use error::SealError;
 pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest, Seal, SealConfig};
 pub use journal::{EntryKind, Journal, MemoryJournal};
