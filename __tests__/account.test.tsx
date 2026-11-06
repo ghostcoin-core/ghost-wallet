@@ -189,6 +189,21 @@ describe('SettingsScreen', () => {
     expect(mockPush).toHaveBeenCalledWith('/recovery-words');
   });
 
+  it('lists the cards: Check NFC Chip, Fill, Open into my wallet and Wipe, each opening its screen', () => {
+    render(<SettingsScreen />);
+    expect(screen.getByText('Cards')).toBeOnTheScreen();
+    for (const [testID, route] of [
+      ['settings-check-card', '/check-card'],
+      ['settings-fill-card', '/fill-card'],
+      ['settings-open-card', '/open-card'],
+      ['settings-wipe-card', '/wipe-card'],
+    ] as const) {
+      fireEvent.press(screen.getByTestId(testID));
+      expect(mockPush).toHaveBeenLastCalledWith(route);
+    }
+    expect(screen.getByTestId('settings-check-card')).toHaveTextContent(/Check NFC Chip/);
+  });
+
   it('opens the bench on the seventh tap of the version, not before', () => {
     render(<SettingsScreen />);
     for (let i = 0; i < 6; i++) {

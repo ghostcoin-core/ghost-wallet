@@ -90,6 +90,58 @@ export function startCardVanish(
   return startPrepared(kit, account, amountWei, 'card', (sequence) => ({ sequence }));
 }
 
+/** The size of a coin's commit data (core/src/vanish.rs, `COMMIT_DATA_BYTES`). */
+export const COMMIT_DATA_BYTES = 430;
+
+/**
+ * The Vanish that fills a Ghost Sealed card. The Seal made the card's key on
+ * the card and handed back only the coin's public commit data and its exact
+ * amount: those replace the key the core would have made, and the payment
+ * then goes through the same machinery as any Vanish. No key is made, shown
+ * or held on this phone, and the card already holds the key, so the Vanish is
+ * backed up as soon as it is saved. A Fill asked again hands back the same
+ * commit data: the Vanish already saved for it is returned, never a second
+ * one paying the same coin twice.
+ */
+export async function startSealedCardVanish(
+  kit: PaymentKit,
+  account: string,
+  amountWei: bigint,
+  commitData: Uint8Array,
+): Promise<{ sequence: CorePaymentSequence; again: boolean }> {
+  if (commitData.length !== COMMIT_DATA_BYTES) {
+    throw new Error('the Seal handed back commit data of the wrong size');
+  }
+  if (amountWei <= 0n) {
+    throw new Error('a card is filled with more than nothing');
+  }
+  const commitHex = bytesToHex(commitData);
+  for (const id of kit.store.list()) {
+    const saved = kit.store.load(id);
+    const details = saved ? decodeDetails(saved.intent.details) : null;
+    if (details?.kind === 'vanish' && details.commitData === commitHex) {
+      if (details.amountWei !== amountWei.toString()) {
+        throw new Error('this card is already being filled with another amount');
+      }
+      return { sequence: kit.core.PaymentSequence.open(kit.store, id), again: true };
+    }
+  }
+  const chainId = await checkedChainId(kit);
+  const nonce = await kit.node.nonce(account);
+  const details: PaymentDetails = {
+    kind: 'vanish',
+    commitData: commitHex,
+    amountWei: amountWei.toString(),
+    nonce: nonce.toString(),
+    at: Date.now(),
+    chainId: chainId.toString(),
+  };
+  const sequence = kit.core.PaymentSequence.start(kit.store, newPaymentId('vanish'), vanishIntent(account, nonce, details));
+  // The Seal wrote the key to the card and read it back before it answered.
+  sequence.markBackedUp();
+  return { sequence, again: false };
+}
+
 async function startPrepared<T>(
   kit: PaymentKit,
   account: string,

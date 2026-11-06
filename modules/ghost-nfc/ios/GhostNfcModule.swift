@@ -4,10 +4,13 @@
 // and the sealed Phantom Key. Keys and the Phantom Key stay in CardVault and
 // the native core.
 //
-// The Seal relay (relayCheck, SealRelay.swift) carries a Sealed card's
-// traffic between the card and the Seal natively: JavaScript gets only the
-// result (the card's UID, the challenge, the Seal's signed answer and the
-// time of each round trip), never a command or a card answer.
+// The Seal relay (relayCheck, relayFill, relayFillConfirm and relayOpen,
+// SealRelay.swift) carries a Sealed card's traffic between the card and the
+// Seal natively: JavaScript gets only the result (the card's UID, the
+// challenge, the Seal's signed answer, the time of each round trip and a
+// Fill's public commit data), never a command or a card answer. The Open's
+// phone key seed moves only between the native core and the Keychain
+// (OpenKeyKeychain.swift).
 import ExpoModulesCore
 
 public final class GhostNfcModule: Module {
@@ -36,6 +39,34 @@ public final class GhostNfcModule: Module {
 
     AsyncFunction("relayCheck") { (sealUrl: String, alert: String, promise: Promise) in
       self.relay.check(sealUrl: sealUrl, alert: alert, promise: promise)
+    }
+
+    // A Sealed card's Fill (and its confirmation) and Open through the Seal.
+    // The PIN goes to the Seal in the start request only; an Open's release
+    // goes to the native core, never back to JavaScript.
+    AsyncFunction("relayFill") { (sealUrl: String, alert: String, amountWei: String, pin: String, promise: Promise) in
+      self.relay.run(.fill(amountWei: amountWei, pin: pin), sealUrl: sealUrl, alert: alert, promise: promise)
+    }
+
+    AsyncFunction("relayFillConfirm") { (sealUrl: String, alert: String, promise: Promise) in
+      self.relay.run(.fillConfirm, sealUrl: sealUrl, alert: alert, promise: promise)
+    }
+
+    AsyncFunction("relayOpen") { (sealUrl: String, alert: String, phoneKey: String, pin: String, promise: Promise) in
+      self.relay.run(.open(phoneKey: phoneKey, pin: pin), sealUrl: sealUrl, alert: alert, promise: promise)
+    }
+
+    // The Open's phone key seed, between the native core and the Keychain.
+    Function("keepOpenKey") { () throws in
+      try OpenKeyKeychain.keep()
+    }
+
+    Function("restoreOpenKey") { () throws -> Bool in
+      try OpenKeyKeychain.restore()
+    }
+
+    Function("forgetOpenKey") {
+      OpenKeyKeychain.forget()
     }
 
     Function("authPart2") { (uid: String, set: String, keyNo: Int, encryptedRndB: Data) throws -> Data in

@@ -36,11 +36,23 @@ describe('route guards', () => {
     expect(ROUTE_GROUPS['seal-speed']).toBe('developer');
   });
 
+  it('opens the Sealed card screens only with an unlocked account', () => {
+    for (const route of ['check-card', 'fill-card', 'open-card'] as const) {
+      expect(ROUTE_GROUPS[route]).toBe('wallet');
+      expect(canOpen(route, NO_ACCOUNT)).toBe(false);
+      expect(canOpen(route, LOCKED)).toBe(false);
+      expect(canOpen(route, UNLOCKED)).toBe(true);
+    }
+  });
+
   it('with an unlocked account opens the wallet screens and the developer screens, and no onboarding screen', () => {
     expect(openRoutes(UNLOCKED).sort()).toEqual([
       'bench',
+      'check-card',
       'check-words',
+      'fill-card',
       'home',
+      'open-card',
       'payment',
       'receive',
       'recovery-words',

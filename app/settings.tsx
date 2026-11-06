@@ -143,6 +143,35 @@ export default function SettingsScreen() {
             testID="settings-backup-unchecked"
           />
         ) : null}
+      </Panel>
+
+      <SectionTitle>Cards</SectionTitle>
+      <Panel>
+        <Row
+          first
+          icon="check"
+          title="Check NFC Chip"
+          detail="What a Ghost card holds, checked with the Seal"
+          opens
+          onPress={() => router.push('/check-card')}
+          testID="settings-check-card"
+        />
+        <Row
+          icon="key"
+          title="Fill a card"
+          detail="Put GHOST on an empty Ghost card"
+          opens
+          onPress={() => router.push('/fill-card')}
+          testID="settings-fill-card"
+        />
+        <Row
+          icon="receive"
+          title="Open a card into my wallet"
+          detail="Empty a Ghost card into this account"
+          opens
+          onPress={() => router.push('/open-card')}
+          testID="settings-open-card"
+        />
         <Row
           icon="cross"
           title="Wipe a card"

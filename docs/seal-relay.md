@@ -15,9 +15,12 @@ The phone:
 - opens the Core NFC session and the connection to the Seal;
 - passes each APDU to the card and each answer back as opaque bytes: it never
   decrypts them, and it holds no card key;
-- hands JavaScript only the result: the card UID, the state, the amount in
-  wei, the Seal's signed answer and the time of each round trip. No function
-  of the native relay returns an APDU or an answer to JavaScript.
+- hands JavaScript only the result: the card UID, the challenge it sent, the
+  state, the amount in wei, the Seal's signed answer, the time of each round
+  trip and, for a Fill, the coin's public commit data. An Open's release
+  package goes from the relay straight to the native core
+  (`core/src/seal_open.rs`). No function of the native relay returns an APDU
+  or a card answer to JavaScript.
 
 The card's secure messaging is end to end between the chip and the Seal, so
 the phone (and anyone between the phone and the Seal) sees only what the
@@ -120,15 +123,98 @@ Messages never carry a key, a PIN or card traffic.
 
 The state, amount and UID the phone reports come from the signed answer bytes,
 never from unsigned fields: the answer's domain is `ghost-seal/v1/answer`, its
-kind is Check, it carries the phone's own challenge and the UID of the card in
-the field. Verifying the signature against the Seal's pinned key and
-measurement is the Check screen's job (a later piece of work); the speed screen
-only times the relay.
+kind is the flow's (Check, Fill or Open), it carries the phone's own challenge
+and the UID of the card in the field. The relay hands JavaScript the challenge
+it made with the answer, and the native core (`core/src/seal_answer.rs`, the
+phone's side of `AnswerVerifier`) then checks the ML-DSA-65 signature under
+the Seal's key, that the Seal's measurement is on the app's pinned list
+(`lib/seal/pinned-measurements.ts`) and is the one in the answer, the
+challenge, the card and the expiry, and for a Fill or an Open that the answer
+binds the commit data or the release package that came with it. The Seal's
+key and measurement come from `lib/seal/trusted-seal.ts`, which has no Seal
+yet outside the tests, so every card shows "Can't verify this card" until it
+has one (see `docs/sealed-card.md`, "The app"). The speed screen only times
+the relay.
 
-## Fill
+## Fill, its confirmation and Open
 
-Fill is not on the relay yet. When it is, it uses the same sessions and step
-requests, started from its own path, and the speed screen times it too.
+They use the same sessions, step requests, abort and answers as Check,
+started from their own paths. Serving them from the Seal is a later piece of
+work (the development test server answers Check only); the phone side is
+`modules/ghost-nfc/ios/SealRelay.swift` and `modules/ghost-nfc/relay.ts`.
+
+### Start a Fill
+
+`POST /v1/fill/start`
+
+```json
+{ "uid": "04518dfaa96180", "challenge": "<64 hex digits>", "amountWei": "<decimal digits>", "pin": "<4 to 8 digits>" }
+```
+
+`pin` is left out when the card gets no Open PIN. The flow is `Seal::fill`.
+Its `done` answer also carries the coin's public commit data, which the phone
+pays with its Vanish:
+
+```json
+{ "status": "done", "answer": "<203 bytes as hex>", "signature": "<hex>", "commitData": "<430 bytes as hex>" }
+```
+
+The answer's kind is Fill, its state Empty, its coin and binding both
+SHA3-256 of the commit data, its amount the one asked for and its PIN status
+the one asked for; the phone refuses anything else.
+
+### Confirm a Fill
+
+`POST /v1/fill/confirm` with `{ "uid": ..., "challenge": ... }`. The flow is
+`Seal::confirm_fill`: once the chain check finds the coin paid exactly and
+settled, the card is written Sealed and the `done` answer (kind Fill) says
+Sealed; until then it is refused with the reason `filling`.
+
+### Start an Open
+
+`POST /v1/open/start`
+
+```json
+{ "uid": "04518dfaa96180", "challenge": "<64 hex digits>", "phoneKey": "<1184 bytes as hex>", "pin": "<the card's Open PIN>" }
+```
+
+`phoneKey` is the native core's ML-KEM-768 encapsulation key; `pin` is left
+out for a card without one. The flow is `Seal::open`. Its `done` answer also
+carries the release package (`GSR1`..., `docs/sealed-card.md`, "Open
+release"):
+
+```json
+{ "status": "done", "answer": "<203 bytes as hex>", "signature": "<hex>", "release": "<the package as hex>" }
+```
+
+The phone hands `release` to the native core and nowhere else; the core
+accepts the answer (kind Open, state Opened) only when it binds exactly that
+package.
+
+### Why a card was refused
+
+A `refused` answer (HTTP 422) of any flow may carry a `reason`, so the phone
+can say what the card is without reading `message`:
+
+| `reason` | | the phone shows |
+| --- | --- | --- |
+| `not-a-ghost-card` | not in the card registry, or keys the Seal does not derive | Not a Ghost card |
+| `filling`, `not-paid` | the payment is not settled yet | Filling, waiting to settle |
+| `cant-check-now` | the chain check could not reach its nodes | Can't check right now |
+| `spent` | the coin is spent | Spent, empty |
+| `pin-required` | an Open of this card needs its PIN | asks for the PIN |
+| `wrong-pin` | the PIN was wrong; a try was counted | Wrong PIN, Check again for the tries left |
+| `pin-locked` | no PIN tries left | Locked |
+| `wrong-state` | the card is not in a state for this flow | asks to try again |
+| `fill-pending` | a Fill with another amount or PIN waits for its payment | asks to try again |
+
+A refusal without a `reason` is shown as Not a Ghost card. The PIN is sent
+only in the start request, over HTTPS, and never comes back in any answer or
+message.
+
+The phone allows a Check 32 card round trips, a Fill or its confirmation 64
+and an Open 160 (it rotates five keys and authenticates with each new one),
+all inside the same 50 seconds.
 
 ## The development test server
 

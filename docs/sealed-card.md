@@ -1,10 +1,11 @@
 # Ghost Sealed cards
 
 Status: design, with the Seal's card logic and its chain check built and
-tested against a simulated NTAG 424 DNA and fake chain nodes. The enclave
-that runs it (and the proxy through which it reaches real nodes), the phone
-relay, the card setup and the app screens are separate pieces of work that
-build on this document.
+tested against a simulated NTAG 424 DNA and fake chain nodes, and the app's
+screens (Check, Fill, Open into the wallet, the Open PIN; see
+[The app](#the-app)) built and tested against a fake Seal. The enclave that
+runs the Seal for phones, the proxy through which it reaches real nodes, and
+the card setup are separate pieces of work that build on this document.
 
 ## What a Ghost Sealed card is
 
@@ -342,6 +343,12 @@ Key under AES-256-CBC; the tag is HMAC-SHA3-256 over
 `ghost-seal/v1/open-release` || UID || generation || everything before the
 tag. The shared secret never leaves the Seal.
 
+The Phantom Key's bytes, in the key slot and in a release, are the wallet
+core's key bytes: the format code `0x20`, then the key's 32 secret bytes (33
+bytes). The phone's core makes the same Phantom Key from them with Ghost's
+client (a key of the words format is made from the first 32 bytes its source
+gives) and refuses any other length, format code or secret.
+
 ## Chain check
 
 The chain check (`seal/src/chain_check.rs`) answers one question about a
@@ -409,6 +416,97 @@ UID || IV || ciphertext, both keys from HKDF(M) with the label
 | `ghost-seal/v1/open-release` | the release's AES-256 and HMAC keys, from the ML-KEM shared secret |
 | `ghost-seal/v1/record-check` | the check of each record frame |
 | `ghost-seal/v1/phone-key` | the hash of a bound phone key |
+
+## The app
+
+Four screens, each laid out for the iPhone and for the iPhone Duo folded and
+open: Check NFC Chip (`app/check-card.tsx`, a button on Home and in the
+Cards section of Settings), Fill a card (`app/fill-card.tsx`) and Open a card
+into my wallet (`app/open-card.tsx`), both in the Cards section. The flows are
+`lib/seal/flows.ts`; the relay is `docs/seal-relay.md`.
+
+### Checking an answer
+
+Every answer is checked in the native core, never in JavaScript
+(`core/src/seal_answer.rs`, the phone's side of `AnswerVerifier`, with the
+`ml-dsa` version the Seal pins): the Seal's measurement is on the app's
+pinned list (the PCR0 of each allowed build in
+`lib/seal/pinned-measurements.ts`) and is the one the answer carries, the
+ML-DSA-65 signature verifies under the Seal's key (context
+`ghost-seal answer`), the answer is of the flow the phone ran, over the
+32-byte challenge the native relay made and sent, about the card it tapped,
+and not expired. The Seal's key and measurement come from one function,
+`trustedSeal` in `lib/seal/trusted-seal.ts`. They will come from the Seal's
+Nitro attestation (`GPA1`, `docs/seal-enclave.md`), which the app does not
+fetch yet, so today it returns nothing, and the pinned list is empty too:
+every card shows "Can't verify this card".
+
+### Check NFC Chip
+
+A deliberate tap with a spinner while it runs; Home and Send never wait on
+it. It shows one of:
+
+- **Secured, 5 GHOST, never opened**: a fresh verified Sealed answer, with
+  whether an Open needs a PIN and the tries left;
+- **Filling, waiting to settle**: the Seal refused it as not settled, or this
+  phone filled the card and the Seal still answers it Empty (it answers
+  Empty until the Fill is confirmed); a button asks the Seal to confirm it;
+- **Opened, empty**: Opening or Opened;
+- **Empty, ready to fill**: set up and never filled (or filled by another
+  phone and not yet confirmed);
+- **Not a Ghost card**: the Seal does not know the card;
+- **Can't check right now (no connection)**: the Seal or its chain check
+  could not be reached;
+- **Can't verify this card**, in red, never with an amount: any answer that
+  failed a check (a bad signature, a replayed or expired answer, another
+  card, Seal code not pinned), or no Seal to check with.
+
+A card is shown Secured only after a fresh Check that verified.
+
+### Fill a card
+
+The person picks an amount (at least the smallest Vanish) and, if wanted, an
+Open PIN, then taps a set-up empty card. The Seal writes a fresh key and
+hands back the commit data; the app checks the Fill answer (it binds exactly
+that commit data, for exactly that amount and PIN status) and Vanishes
+exactly that amount to exactly that commit data through the existing Vanish
+payment (`startSealedCardVanish` in `lib/vanish/actions.ts`): the Seal's
+commit data replaces the key the core would have made. No words or key are
+ever shown or held on the phone. A Fill asked again hands back the same
+commit data, and the Vanish already saved for it is reused, never a second
+one. The screen shows Filling until the Seal, asked with a tap once the
+payment settled, answers Sealed. The phone remembers which cards it filled
+(`lib/seal/fills.ts`: UID and amount only) so its own Check shows them as
+Filling.
+
+### Open into my wallet
+
+The person Checks the card first: its amount, whether it needs a PIN and the
+tries left come from that signed answer. On Open the native core makes an
+ML-KEM-768 key pair (`core/src/seal_open.rs`, with the `ml-kem`, `hkdf`,
+`hmac`, `aes` and `cbc` versions the Seal pins) and hands JavaScript only the
+public encapsulation key. The relay hands the release to the core, which
+checks the Open answer (it must bind exactly that package), opens the
+package and puts the Phantom Key in its card-key slot. The app then at once
+Claims the whole coin into the wallet's account with the existing Claim
+(`startReveal` with the card key, as Summon from a card does) and shows its
+status until it settles. The key never reaches JavaScript and is never
+logged.
+
+The private key's seed is kept in the Keychain, this device only, from just
+before the Open is sent until that Claim settles, then wiped. An Open cut off
+by a lost connection or a closed app is asked again with the same phone key,
+and the Seal releases the key to it (and to no other).
+
+### The Open PIN
+
+Optional, 4 to 8 digits, set at Fill (typed twice). It goes to the Seal
+through the relay only: it is never stored or logged, and the screens clear
+it as soon as the call that needed it is made. An Open of a card with a PIN
+asks for it; a wrong PIN costs a try, counted on the card, and the screen
+shows the tries left again only from a new signed answer. A card with no
+tries left is shown as locked and can never be opened. A filled card's PIN
+stays as set at Fill: the Seal has no flow to set it again yet.
 
 ## Relation to the bearer-card specification
 

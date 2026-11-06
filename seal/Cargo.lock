@@ -548,11 +548,19 @@ dependencies = [
 name = "ghost-wallet-core"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "cbc",
  "ghost-client",
  "ghost-proofs",
+ "hkdf",
+ "hmac",
+ "ml-dsa",
+ "ml-kem",
  "rand",
+ "sha3",
  "tiny-keccak",
  "uniffi",
+ "zeroize",
 ]
 
 [[package]]

@@ -372,8 +372,9 @@ export default function SummonScreen() {
             </Text>
             {cards ? (
               <Text style={textStyles.quiet} testID="summon-card-note">
-                A card can be read only on the iPhone that wrote it; its keys are in this iPhone&apos;s Keychain. On
-                another phone, type the key&apos;s words instead.
+                A Phantom Key card from Vanish keeps its keys in the Keychain of the iPhone that wrote it; elsewhere,
+                type the key&apos;s words instead. A Ghost Sealed card works on any iPhone: open it into your wallet
+                from Settings, Cards.
               </Text>
             ) : null}
           </Panel>

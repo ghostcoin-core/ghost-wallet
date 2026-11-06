@@ -119,6 +119,17 @@ describe('HomeScreen', () => {
     expect(mockPush.mock.calls).toEqual([['/receive'], ['/settings']]);
   });
 
+  it('opens Check NFC Chip without waiting on any card', () => {
+    render(<HomeScreen />);
+
+    fireEvent.press(screen.getByTestId('open-check-card'));
+
+    expect(screen.getByTestId('open-check-card')).toHaveTextContent('Check NFC Chip');
+    expect(mockPush.mock.calls).toEqual([['/check-card']]);
+    // The balance is not held back by a card.
+    expect(screen.getByTestId('balance-amount')).toBeOnTheScreen();
+  });
+
   it('says the account is unavailable when the native core is missing', () => {
     mockAccountZeroAddress.mockImplementation(() => {
       throw new Error('native core missing');
