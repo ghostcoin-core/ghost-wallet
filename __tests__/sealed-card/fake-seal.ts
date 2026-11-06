@@ -49,7 +49,7 @@ function buffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 /** A 32-byte stand-in hash (test only, not a real hash). */
-export function fakeHash(data: Uint8Array, salt = 0): Uint8Array {
+export function fakeHash(data: Uint8Array, salt = 0): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(32);
   let h = (0x811c9dc5 ^ salt) >>> 0;
   for (let round = 0; round < 32; round += 1) {
