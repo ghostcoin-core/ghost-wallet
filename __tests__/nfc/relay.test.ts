@@ -239,7 +239,7 @@ describe('a Check through the Seal', () => {
       rounds: [{ kind: 'seal', ms: 3, bytes: 'ff' }],
       totalMs: 3,
       extra: 'nothing',
-    } as NativeSealCheck;
+    } as unknown as NativeSealCheck;
     const result = readResult(native);
     expect(Object.keys(result)).not.toContain('extra');
     expect(Object.keys(result)).not.toContain('challenge');
