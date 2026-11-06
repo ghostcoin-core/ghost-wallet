@@ -90,6 +90,11 @@ the waiting one is paid.
 4. Answer the state, the coin and the amount, signed over the phone's
    challenge. While an Open is journaled the answer is **Opening** (or
    **Opened** once the key was released), whatever the card still says.
+5. A Sealed card whose Open PIN has no tries left can never be opened, so it
+   is never certified: with no Open journaled, Check refuses it (PIN locked)
+   instead of answering Sealed. Confirming its Fill again is refused the same
+   way. Otherwise a sender could burn the tries on purpose and still hand a
+   receiver a fresh Sealed answer for a coin nobody can redeem.
 
 ### Open
 

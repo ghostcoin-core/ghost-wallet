@@ -57,6 +57,15 @@ pub fn record_file_settings() -> [u8; 3] {
     [comm_mode::FULL, rights[0], rights[1]]
 }
 
+/// A Sealed card whose Open PIN tries are used up can never be opened: no
+/// answer may call it Sealed.
+fn refuse_pin_locked(header: &Header) -> Result<(), SealError> {
+    if header.state == CardState::Sealed && header.pin_hash.is_some() && header.pin_tries_left == 0 {
+        return Err(SealError::PinLocked);
+    }
+    Ok(())
+}
+
 /// What the Seal is configured with besides its traits.
 #[derive(Debug, Clone)]
 pub struct SealConfig {
@@ -286,6 +295,10 @@ impl Seal {
 
     /// Check: authenticates the card, reads its record and answers its state
     /// and amount, signed over the phone's challenge. Never reads the key.
+    ///
+    /// A Sealed card whose Open PIN has no tries left can never be opened, so
+    /// it is never certified: Check refuses it with [`SealError::PinLocked`].
+    /// A journaled Open still comes first (Opening or Opened).
     pub fn check(&mut self, card: &mut dyn CardTransport, request: &CheckRequest) -> Result<SignedAnswer, SealError> {
         let uid = request.uid;
         let pending = self.load_entry(&uid)?;
@@ -299,7 +312,10 @@ impl Seal {
                 (state, entry.coin, entry.amount_wei)
             }
             None if header.state == CardState::Empty => (CardState::Empty, [0u8; 32], 0),
-            None => (header.state, header.coin, header.amount_wei),
+            None => {
+                refuse_pin_locked(&header)?;
+                (header.state, header.coin, header.amount_wei)
+            }
         };
         self.answer(AnswerKind::Check, &request.challenge, &uid, header.generation, coin, state, amount, [0u8; 32])
     }
@@ -427,6 +443,7 @@ impl Seal {
         let header = Self::read_header(&mut link, &mut session, &uid, generation)?;
         match header.state {
             CardState::Sealed => {
+                refuse_pin_locked(&header)?;
                 return self.answer(
                     AnswerKind::Fill,
                     &request.challenge,
