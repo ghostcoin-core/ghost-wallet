@@ -48,6 +48,17 @@ still not shipped as a bearer feature: the writing phone saw the key, and a
 seal check a receiver can trust still needs the secure-element card type
 below, built and checked on real hardware.
 
+#### The one exception: a Ghost Sealed card
+
+A Ghost Sealed card is the one exception to this rule. It is an NTAG 424 DNA
+card too, but its keys and its Phantom Key live only in the Seal, an attested
+enclave: no phone, app or person ever sees them, the Seal writes the key and
+marks the card sealed only once the payment is confirmed, and every answer is
+signed over the receiver's own fresh challenge. So a Ghost Sealed card can be
+accepted after a fresh Check. Offline or trust-free certainty still needs the
+Java Card: a Ghost Sealed card trusts the Seal. Its design is in
+`docs/sealed-card.md`.
+
 ## Card type
 
 **Chosen:** a programmable secure-element card, a Java Card running one locked
