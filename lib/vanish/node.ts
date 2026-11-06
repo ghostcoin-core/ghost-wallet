@@ -350,6 +350,12 @@ export function estimateCall(signed: string, from: string | null): Record<string
   throw new Error('the signed transaction is of a type this app does not send');
 }
 
+/** Whether `signed` is a private transaction (a Summon or Claim's reveal). */
+function isReveal(signed: string): boolean {
+  const bytes = signedBytes(signed);
+  return bytes[0] === PRIVATE_TX_TYPE && bytes.length > 1;
+}
+
 /**
  * Why a payment was not sent: the node's check before sending refused it
  * (`refused`, its message the node's own reason), or the node could not be
@@ -396,10 +402,12 @@ export type VanishNode = {
   nonce(address: string): Promise<bigint>;
   maxPriorityFeePerGas(): Promise<bigint>;
   /**
-   * Asks the node to run the signed transaction (`eth_estimateGas`) before it
-   * is sent, `from` its sender (null for a Summon or Claim). Resolves when the
-   * node would run it; throws a `SendCheckError` when it refuses (with its
-   * reason) or cannot be asked. Every send goes through this first.
+   * Asks the node to run the signed account transaction (`eth_estimateGas`)
+   * before it is sent, `from` its sender. Resolves when the node would run it;
+   * throws a `SendCheckError` when it refuses (with its reason) or cannot be
+   * asked. Every send goes through this first. A private transaction (a
+   * Summon or Claim, `from` null) resolves at once with no call: the node's
+   * `eth_estimateGas` cannot run a reveal, so it checks one when it is sent.
    */
   checkSend(bytes: string, from: string | null): Promise<void>;
   /** Sends a signed transaction, with the send time limit (`SEND_TIMEOUT_MS`), not a read's. */
@@ -537,12 +545,17 @@ export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
     async checkSend(bytes, from) {
       let call: Record<string, string>;
       try {
+        if (isReveal(bytes)) {
+          // The node's `eth_estimateGas` has no reveal support: it reads one as
+          // a contract creation with the proof as its code, and always refuses
+          // it. The node checks a reveal when it is sent (`sendRaw`) instead.
+          return;
+        }
         call = estimateCall(bytes, from);
       } catch (error) {
         throw fromNode(sendCheckError(`the node could not check it: ${(error as Error).message}`, false), url);
       }
       try {
-        // A reveal is about 1.3 MB: its check gets the send time limit too.
         const [gas] = await rpcBatch(url, [['eth_estimateGas', [call, 'latest']]], fetchImpl, SEND_TIMEOUT_MS);
         quantity(gas, 'gas estimate');
       } catch (error) {
