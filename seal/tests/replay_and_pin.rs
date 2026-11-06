@@ -119,10 +119,8 @@ fn a_wrong_pin_hits_the_retry_limit() {
         );
         assert!(!sealed.journal.has_open(&UID));
     }
-    // The limit is reached: even the right PIN is refused, the key stays sealed.
+    // The limit is reached: even the right PIN is refused, the key stays on the card.
     assert_eq!(s.open(&mut sealed.card, &open_with(Some("4831"), phone.public_key())).err(), Some(SealError::PinLocked));
-    let checked = s.check(&mut sealed.card, &CheckRequest { uid: UID, challenge: [0xc1; 32] }).unwrap();
-    assert_eq!(checked.body.state, CardState::Sealed);
     assert!(!sealed.journal.has_open(&UID));
     // A restarted Seal remembers nothing; the card itself counts the tries.
     let mut restarted = seal(&sealed.journal, &sealed.clock, 2);
@@ -130,6 +128,84 @@ fn a_wrong_pin_hits_the_retry_limit() {
         restarted.open(&mut sealed.card, &open_with(Some("4831"), phone.public_key())).err(),
         Some(SealError::PinLocked)
     );
+}
+
+#[test]
+fn a_pin_locked_card_never_gets_a_fresh_sealed_answer() {
+    let mut sealed = sealed_card(Some("4831"));
+    let phone = phone(0x75);
+    let mut s = seal(&sealed.journal, &sealed.clock, 1);
+    let verifier = AnswerVerifier::new(&s.answer_verifying_key(), MEASUREMENT).unwrap();
+
+    // Before the lock a receiver's Check says Sealed.
+    let before = s.check(&mut sealed.card, &CheckRequest { uid: UID, challenge: [0xd0; 32] }).unwrap();
+    assert_eq!(before.body.state, CardState::Sealed);
+
+    // A sender burns every try on purpose.
+    for _ in 0..PIN_TRIES {
+        assert!(matches!(
+            s.open(&mut sealed.card, &open_with(Some("0000"), phone.public_key())),
+            Err(SealError::WrongPin { .. })
+        ));
+    }
+
+    // No fresh Check can certify it now, from this Seal or a restarted one,
+    // whatever the challenge; nor does confirming the Fill again.
+    for (label, challenge) in [(3u64, [0xd1u8; 32]), (4, [0xd2; 32]), (5, [0xd3; 32])] {
+        let mut fresh = seal(&sealed.journal, &sealed.clock, label);
+        assert_eq!(fresh.check(&mut sealed.card, &CheckRequest { uid: UID, challenge }).err(), Some(SealError::PinLocked));
+    }
+    assert_eq!(s.check(&mut sealed.card, &CheckRequest { uid: UID, challenge: [0xd4; 32] }).err(), Some(SealError::PinLocked));
+    let chain = support::StubChain::default();
+    chain.pay(&sealed.commit_data, sealed.amount_wei);
+    assert_eq!(
+        s.confirm_fill(&mut sealed.card, &CheckRequest { uid: UID, challenge: [0xd5; 32] }, &chain).err(),
+        Some(SealError::PinLocked)
+    );
+
+    // The only Sealed answer that exists is the old one, and it fails a new challenge.
+    assert_eq!(
+        verifier.verify(&before.bytes, &before.signature, &[0xd1; 32], &UID, sealed.clock.0.get()),
+        Err(AnswerRejected::WrongChallenge)
+    );
+}
+
+#[test]
+fn a_pending_open_still_answers_opening_when_the_last_try_was_right() {
+    let sealed = sealed_card(Some("4831"));
+    let phone = phone(0x76);
+    let mut card = sealed.card.clone();
+    let mut s = seal(&sealed.journal, &sealed.clock, 1);
+    // Four wrong tries: one is left.
+    for _ in 1..PIN_TRIES {
+        assert!(matches!(s.open(&mut card, &open_with(Some("0000"), phone.public_key())), Err(SealError::WrongPin { .. })));
+    }
+
+    // The last try is right, and the connection drops right after the Open is
+    // journaled: the card still says Sealed with no tries left.
+    let mut step = 0;
+    let (mut card, journal) = loop {
+        let mut attempt = card.clone();
+        let journal = ghost_seal::MemoryJournal::new();
+        attempt.drop_from(step, DropStyle::BeforeCard);
+        let result = seal(&journal, &sealed.clock, 2).open(&mut attempt, &open_with(Some("4831"), phone.public_key()));
+        attempt.reconnect();
+        assert_eq!(result.err(), Some(SealError::Dropped), "step {step}");
+        if journal.has_open(&UID) {
+            break (attempt, journal);
+        }
+        step += 1;
+        assert!(step < 40);
+    };
+
+    // The pending Open comes first: Opening, not a refusal and never Sealed.
+    let checked = seal(&journal, &sealed.clock, 3).check(&mut card, &CheckRequest { uid: UID, challenge: [0xe1; 32] }).unwrap();
+    assert_eq!(checked.body.state, CardState::Opening);
+
+    // And the Open finishes, releasing the key.
+    let opened = seal(&journal, &sealed.clock, 4).open(&mut card, &open_with(Some("4831"), phone.public_key())).unwrap();
+    let key = sealed.maker.key_for(&sealed.commit_data);
+    assert_eq!(phone.open(&opened.release, &UID, 1).unwrap().expose_secret(), &key[..]);
 }
 
 #[test]
