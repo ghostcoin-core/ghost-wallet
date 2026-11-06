@@ -24,15 +24,19 @@ function openRoutes(state: AccountState): RouteName[] {
 }
 
 describe('route guards', () => {
-  it('without an account opens only onboarding and the bench', () => {
-    expect(openRoutes(NO_ACCOUNT).sort()).toEqual(['backup', 'bench', 'check', 'import', 'index']);
+  it('without an account opens only onboarding and the developer screens', () => {
+    expect(openRoutes(NO_ACCOUNT).sort()).toEqual(['backup', 'bench', 'check', 'import', 'index', 'seal-speed']);
   });
 
-  it('with a locked account opens only the lock and the bench', () => {
-    expect(openRoutes(LOCKED).sort()).toEqual(['bench', 'lock']);
+  it('with a locked account opens only the lock and the developer screens', () => {
+    expect(openRoutes(LOCKED).sort()).toEqual(['bench', 'lock', 'seal-speed']);
   });
 
-  it('with an unlocked account opens the wallet screens and the bench, and no onboarding screen', () => {
+  it('puts the Seal speed test with the bench, never with the wallet', () => {
+    expect(ROUTE_GROUPS['seal-speed']).toBe('developer');
+  });
+
+  it('with an unlocked account opens the wallet screens and the developer screens, and no onboarding screen', () => {
     expect(openRoutes(UNLOCKED).sort()).toEqual([
       'bench',
       'check-words',
@@ -40,6 +44,7 @@ describe('route guards', () => {
       'payment',
       'receive',
       'recovery-words',
+      'seal-speed',
       'send',
       'settings',
       'summon',

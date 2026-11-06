@@ -21,6 +21,13 @@
 //! encrypted to an attested copy (`key_share`), the document phones get
 //! (`phone_attestation`) and the parent proxy (`proxy`). Its design is in
 //! `docs/seal-enclave.md`.
+//!
+//! The phone carries the Seal's card traffic (`relay`): each APDU and each
+//! answer crosses it as opaque bytes, over the wire format in
+//! `docs/seal-relay.md`. The `test-server` feature (off by default) adds a
+//! development test Seal that serves it over HTTP(S) with a public test M
+//! (`test_server`), for development and the speed test only, never for real
+//! money.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -46,10 +53,13 @@ pub mod primitives;
 pub mod proxy;
 pub mod record;
 pub mod registry;
+pub mod relay;
 pub mod release;
 pub mod secrets;
 pub mod session;
 pub mod setup;
+#[cfg(feature = "test-server")]
+pub mod test_server;
 pub mod traits;
 
 pub use answer::{AnswerBody, AnswerKind, AnswerRejected, AnswerVerifier, SignedAnswer};
@@ -63,6 +73,7 @@ pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest
 pub use journal::{EntryKind, Journal, MemoryJournal};
 pub use record::CardState;
 pub use registry::{CardRegistry, FileRegistry, MemoryRegistry, RegistryEntry};
+pub use relay::{Relay, RelayError, RelayLimits, SessionId, Step};
 pub use setup::{SetupReport, SetupRequest, set_up_card};
 pub use release::PhoneSecret;
 pub use secrets::{MasterKey, PhantomKey, Pin};

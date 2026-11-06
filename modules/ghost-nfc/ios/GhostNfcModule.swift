@@ -3,11 +3,17 @@
 // public or encrypted: card UIDs, APDUs, MAC inputs and outputs, ciphertexts
 // and the sealed Phantom Key. Keys and the Phantom Key stay in CardVault and
 // the native core.
+//
+// The Seal relay (relayCheck, SealRelay.swift) carries a Sealed card's
+// traffic between the card and the Seal natively: JavaScript gets only the
+// result (the card's UID, the challenge, the Seal's signed answer and the
+// time of each round trip), never a command or a card answer.
 import ExpoModulesCore
 
 public final class GhostNfcModule: Module {
   private let reader = TagReader()
   private let vault = CardVault()
+  private lazy var relay = SealRelay(reader: reader)
 
   public func definition() -> ModuleDefinition {
     Name("GhostNfc")
@@ -26,6 +32,10 @@ public final class GhostNfcModule: Module {
 
     Function("endSession") { (alert: String?, error: String?) in
       self.reader.end(alert: alert, error: error)
+    }
+
+    AsyncFunction("relayCheck") { (sealUrl: String, alert: String, promise: Promise) in
+      self.relay.check(sealUrl: sealUrl, alert: alert, promise: promise)
     }
 
     Function("authPart2") { (uid: String, set: String, keyNo: Int, encryptedRndB: Data) throws -> Data in
