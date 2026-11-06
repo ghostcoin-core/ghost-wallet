@@ -17,7 +17,7 @@
 // state and amount read here are only for the speed screen's timings.
 import { requireOptionalNativeModule } from 'expo';
 
-import { CardCancelled } from './index';
+import { CardCancelled, type GhostNfcSealPinNative } from './index';
 
 /** One round trip of a relayed flow: to the card over NFC, or to the Seal over the network. */
 export type RelayRound = { kind: 'card' | 'seal'; ms: number };
@@ -301,6 +301,79 @@ export function openKeyKeeper(nfc: GhostNfcSealNative | null = relayNative()): P
     return null;
   }
   return nfc;
+}
+
+/** The Seal's attestation as the native fetch hands it over: public bytes only. */
+export type FetchedSealAttestation = {
+  /** The `GPA2` phone attestation, checked only by the native core. */
+  attestation: Uint8Array;
+  /** SHA-256 of the DER of the leaf certificate the connection presented (32 bytes). */
+  certSha256: Uint8Array;
+};
+
+/** The longest attestation the native fetch takes. */
+const MAX_ATTESTATION_BYTES = 32 * 1024;
+
+function pinNative(): GhostNfcSealPinNative | null {
+  return requireOptionalNativeModule<GhostNfcSealPinNative>('GhostNfc');
+}
+
+/**
+ * Fetches the Seal's attestation for `challenge` (32 bytes) natively, with
+ * the hash of the certificate its connection presented. Throws
+ * `SealRelayError` when there is no fetch in this build, the address is not
+ * https://, or anything fails; nothing it returns is trusted until the core
+ * checks it.
+ */
+export async function fetchSealAttestation(
+  sealUrl: string,
+  challenge: Uint8Array,
+  nfc: GhostNfcSealPinNative | null = pinNative(),
+): Promise<FetchedSealAttestation> {
+  const address = sealAddress(sealUrl);
+  if (address === null || !/^https:/i.test(address)) {
+    throw new SealRelayError('bad-address');
+  }
+  if (!nfc || typeof nfc.fetchSealAttestation !== 'function') {
+    throw new SealRelayError('seal-unreachable');
+  }
+  if (challenge.length !== 32) {
+    throw new SealRelayError('failed');
+  }
+  const native: GhostNfcSealPinNative = nfc;
+  const result = await relayed(() => native.fetchSealAttestation(address, hexOf(challenge).toLowerCase()));
+  const attestation = bytesOf(result?.attestation);
+  const certSha256 = bytesOf(result?.certSha256, 32);
+  if (!attestation || attestation.length === 0 || attestation.length > MAX_ATTESTATION_BYTES || !certSha256) {
+    throw new SealRelayError('bad-answer');
+  }
+  return { attestation, certSha256 };
+}
+
+/**
+ * Pins the relay to the Seal at `sealUrl`: it connects only when the leaf
+ * certificate's SHA-256 is `certSha256`. `null` drops the pin. Set only
+ * after the native core verified the attestation that binds it. False when
+ * the pin could not be set (no module, a bad address or hash).
+ */
+export function setSealPin(
+  sealUrl: string,
+  certSha256: Uint8Array | null,
+  nfc: GhostNfcSealPinNative | null = pinNative(),
+): boolean {
+  if (!nfc || typeof nfc.setSealPin !== 'function') {
+    return false;
+  }
+  const address = sealAddress(sealUrl);
+  if (address === null || (certSha256 !== null && certSha256.length !== 32)) {
+    return false;
+  }
+  try {
+    nfc.setSealPin(address, certSha256 === null ? '' : hexOf(certSha256).toLowerCase());
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Checks the native result of a Check and keeps only what JavaScript may see. */

@@ -40,9 +40,20 @@ ml-dsa = { version = "=0.1.1", default-features = false, features = ["zeroize"] 
 ml-kem = { version = "=0.3.3", default-features = false }
 sha3 = { version = "=0.12.0", default-features = false }
 zeroize = "=1.9.1"
+# The Seal's Nitro attestation (src/seal_attestation.rs): AWS's ECDSA P-384
+# signatures over the certificate chain and the document, verify only, and the
+# SHA-256 of the pinned AWS root and of the Seal's TLS certificate. Same exact
+# versions as `seal/Cargo.toml`. p384's `VerifyingKey` exists only with its
+# `ecdsa` feature (which also builds signing), so that is the narrowest set
+# that verifies; nothing in src/ signs or holds a private key.
+p384 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
+sha2 = { version = "=0.11.1", default-features = false }
 
 [dev-dependencies]
 rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
+# The tests' attestation authority (tests/support/nitro_authority.rs) signs
+# test documents with fixed test keys. Test code only.
+p384 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
 
 # Proving is far too slow unoptimised; the tests build it optimised.
 [profile.test]
