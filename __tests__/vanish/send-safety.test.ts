@@ -326,7 +326,6 @@ describe('the check before sending, in the node layer', () => {
       maxFeePerGas: '0x14',
       maxPriorityFeePerGas: '0x2',
       input: COMMIT_DATA,
-      data: COMMIT_DATA,
     });
   });
 
@@ -369,7 +368,7 @@ describe('the check before sending, in the node layer', () => {
   it('checks a Summon or Claim (no sender) by its type and payload', async () => {
     const node = rpcNode(chainAnswers(() => null));
     await vanishNode(NODE_URL, node.fetchImpl).checkSend('0x50000102', null);
-    expect(node.calls[0].params[0]).toEqual({ type: '0x50', input: '0x000102', data: '0x000102' });
+    expect(node.calls[0].params[0]).toEqual({ type: '0x50', input: '0x000102' });
   });
 
   it('asks nothing, and passes nothing, for bytes it cannot read or an account transaction with no sender', async () => {
@@ -388,7 +387,7 @@ describe('a Vanish whose commit data the node rejects', () => {
   }
 
   it('is refused with the node’s reason, never sent and never marked Sent', async () => {
-    const node = rpcNode(chainAnswers((call) => (call.data === COMMIT_DATA ? COMMIT_REFUSAL : null)));
+    const node = rpcNode(chainAnswers((call) => (call.input === COMMIT_DATA ? COMMIT_REFUSAL : null)));
     const sequence = fakeSequence('vanish-1', vanishIntent(), 'BackedUp', inFlight);
     const rebuild = jest.fn(async () => ({ signed: arrayBuffer(VANISH_SIGNED) }));
 
