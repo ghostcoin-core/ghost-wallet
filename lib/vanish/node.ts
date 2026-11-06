@@ -319,7 +319,8 @@ export function readAccountTx(signed: string): AccountTxFields {
 /**
  * The `eth_estimateGas` call of a signed transaction: an account transaction
  * as the call it makes from `from` (its gas and fee caps included, so the
- * node checks the account can pay them), a private one as its type and payload.
+ * node checks the account can pay them), a private one as its type and the
+ * bytes after it. Either way the call's bytes go once, under `input` only.
  */
 export function estimateCall(signed: string, from: string | null): Record<string, string> {
   const bytes = signedBytes(signed);
@@ -335,7 +336,6 @@ export function estimateCall(signed: string, from: string | null): Record<string
       maxPriorityFeePerGas: hexQuantity(tx.maxPriorityFeePerGas),
       value: hexQuantity(tx.value),
       input: tx.data,
-      data: tx.data,
     };
     if (tx.to !== null) {
       call.to = tx.to;
@@ -343,8 +343,9 @@ export function estimateCall(signed: string, from: string | null): Record<string
     return call;
   }
   if (bytes[0] === PRIVATE_TX_TYPE && bytes.length > 1) {
-    const payload = bytesHex(bytes.subarray(1));
-    return { type: hexQuantity(PRIVATE_TX_TYPE), input: payload, data: payload };
+    // Once, under `input` (which the node reads first): a reveal is about
+    // 2.6 MB as hex, and twice over that passes the node's 5 MiB body limit.
+    return { type: hexQuantity(PRIVATE_TX_TYPE), input: bytesHex(bytes.subarray(1)) };
   }
   throw new Error('the signed transaction is of a type this app does not send');
 }
