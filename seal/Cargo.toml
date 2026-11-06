@@ -39,11 +39,20 @@ p384 = { version = "=0.14.0", default-features = false, features = ["ecdsa"], op
 sha2 = { version = "=0.11.1", default-features = false, optional = true }
 vsock = { version = "=0.5.5", optional = true }
 
+# Only with the `test-server` feature (the development test Seal server, its
+# binary and its tests): an HTTP server with rustls for HTTPS, and JSON for
+# the relay's requests and answers. The default build has neither.
+serde_json = { version = "=1.0.154", optional = true }
+tiny_http = { version = "=0.12.0", default-features = false, features = ["ssl-rustls"], optional = true }
+
 [features]
 default = []
 # The Nitro Enclaves build: the published measurements, attestation, the M
 # handover between enclaves, the phones' attestation and the parent proxy.
 nitro = ["dep:libc", "dep:p384", "dep:sha2", "dep:vsock"]
+# The development test Seal server: the relay protocol over HTTP(S), the test
+# M only. Never for real money.
+test-server = ["dep:serde_json", "dep:tiny_http"]
 
 [[bin]]
 name = "seal_enclave"
@@ -54,6 +63,16 @@ required-features = ["nitro"]
 name = "seal_proxy"
 path = "src/bin/seal_proxy.rs"
 required-features = ["nitro"]
+
+[[bin]]
+name = "test_seal_server"
+path = "src/bin/test_seal_server.rs"
+required-features = ["test-server"]
+
+[[test]]
+name = "relay_server"
+path = "tests/relay_server.rs"
+required-features = ["test-server"]
 
 [[test]]
 name = "measurements"

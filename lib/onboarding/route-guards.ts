@@ -33,6 +33,10 @@ export const ROUTE_GROUPS = {
   // reachable without an account or unlock. Seven taps on the version in
   // Settings open it.
   bench: 'developer',
+  // The Seal speed test: a bare test screen like the bench. It times a Check
+  // through the Seal relay against a development test Seal and holds no
+  // account secret.
+  'seal-speed': 'developer',
 } as const satisfies Record<string, RouteGroup>;
 
 export type RouteName = keyof typeof ROUTE_GROUPS;
