@@ -5,10 +5,10 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ghost_seal::answer::{AnswerKind, AnswerVerifier};
 use ghost_seal::card_keys::{card_keys, key_version};
@@ -16,8 +16,8 @@ use ghost_seal::flows::record_file_settings;
 use ghost_seal::primitives::sha3_256;
 use ghost_seal::relay::{RelayLimits, to_hex};
 use ghost_seal::test_server::{
-    DEV_MEASUREMENT, DEV_TEST_MASTER_LABEL, Options, StartError, TestSealServer, WARNING, dev_test_master,
-    dev_test_master_bytes, dev_test_seal,
+    DEFAULT_BODY_DEADLINE, DEV_MEASUREMENT, DEV_TEST_MASTER_LABEL, Options, StartError, TestSealServer, WARNING,
+    dev_test_master, dev_test_master_bytes, dev_test_seal,
 };
 use ghost_seal::{
     CardState, CardTransport, CardUid, CheckRequest, FillRequest, MemoryJournal, Seal, SealConfig,
@@ -409,6 +409,118 @@ fn plain_http_off_loopback_is_refused() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing plain HTTP"));
+}
+
+/// Opens a connection and sends a request head promising a 4096-byte body,
+/// then only `partial` of it.
+fn unfinished(addr: SocketAddr, partial: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    write!(
+        stream,
+        "POST /v1/check/start HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n{partial}"
+    )
+    .unwrap();
+    stream.flush().unwrap();
+    stream
+}
+
+/// Waits for the server to close `stream`; how long that took, or `None` if
+/// it was still open after `limit`.
+fn closed_within(stream: &mut TcpStream, limit: Duration) -> Option<Duration> {
+    let started = Instant::now();
+    stream.set_read_timeout(Some(limit)).unwrap();
+    let mut raw = Vec::new();
+    match stream.read_to_end(&mut raw) {
+        Ok(_) => Some(started.elapsed()),
+        Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => None,
+        // Reset: closed too.
+        Err(_) => Some(started.elapsed()),
+    }
+}
+
+fn wait_for_no_connections(server: &TestSealServer) {
+    let started = Instant::now();
+    while server.connection_count() > 0 && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(server.connection_count(), 0, "connections left open");
+}
+
+#[test]
+fn unfinished_bodies_never_hold_up_a_check_and_are_closed_at_their_deadline() {
+    let server = server(&["--body-ms", "3000"]);
+    let mut card = sealed_dev_card();
+    // More unfinished bodies than the server ever had handlers, every one
+    // with its head in and its body withheld.
+    let mut stalled: Vec<TcpStream> =
+        (0..16).map(|at| unfinished(server.addr(), if at % 2 == 0 { "" } else { "{\"uid\":" })).collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let opened = Instant::now();
+
+    // A legitimate Check meanwhile goes straight through, well before any of
+    // their deadlines.
+    let challenge = [0x33u8; 32];
+    let Relayed::Done { answer, signature, .. } = relay_check(server.addr(), &mut card, UID, challenge) else {
+        panic!("the Check did not finish");
+    };
+    assert!(opened.elapsed() < Duration::from_millis(2500), "the Check waited: {:?}", opened.elapsed());
+    assert_eq!(verifier().verify(&answer, &signature, &challenge, &UID, now()).unwrap().state, CardState::Sealed);
+
+    // Each unfinished body has its connection closed at its deadline.
+    for stream in &mut stalled {
+        assert!(closed_within(stream, Duration::from_secs(10)).is_some(), "an unfinished body was left open");
+    }
+    assert!(opened.elapsed() < Duration::from_secs(8), "closed late: {:?}", opened.elapsed());
+    wait_for_no_connections(&server);
+
+    // And the server still serves.
+    let challenge = [0x34u8; 32];
+    assert!(matches!(relay_check(server.addr(), &mut card, UID, challenge), Relayed::Done { .. }));
+}
+
+#[test]
+fn a_trickled_body_is_cut_off_at_its_deadline_however_steadily_it_comes() {
+    let server = server(&["--body-ms", "800"]);
+    let mut stream = unfinished(server.addr(), "");
+    let mut writer = stream.try_clone().unwrap();
+    // One byte every 100 ms: never idle, never finished.
+    let trickle = std::thread::spawn(move || {
+        for _ in 0..60 {
+            if writer.write_all(b" ").is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let took = closed_within(&mut stream, Duration::from_secs(5)).expect("the trickled body was left open");
+    assert!(took < Duration::from_millis(2500), "closed late: {took:?}");
+    drop(stream);
+    trickle.join().unwrap();
+    wait_for_no_connections(&server);
+}
+
+#[test]
+fn a_connection_that_never_sends_a_whole_request_is_not_served() {
+    let server = server(&["--body-ms", "500"]);
+    let mut stream = unfinished(server.addr(), "{\"uid\":\"04518dfaa96180\"");
+    // Closed with no answer for it, and no session started.
+    let started = Instant::now();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(!String::from_utf8_lossy(&raw).contains("\"apdu\""));
+    assert_eq!(server.session_count(), 0);
+}
+
+#[test]
+fn the_body_deadline_is_bounded() {
+    for extra in [["--body-ms", "0"], ["--body-ms", "30001"]] {
+        assert!(matches!(Options::from_args(&args(&extra), Some("1")), Err(StartError::Usage(_))), "{extra:?}");
+    }
+    let options = Options::from_args(&args(&["--body-ms", "1200"]), Some("1")).unwrap();
+    assert_eq!(options.body_deadline(), Duration::from_millis(1200));
+    assert_eq!(Options::from_args(&args(&[]), Some("1")).unwrap().body_deadline(), DEFAULT_BODY_DEADLINE);
 }
 
 #[test]

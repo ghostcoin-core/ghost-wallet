@@ -6,6 +6,7 @@
 //! ```text
 //! GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-test-seal [--listen ADDR:PORT]
 //!     [--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N] [--total-ms N] [--max-sessions N]
+//!     [--body-ms N]
 //! ```
 
 use ghost_seal::test_server::{DEV_ENV, Options, TestSealServer, USAGE, WARNING};

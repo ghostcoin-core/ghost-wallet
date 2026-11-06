@@ -163,6 +163,20 @@ GHOST_DEV_TEST_SEAL=1 seal/target/release/test_seal_server --dev-test-seal --lis
 `--idle-ms`, `--total-ms` and `--max-sessions` change the session limits; the
 total must stay at most 45 seconds and the idle timeout within it.
 
+Every request must arrive whole and in time, or its connection is closed:
+
+| | default | |
+| --- | --- | --- |
+| body deadline | 5 s | from the request's head to the end of its body, however steadily the body trickles in; `--body-ms`, at most 30 s |
+| next head | 30 s | from the connection opening, or from its last answer, to the next request's head |
+| connections | 128 | at once, 32 from one address; more are closed at once |
+
+The server listens itself and carries each connection's bytes (still TLS for
+HTTPS) to its HTTP library on a loopback port of its own, so it can close a
+connection whose body is late; that ends the library's read of the body at
+once. Each request is served on its own thread, so an unfinished body never
+holds up anyone else's Check.
+
 ## The speed screen
 
 `app/seal-speed.tsx` (route `/seal-speed`, a bare test screen like the bench)
