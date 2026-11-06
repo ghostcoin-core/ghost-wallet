@@ -1,7 +1,14 @@
 //! The published measurements list: the fixture the app's parser reads
 //! too, the rules for accepting a build, and every malformed list refused.
 
-use ghost_seal::measurements::{BuildStatus, ListError, MeasurementList, MeasurementRefused, Pcrs, parse_pcr, pcr_hex};
+#[path = "fixtures/test_release_key.rs"]
+mod release;
+
+use ghost_seal::measurements::{
+    BuildStatus, COMPILED_BUILDS, ListError, MeasurementList, MeasurementRefused, Pcrs, RELEASE_KEY_HEX,
+    RELEASE_SIGNATURE_BYTES, ReleaseKey, TrustedList, parse_pcr, pcr_hex,
+};
+use release::{TestOnlyReleaseKey, with_signature};
 
 const FIXTURE: &str = include_str!("fixtures/measurements.json");
 const PUBLISHED: &str = include_str!("../../enclave/measurements.json");
@@ -183,4 +190,145 @@ fn the_digest_is_of_the_list_not_its_spacing() {
     let revoked = MeasurementList::parse(&good.replace(r#""allowed""#, r#""revoked""#)).unwrap();
     assert_ne!(a.digest(), revoked.digest());
     assert_ne!(a.digest(), MeasurementList::empty().digest());
+}
+
+// The release signature, and the only list an enclave enforces.
+
+fn trusted_with_fixture() -> TrustedList {
+    let release = TestOnlyReleaseKey::new();
+    let mut trusted = TrustedList::compiled_in();
+    trusted.install_signed(&release.sign(FIXTURE), &release.release_key()).expect("the signed fixture is taken");
+    trusted
+}
+
+/// The fixture with one more allowed build, as a host would add its own.
+fn fixture_with_extra_build() -> String {
+    let extra = entry("host-build", "2026-11-02", &hex(0xd1), &hex(0xb1), &hex(0xd2), "allowed");
+    FIXTURE.replacen("\"builds\": [", &format!("\"builds\": [{extra},"), 1)
+}
+
+#[test]
+fn a_list_signed_by_the_release_key_is_taken_whatever_its_spacing() {
+    let release = TestOnlyReleaseKey::new();
+    let signed = release.sign(FIXTURE);
+    let list = MeasurementList::parse_signed(&signed, &release.release_key()).unwrap();
+    assert_eq!(list, MeasurementList::parse(FIXTURE).unwrap());
+    // The signature covers the builds, not the JSON spacing.
+    let respaced = signed.replace(", ", ",\n   ");
+    assert_eq!(MeasurementList::parse_signed(&respaced, &release.release_key()).unwrap(), list);
+    // The app's reader takes a signed file too.
+    assert_eq!(MeasurementList::parse(&signed).unwrap(), list);
+    assert_eq!(release.signature_hex(FIXTURE).len(), 2 * RELEASE_SIGNATURE_BYTES);
+}
+
+#[test]
+fn a_list_with_a_missing_signature_is_refused() {
+    let release = TestOnlyReleaseKey::new();
+    let key = release.release_key();
+    assert_eq!(MeasurementList::parse_signed(FIXTURE, &key), Err(ListError::Signature("the list is not signed")));
+    // The published file has no signature until the release key signs it.
+    assert!(matches!(MeasurementList::parse_signed(PUBLISHED, &key), Err(ListError::Signature(_))));
+    let mut trusted = TrustedList::compiled_in();
+    assert!(matches!(trusted.install_signed(FIXTURE, &key), Err(ListError::Signature(_))));
+    assert!(!trusted.has_signed_list());
+    assert_eq!(trusted.check(&pcrs(0xa1, 0xb1, 0xc1)), Err(MeasurementRefused::NotListed));
+}
+
+#[test]
+fn a_list_with_a_bad_signature_is_refused() {
+    let release = TestOnlyReleaseKey::new();
+    let key = release.release_key();
+    let good = release.signature_hex(FIXTURE);
+    let bad = |text: &str| matches!(MeasurementList::parse_signed(text, &key), Err(ListError::Signature(_)));
+
+    // A signature with one digit changed.
+    let flipped = format!("{}{}", if good.starts_with('0') { '1' } else { '0' }, &good[1..]);
+    assert!(bad(&with_signature(FIXTURE, &flipped)));
+    // A signature by another key.
+    assert!(bad(&TestOnlyReleaseKey::other().sign(FIXTURE)));
+    // The release key's signature over another list: a build added, or a
+    // revoked build made allowed after signing.
+    assert!(bad(&with_signature(&fixture_with_extra_build(), &good)));
+    let unrevoked = FIXTURE.replacen("\"revoked\"", "\"allowed\"", 1);
+    assert!(bad(&with_signature(&unrevoked, &good)));
+    // A signature that is not one: refused by any reader.
+    for not_a_signature in [&good[2..], &good.to_uppercase(), "", "00"] {
+        let text = with_signature(FIXTURE, not_a_signature);
+        assert!(MeasurementList::parse_signed(&text, &key).is_err());
+        assert!(MeasurementList::parse(&text).is_err());
+    }
+    assert!(MeasurementList::parse(&FIXTURE.replacen('{', "{\"signature\": 1, ", 1)).is_err());
+}
+
+#[test]
+fn a_host_supplied_list_naming_an_extra_measurement_is_refused() {
+    let release = TestOnlyReleaseKey::new();
+    let host_list = fixture_with_extra_build();
+    let host_build = pcrs(0xd1, 0xb1, 0xd2);
+    for offered in [host_list.clone(), TestOnlyReleaseKey::other().sign(&host_list)] {
+        // Neither an enclave with no list yet ...
+        let mut fresh = TrustedList::compiled_in();
+        assert!(matches!(fresh.install_signed(&offered, &release.release_key()), Err(ListError::Signature(_))));
+        assert_eq!(fresh.check(&host_build), Err(MeasurementRefused::NotListed));
+        // ... nor one holding the signed list takes it, and the held list stays.
+        let mut trusted = trusted_with_fixture();
+        assert!(matches!(trusted.install_signed(&offered, &release.release_key()), Err(ListError::Signature(_))));
+        assert_eq!(trusted.check(&host_build), Err(MeasurementRefused::NotListed));
+        assert_eq!(trusted.check(&pcrs(0xa1, 0xb1, 0xc1)).unwrap().name, "seal-2026-10-01");
+    }
+    // Signed by the release key, the same extra build is taken.
+    let mut trusted = trusted_with_fixture();
+    trusted.install_signed(&release.sign(&host_list), &release.release_key()).unwrap();
+    assert_eq!(trusted.check(&host_build).unwrap().name, "host-build");
+}
+
+#[test]
+fn a_signed_list_that_does_not_extend_the_held_one_is_refused() {
+    let release = TestOnlyReleaseKey::new();
+    let key = release.release_key();
+    let older = [
+        // A held build's PCRs changed.
+        FIXTURE.replacen(&format!("\"pcr0\": \"{}\"", hex(0xa0)), &format!("\"pcr0\": \"{}\"", hex(0xa9)), 1),
+        // A revoked build made allowed again.
+        FIXTURE.replacen("\"revoked\"", "\"allowed\"", 1),
+        // Every build dropped.
+        r#"{"version": 1, "builds": []}"#.to_string(),
+    ];
+    for text in older {
+        let mut trusted = trusted_with_fixture();
+        assert!(matches!(trusted.install_signed(&release.sign(&text), &key), Err(ListError::Rollback(_))), "{text}");
+        assert_eq!(
+            trusted.check(&pcrs(0xa0, 0xb0, 0xc0)),
+            Err(MeasurementRefused::Revoked { name: "seal-2026-09-01".into() })
+        );
+    }
+    // A later list that adds a build and revokes another is taken.
+    let later = fixture_with_extra_build().replacen("\"allowed\"", "\"revoked\"", 2);
+    let mut trusted = trusted_with_fixture();
+    trusted.install_signed(&release.sign(&later), &key).unwrap();
+    assert!(matches!(trusted.check(&pcrs(0xa1, 0xb1, 0xc1)), Err(MeasurementRefused::Revoked { .. })));
+}
+
+#[test]
+fn the_trusted_list_checks_like_the_published_one() {
+    let trusted = trusted_with_fixture();
+    assert_eq!(trusted.check(&pcrs(0xa1, 0xb1, 0xc1)).unwrap().name, "seal-2026-10-01");
+    assert_eq!(trusted.check(&pcrs(0xa2, 0xb1, 0xc2)).unwrap().name, "seal-2026-11-01");
+    assert_eq!(trusted.check(&pcrs(0xa1, 0xb1, 0xc2)), Err(MeasurementRefused::NotListed));
+    assert_eq!(trusted.check(&pcrs(0xa0, 0xb0, 0xc0)), Err(MeasurementRefused::Revoked { name: "seal-2026-09-01".into() }));
+    assert_eq!(trusted.check(&pcrs(0, 0, 0)), Err(MeasurementRefused::DebugMode));
+}
+
+#[test]
+fn the_image_trusts_only_what_it_compiles_in_until_a_release_key_is_made() {
+    // The compiled-in builds parse, and today hold no build.
+    assert!(MeasurementList::parse(COMPILED_BUILDS).unwrap().is_empty());
+    assert_eq!(TrustedList::compiled_in().check(&pcrs(0xa1, 0xb1, 0xc1)), Err(MeasurementRefused::NotListed));
+    // With no release key compiled in, no signed list is taken at all.
+    if RELEASE_KEY_HEX.is_empty() {
+        assert!(matches!(ReleaseKey::compiled_in(), Err(ListError::Signature(_))));
+    } else {
+        assert_eq!(RELEASE_KEY_HEX.len(), 2 * 1952);
+        assert!(ReleaseKey::compiled_in().is_ok());
+    }
 }

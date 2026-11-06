@@ -18,13 +18,62 @@
 //! (a debug-mode enclave reports zeros), `released` is a real date, names are
 //! unique, and no two builds share PCR0. Anything else refuses the whole
 //! list. An empty list is valid and refuses every Seal.
+//!
+//! The published file may also carry `"signature"`: the release key's
+//! ML-DSA-65 signature (context [`RELEASE_CONTEXT`]) over
+//! [`MeasurementList::signing_message`], as lowercase hex. The signature
+//! covers the builds, not the JSON spacing.
+//!
+//! # Which list an enclave enforces
+//!
+//! An enclave never takes a list on the host's word. The only list it checks
+//! another enclave against is a [`TrustedList`], made of:
+//!
+//! - the builds compiled into its own image ([`COMPILED_BUILDS`]);
+//! - a list signed by the release key whose public key is compiled into its
+//!   own image ([`RELEASE_KEY_HEX`]); the private key is held offline and is
+//!   never in the repository, an image or a fixture;
+//! - its own build, read from its own attestation document: an identical
+//!   image is the same code that already holds M.
+//!
+//! A build that any of these marks `revoked` is refused, whatever another
+//! says. An unsigned list, or one whose signature does not verify under the
+//! compiled-in key, is refused, and a signed list never replaces a held one
+//! that it does not extend (it must keep every build already held, with the
+//! same PCRs, and keep every revoked build revoked).
 
 use core::fmt;
 
+use ml_dsa::{EncodedVerifyingKey, MlDsa65, Signature, VerifyingKey};
+
 use crate::answer::MEASUREMENT_BYTES;
+use crate::attestation::{AttestationError, AttestationRejected, AttestationSource, AttestationVerifier};
 
 /// The format version this reader accepts.
 pub const MEASUREMENTS_VERSION: u64 = 1;
+/// The ML-DSA context string of the release key's signature over a list.
+pub const RELEASE_CONTEXT: &[u8] = b"ghost-seal measurements";
+/// The label in front of a list's digest in the signed message.
+pub const RELEASE_LABEL: &[u8] = b"ghost-seal/v1/measurements/release";
+/// An ML-DSA-65 verifying key's length.
+pub const RELEASE_KEY_BYTES: usize = 1952;
+/// An ML-DSA-65 signature's length.
+pub const RELEASE_SIGNATURE_BYTES: usize = 3309;
+
+/// The release key's ML-DSA-65 verifying key, as lowercase hex, compiled into
+/// every enclave image. Empty until the release key is made offline: an
+/// image built with no release key accepts no signed list, and trusts only
+/// [`COMPILED_BUILDS`] and its own build.
+pub const RELEASE_KEY_HEX: &str = "";
+
+/// The builds compiled into this image, in the published format (no
+/// signature needed: the image's own measurement covers them). An image
+/// cannot list itself or later builds, so this holds earlier builds it may
+/// take M from or give M to; later builds come in a signed list.
+pub const COMPILED_BUILDS: &str = r#"{"version": 1, "builds": []}"#;
+
+/// The name [`TrustedList::check`] gives the enclave's own build.
+pub const OWN_BUILD_NAME: &str = "this-image";
 /// The most builds a list may hold.
 pub const MAX_BUILDS: usize = 256;
 /// The longest build name, in bytes.
@@ -73,6 +122,11 @@ pub enum ListError {
     Syntax(&'static str),
     /// JSON, but not this format.
     Format(String),
+    /// No release signature, a signature that does not verify under the
+    /// release key, or no release key to check it with.
+    Signature(&'static str),
+    /// A signed list that does not extend the one already held.
+    Rollback(String),
 }
 
 impl fmt::Display for ListError {
@@ -80,6 +134,8 @@ impl fmt::Display for ListError {
         match self {
             ListError::Syntax(what) => write!(f, "measurements list is not JSON: {what}"),
             ListError::Format(what) => write!(f, "measurements list: {what}"),
+            ListError::Signature(what) => write!(f, "measurements list: signature: {what}"),
+            ListError::Rollback(what) => write!(f, "measurements list: not a later list: {what}"),
         }
     }
 }
@@ -124,11 +180,46 @@ impl MeasurementList {
         MeasurementList { builds: Vec::new() }
     }
 
-    /// Reads a list in the published format.
+    /// Reads a list in the published format. A `signature` field, when
+    /// present, must be well formed but is not checked here: this is the
+    /// reader for lists that are trusted for another reason (the app's
+    /// pinned list). An enclave reads lists only through [`TrustedList`].
     pub fn parse(text: &str) -> Result<MeasurementList, ListError> {
+        Self::parse_with_signature(text).map(|(list, _)| list)
+    }
+
+    /// Reads a list and checks its release signature under `key`: a list
+    /// with no signature, or one that does not verify, is refused.
+    pub fn parse_signed(text: &str, key: &ReleaseKey) -> Result<MeasurementList, ListError> {
+        let (list, signature) = Self::parse_with_signature(text)?;
+        let signature = signature.ok_or(ListError::Signature("the list is not signed"))?;
+        let signature = Signature::<MlDsa65>::try_from(signature.as_slice())
+            .map_err(|_| ListError::Signature("not an ML-DSA-65 signature"))?;
+        if !key.0.verify_with_context(&list.signing_message(), RELEASE_CONTEXT, &signature) {
+            return Err(ListError::Signature("the signature does not verify under the release key"));
+        }
+        Ok(list)
+    }
+
+    /// The message the release key signs: [`RELEASE_LABEL`] || [`Self::digest`].
+    pub fn signing_message(&self) -> Vec<u8> {
+        [RELEASE_LABEL, &self.digest()[..]].concat()
+    }
+
+    fn parse_with_signature(text: &str) -> Result<(MeasurementList, Option<Vec<u8>>), ListError> {
         let value = json::parse(text)?;
         let top = value.object("the list")?;
-        json::only_keys(top, &["version", "builds"], "the list")?;
+        json::only_keys(top, &["version", "builds", "signature"], "the list")?;
+        let signature = match top.iter().find(|(k, _)| k == "signature") {
+            None => None,
+            Some((_, value)) => {
+                let text = value.string("signature")?;
+                let bytes = parse_hex(text)
+                    .filter(|b| b.len() == RELEASE_SIGNATURE_BYTES)
+                    .ok_or_else(|| format_error(format!("signature is not {} lowercase hex digits", 2 * RELEASE_SIGNATURE_BYTES)))?;
+                Some(bytes)
+            }
+        };
         let version = json::field(top, "version", "the list")?.integer("version")?;
         if version != MEASUREMENTS_VERSION {
             return Err(format_error(format!("version {version} is not {MEASUREMENTS_VERSION}")));
@@ -148,7 +239,7 @@ impl MeasurementList {
             }
             builds.push(build);
         }
-        Ok(MeasurementList { builds })
+        Ok((MeasurementList { builds }, signature))
     }
 
     /// The builds, in the order listed.
@@ -201,6 +292,179 @@ impl MeasurementList {
         let refs: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
         crate::primitives::sha3_256(&refs)
     }
+}
+
+/// The release key's ML-DSA-65 verifying key: the only key whose signature
+/// makes a list trusted.
+#[derive(Clone)]
+pub struct ReleaseKey(VerifyingKey<MlDsa65>);
+
+impl ReleaseKey {
+    /// The key compiled into this image ([`RELEASE_KEY_HEX`]); refused while
+    /// none has been made.
+    pub fn compiled_in() -> Result<ReleaseKey, ListError> {
+        if RELEASE_KEY_HEX.is_empty() {
+            return Err(ListError::Signature("this image has no release key, so it accepts no signed list"));
+        }
+        let bytes = parse_hex(RELEASE_KEY_HEX).ok_or(ListError::Signature("the compiled-in release key is not hex"))?;
+        ReleaseKey::from_bytes(&bytes)
+    }
+
+    /// A key from its encoded bytes. The enclave uses [`Self::compiled_in`];
+    /// tests pass their own test-only key here.
+    pub fn from_bytes(bytes: &[u8]) -> Result<ReleaseKey, ListError> {
+        let encoded = EncodedVerifyingKey::<MlDsa65>::try_from(bytes)
+            .map_err(|_| ListError::Signature("not an ML-DSA-65 verifying key"))?;
+        Ok(ReleaseKey(VerifyingKey::decode(&encoded)))
+    }
+}
+
+impl fmt::Debug for ReleaseKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ReleaseKey")
+    }
+}
+
+/// Why an enclave could not learn its own build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnBuildError {
+    /// No document from the NSM.
+    Attestation(AttestationError),
+    /// The enclave's own document does not verify.
+    Rejected(AttestationRejected),
+    /// A debug-mode enclave (zero PCRs) is never trusted.
+    DebugMode,
+}
+
+impl fmt::Display for OwnBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OwnBuildError::Attestation(why) => write!(f, "own build: {why}"),
+            OwnBuildError::Rejected(why) => write!(f, "own build: {why}"),
+            OwnBuildError::DebugMode => f.write_str("own build: a debug-mode enclave"),
+        }
+    }
+}
+
+impl std::error::Error for OwnBuildError {}
+
+/// The `user_data` label of the document an enclave reads its own build from.
+pub const OWN_BUILD_LABEL: &[u8] = b"ghost-seal/v1/own-build";
+
+/// The only list an enclave checks another enclave against: what its own
+/// image compiles in, a list signed by the compiled-in release key, and its
+/// own attested build. Nothing the host says unsigned ever gets in; there is
+/// no way to make one from a plain [`MeasurementList`].
+#[derive(Debug, Clone)]
+pub struct TrustedList {
+    compiled: MeasurementList,
+    signed: Option<MeasurementList>,
+    own: Option<Build>,
+}
+
+impl TrustedList {
+    /// The builds compiled into this image ([`COMPILED_BUILDS`]) and nothing
+    /// else. Should the constant not parse, the list is empty (refuses all).
+    pub fn compiled_in() -> TrustedList {
+        TrustedList {
+            compiled: MeasurementList::parse(COMPILED_BUILDS).unwrap_or_default(),
+            signed: None,
+            own: None,
+        }
+    }
+
+    /// Takes a signed list: it must carry a signature that verifies under
+    /// `key` (in an enclave, [`ReleaseKey::compiled_in`]) and extend the
+    /// signed list already held, if any: every build held stays, with the
+    /// same name and PCRs, and every revoked build stays revoked. Refused,
+    /// the held list is unchanged.
+    pub fn install_signed(&mut self, text: &str, key: &ReleaseKey) -> Result<(), ListError> {
+        let list = MeasurementList::parse_signed(text, key)?;
+        if let Some(held) = &self.signed {
+            for old in held.builds() {
+                let new = list
+                    .builds()
+                    .iter()
+                    .find(|b| b.name == old.name)
+                    .ok_or_else(|| ListError::Rollback(format!("build {} is missing", old.name)))?;
+                if new.pcrs != old.pcrs || new.released != old.released {
+                    return Err(ListError::Rollback(format!("build {} changed", old.name)));
+                }
+                if old.status == BuildStatus::Revoked && new.status != BuildStatus::Revoked {
+                    return Err(ListError::Rollback(format!("build {} is revoked and stays revoked", old.name)));
+                }
+            }
+        }
+        self.signed = Some(list);
+        Ok(())
+    }
+
+    /// Trusts the enclave's own build: asks `source` (the enclave's own NSM)
+    /// for a document, verifies it with `verifier`, and takes its PCRs. A
+    /// copy of the very same image runs the same code that already holds M.
+    pub fn trust_own_build(
+        &mut self,
+        source: &mut dyn AttestationSource,
+        verifier: &dyn AttestationVerifier,
+        now_unix: u64,
+    ) -> Result<Pcrs, OwnBuildError> {
+        let binding = crate::primitives::sha3_256(&[OWN_BUILD_LABEL]);
+        let document = source.attest(&binding, &binding).map_err(OwnBuildError::Attestation)?;
+        let attested = verifier.verify(&document, now_unix).map_err(OwnBuildError::Rejected)?;
+        let pcrs = attested.pcrs;
+        if is_zero(&pcrs.pcr0) || is_zero(&pcrs.pcr1) || is_zero(&pcrs.pcr2) {
+            return Err(OwnBuildError::DebugMode);
+        }
+        self.own =
+            Some(Build { name: OWN_BUILD_NAME.into(), released: String::new(), pcrs, status: BuildStatus::Allowed });
+        Ok(pcrs)
+    }
+
+    /// Whether a signed list is held.
+    pub fn has_signed_list(&self) -> bool {
+        self.signed.is_some()
+    }
+
+    /// Accepts `pcrs` only when all three equal a build compiled in, on the
+    /// signed list or the enclave's own, and none of the lists marks that
+    /// build revoked.
+    pub fn check(&self, pcrs: &Pcrs) -> Result<&Build, MeasurementRefused> {
+        if is_zero(&pcrs.pcr0) || is_zero(&pcrs.pcr1) || is_zero(&pcrs.pcr2) {
+            return Err(MeasurementRefused::DebugMode);
+        }
+        let mut allowed = None;
+        for list in [Some(&self.compiled), self.signed.as_ref()].into_iter().flatten() {
+            if let Some(build) = list.builds().iter().find(|b| &b.pcrs == pcrs) {
+                match build.status {
+                    BuildStatus::Revoked => return Err(MeasurementRefused::Revoked { name: build.name.clone() }),
+                    BuildStatus::Allowed => {
+                        allowed.get_or_insert(build);
+                    }
+                }
+            }
+        }
+        if let Some(build) = allowed {
+            return Ok(build);
+        }
+        match &self.own {
+            Some(own) if &own.pcrs == pcrs => Ok(own),
+            _ => Err(MeasurementRefused::NotListed),
+        }
+    }
+}
+
+/// Reads lowercase hex.
+fn parse_hex(text: &str) -> Option<Vec<u8>> {
+    let bytes = text.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    bytes.chunks(2).map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?)).collect()
 }
 
 fn format_error(what: String) -> ListError {

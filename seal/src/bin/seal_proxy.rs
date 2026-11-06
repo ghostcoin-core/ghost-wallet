@@ -5,6 +5,7 @@
 //! seal_proxy inbound <listen address:port> <enclave CID> <enclave port> [--max-connections N] [--idle-secs N]
 //! seal_proxy outbound <vsock port> <upstream host:port> [--max-connections N] [--idle-secs N]
 //! seal_proxy start <enclave CID> genesis|join <measurements list file>
+//! seal_proxy list <enclave CID> <signed measurements list file>
 //! ```
 //!
 //! `inbound` takes TCP connections from the internet (phones, and other
@@ -13,13 +14,16 @@
 //! from the enclave and relays each to one fixed upstream: a giving region's
 //! inbound proxy for a key share, or a Ghost node for the chain check.
 //! `start` sends the enclave its one start frame on its control port (the
-//! mode and the measurements list it is to enforce) and prints its answer.
+//! mode alone) and then offers it the list file, which the enclave takes only
+//! if the release key compiled into its image signed it. `list` offers a
+//! later signed list. The host cannot make an enclave trust a list: an
+//! unsigned one is refused, and the start of a join carries none.
 
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ghost_seal::key_share::{read_frame, write_frame};
+use ghost_seal::key_share::{CONTROL_GENESIS, CONTROL_JOIN, CONTROL_SIGNED_LIST, read_frame, write_frame};
 use ghost_seal::proxy::{Proxy, ProxyEvent, ProxyLimits, ProxyLog, TcpConnector, VsockConnector};
 use vsock::{VMADDR_CID_ANY, VsockListener, VsockStream};
 
@@ -35,24 +39,41 @@ impl ProxyLog for StderrLog {
     }
 }
 
-const USAGE: &str = "usage:\n  seal_proxy inbound <listen address:port> <enclave CID> <enclave port> [--max-connections N] [--idle-secs N]\n  seal_proxy outbound <vsock port> <upstream host:port> [--max-connections N] [--idle-secs N]\n  seal_proxy start <enclave CID> genesis|join <measurements list file>";
+const USAGE: &str = "usage:\n  seal_proxy inbound <listen address:port> <enclave CID> <enclave port> [--max-connections N] [--idle-secs N]\n  seal_proxy outbound <vsock port> <upstream host:port> [--max-connections N] [--idle-secs N]\n  seal_proxy start <enclave CID> genesis|join <measurements list file>\n  seal_proxy list <enclave CID> <signed measurements list file>";
 
-/// Sends the start frame and prints the enclave's answer.
-fn start(cid: u32, mode: &str, list_file: &str) -> ! {
-    let mode = match mode {
-        "genesis" => 1u8,
-        "join" => 2u8,
-        _ => fail("the mode is genesis or join"),
-    };
-    let list = std::fs::read(list_file).unwrap_or_else(|e| fail(&format!("cannot read {list_file}: {e}")));
+/// Sends one control frame and returns the enclave's answer.
+fn control(cid: u32, frame: &[u8]) -> String {
     let mut stream = VsockStream::connect_with_cid_port(cid, CONTROL_PORT)
         .unwrap_or_else(|e| fail(&format!("cannot reach the enclave's control port: {e}")));
     let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
-    let frame = [&[mode][..], &list].concat();
-    write_frame(&mut stream, &frame).unwrap_or_else(|e| fail(&format!("cannot send the start frame: {e}")));
+    write_frame(&mut stream, frame).unwrap_or_else(|e| fail(&format!("cannot send the control frame: {e}")));
     let answer = read_frame(&mut stream).unwrap_or_else(|e| fail(&format!("no answer from the enclave: {e}")));
-    let answer = String::from_utf8_lossy(&answer);
+    let answer = String::from_utf8_lossy(&answer).into_owned();
     eprintln!("seal_proxy: the enclave answered: {answer}");
+    answer
+}
+
+/// Starts the enclave (the mode alone), then offers it the list file.
+fn start(cid: u32, mode: &str, list_file: &str) -> ! {
+    let mode = match mode {
+        "genesis" => CONTROL_GENESIS,
+        "join" => CONTROL_JOIN,
+        _ => fail("the mode is genesis or join"),
+    };
+    let list = std::fs::read(list_file).unwrap_or_else(|e| fail(&format!("cannot read {list_file}: {e}")));
+    if !control(cid, &[mode]).starts_with("ok") {
+        std::process::exit(1);
+    }
+    // The enclave takes the list only if it is signed by its release key; a
+    // refusal leaves it running on what its image trusts by itself.
+    control(cid, &[&[CONTROL_SIGNED_LIST][..], &list].concat());
+    std::process::exit(0);
+}
+
+/// Offers the enclave a later signed list.
+fn list(cid: u32, list_file: &str) -> ! {
+    let list = std::fs::read(list_file).unwrap_or_else(|e| fail(&format!("cannot read {list_file}: {e}")));
+    let answer = control(cid, &[&[CONTROL_SIGNED_LIST][..], &list].concat());
     std::process::exit(if answer.starts_with("ok") { 0 } else { 1 });
 }
 
@@ -108,6 +129,7 @@ fn main() {
             Proxy::new(listener, TcpConnector(upstream.to_string()), limits, log).serve(None)
         }
         ["start", cid, mode, list_file] => start(number(Some(&cid.to_string()), "the enclave CID"), mode, list_file),
+        ["list", cid, list_file] => list(number(Some(&cid.to_string()), "the enclave CID"), list_file),
         _ => fail("unknown command"),
     };
     if let Err(error) = result {
