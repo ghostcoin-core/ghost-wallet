@@ -1,0 +1,161 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Ghost Seal: one Nitro Enclaves host per region. The enclave runs the Seal; the host runs only the parent proxy. No SSH, no inbound port but the proxy's, IMDSv2 only, and a role with no KMS, S3, Secrets Manager or Parameter Store access.",
+  "Parameters": {
+    "InstanceType": {
+      "Type": "String",
+      "Default": "c7g.xlarge",
+      "AllowedValues": ["c7g.xlarge", "c7g.2xlarge", "m7g.xlarge", "m7g.2xlarge", "c6g.xlarge", "c6g.2xlarge", "m6g.xlarge", "m6g.2xlarge"],
+      "Description": "An arm64 (Graviton) family with Nitro Enclaves support and no burst credits."
+    },
+    "ImageId": {
+      "Type": "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+      "Default": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+      "Description": "Amazon Linux 2023 for arm64 (it packages aws-nitro-enclaves-cli)."
+    },
+    "VpcId": { "Type": "AWS::EC2::VPC::Id" },
+    "SubnetId": { "Type": "AWS::EC2::Subnet::Id", "Description": "A public subnet." },
+    "ProxyPort": { "Type": "Number", "Default": 443, "MinValue": 1, "MaxValue": 65535, "Description": "The one inbound port: the parent proxy." },
+    "EnclaveCpuCount": { "Type": "Number", "Default": 2, "MinValue": 2, "MaxValue": 6, "Description": "vCPUs set aside for the enclave." },
+    "EnclaveMemoryMiB": { "Type": "Number", "Default": 2048, "MinValue": 1024, "MaxValue": 12288, "Description": "Memory set aside for the enclave." },
+    "EnclaveCid": { "Type": "Number", "Default": 16, "MinValue": 4, "MaxValue": 4294967294 },
+    "EifUrl": { "Type": "String", "AllowedPattern": "^https://.+", "Description": "Where to fetch seal.eif (the published build)." },
+    "EifSha256": { "Type": "String", "AllowedPattern": "^[0-9a-f]{64}$", "Description": "SHA-256 of seal.eif, from compute-pcrs.sh." },
+    "ProxyUrl": { "Type": "String", "AllowedPattern": "^https://.+", "Description": "Where to fetch the seal_proxy binary." },
+    "ProxySha256": { "Type": "String", "AllowedPattern": "^[0-9a-f]{64}$" },
+    "MeasurementsUrl": { "Type": "String", "AllowedPattern": "^https://.+", "Description": "The published enclave/measurements.json at the release commit." },
+    "MeasurementsSha256": { "Type": "String", "AllowedPattern": "^[0-9a-f]{64}$" },
+    "StartMode": {
+      "Type": "String",
+      "AllowedValues": ["genesis", "join"],
+      "Default": "join",
+      "Description": "genesis only for the very first enclave, once; every other start is join."
+    },
+    "PeerAddress": { "Type": "String", "Default": "", "Description": "host:port of a running region's proxy, to join from." },
+    "GhostNodeAddress": { "Type": "String", "AllowedPattern": "^[A-Za-z0-9.-]+:[0-9]+$", "Description": "host:port of a Ghost node, for the chain check." }
+  },
+  "Rules": {
+    "JoinNeedsAPeer": {
+      "RuleCondition": { "Fn::Equals": [{ "Ref": "StartMode" }, "join"] },
+      "Assertions": [
+        {
+          "Assert": { "Fn::Not": [{ "Fn::Equals": [{ "Ref": "PeerAddress" }, ""] }] },
+          "AssertDescription": "A join needs the PeerAddress of a running region."
+        }
+      ]
+    }
+  },
+  "Resources": {
+    "SealLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": { "Fn::Sub": "/ghost-seal/${AWS::StackName}" },
+        "RetentionInDays": 30
+      }
+    },
+    "SealRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "Description": "The Seal host: writes its own proxy logs, nothing else. No KMS, S3, Secrets Manager or Parameter Store.",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            { "Effect": "Allow", "Principal": { "Service": "ec2.amazonaws.com" }, "Action": "sts:AssumeRole" }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "write-own-logs",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"],
+                  "Resource": [
+                    { "Fn::GetAtt": ["SealLogs", "Arn"] },
+                    { "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ghost-seal/${AWS::StackName}:log-stream:*" }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "SealInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": { "Roles": [{ "Ref": "SealRole" }] }
+    },
+    "SealSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "The Seal host: the proxy port only, no SSH.",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": { "Ref": "ProxyPort" },
+            "ToPort": { "Ref": "ProxyPort" },
+            "CidrIp": "0.0.0.0/0",
+            "Description": "The parent proxy (TLS to the enclave, key-share requests)."
+          }
+        ]
+      }
+    },
+    "SealLaunchTemplate": {
+      "Type": "AWS::EC2::LaunchTemplate",
+      "Properties": {
+        "LaunchTemplateData": {
+          "ImageId": { "Ref": "ImageId" },
+          "InstanceType": { "Ref": "InstanceType" },
+          "IamInstanceProfile": { "Arn": { "Fn::GetAtt": ["SealInstanceProfile", "Arn"] } },
+          "EnclaveOptions": { "Enabled": true },
+          "MetadataOptions": {
+            "HttpTokens": "required",
+            "HttpEndpoint": "enabled",
+            "HttpPutResponseHopLimit": 1,
+            "InstanceMetadataTags": "disabled"
+          },
+          "BlockDeviceMappings": [
+            {
+              "DeviceName": "/dev/xvda",
+              "Ebs": { "VolumeType": "gp3", "VolumeSize": 20, "Encrypted": true, "DeleteOnTermination": true }
+            }
+          ],
+          "UserData": {
+            "Fn::Base64": {
+              "Fn::Sub": [
+                "#!/bin/bash\nset -euo pipefail\ndnf install -y aws-nitro-enclaves-cli amazon-cloudwatch-agent\nmkdir -p /opt/seal /var/log/seal\n\n# The enclave's CPUs and memory, set aside from the host.\ncat > /etc/nitro_enclaves/allocator.yaml <<'ALLOCATOR'\n---\nmemory_mib: ${EnclaveMemoryMiB}\ncpu_count: ${EnclaveCpuCount}\nALLOCATOR\nsystemctl enable --now nitro-enclaves-allocator.service\n\n# The published build, its proxy and the list, each checked against its pinned hash.\nfetch() { curl --proto '=https' -fsSL \"$1\" -o \"$2\"; echo \"$3  $2\" | sha256sum -c -; }\nfetch '${EifUrl}' /opt/seal/seal.eif '${EifSha256}'\nfetch '${ProxyUrl}' /opt/seal/seal_proxy '${ProxySha256}'\nfetch '${MeasurementsUrl}' /opt/seal/measurements.json '${MeasurementsSha256}'\nchmod 0755 /opt/seal/seal_proxy\n\n# Never in debug mode: a debug enclave reports zero PCRs and is refused everywhere.\nnitro-cli run-enclave --eif-path /opt/seal/seal.eif --cpu-count ${EnclaveCpuCount} --memory ${EnclaveMemoryMiB} --enclave-cid ${EnclaveCid}\n\nunit() {\n  cat > \"/etc/systemd/system/$1.service\" <<UNIT\n[Unit]\nDescription=Seal parent proxy ($1)\nAfter=network-online.target\n[Service]\nExecStart=/opt/seal/seal_proxy $2\nRestart=always\nDynamicUser=yes\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nStandardError=append:/var/log/seal/$1.log\n[Install]\nWantedBy=multi-user.target\nUNIT\n}\nunit seal-inbound 'inbound 0.0.0.0:${ProxyPort} ${EnclaveCid} 5001'\nunit seal-node 'outbound 5003 ${GhostNodeAddress}'\nsystemctl daemon-reload\nsystemctl enable --now seal-inbound seal-node\nif [ '${StartMode}' = join ]; then\n  unit seal-peer 'outbound 5002 ${PeerAddress}'\n  systemctl daemon-reload\n  systemctl enable --now seal-peer\nfi\n\ncat > /opt/seal/cloudwatch.json <<'AGENT'\n{\"logs\": {\"logs_collected\": {\"files\": {\"collect_list\": [{\"file_path\": \"/var/log/seal/*.log\", \"log_group_name\": \"${LogGroup}\", \"log_stream_name\": \"{instance_id}\"}]}}}}\nAGENT\n/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/seal/cloudwatch.json\n\n# The enclave's one start: the mode and the list it enforces.\n/opt/seal/seal_proxy start ${EnclaveCid} ${StartMode} /opt/seal/measurements.json 2>> /var/log/seal/start.log\n",
+                { "LogGroup": { "Ref": "SealLogs" } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "SealInstance": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "LaunchTemplate": {
+          "LaunchTemplateId": { "Ref": "SealLaunchTemplate" },
+          "Version": { "Fn::GetAtt": ["SealLaunchTemplate", "LatestVersionNumber"] }
+        },
+        "SubnetId": { "Ref": "SubnetId" },
+        "SecurityGroupIds": [{ "Ref": "SealSecurityGroup" }],
+        "Tags": [{ "Key": "Name", "Value": { "Fn::Sub": "${AWS::StackName}-host" } }]
+      }
+    },
+    "SealAddress": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": { "Domain": "vpc", "InstanceId": { "Ref": "SealInstance" } }
+    }
+  },
+  "Outputs": {
+    "ProxyAddress": {
+      "Description": "host:port of this region's proxy, the PeerAddress for a region that joins from it.",
+      "Value": { "Fn::Sub": "${SealAddress}:${ProxyPort}" }
+    },
+    "InstanceId": { "Value": { "Ref": "SealInstance" } }
+  }
+}

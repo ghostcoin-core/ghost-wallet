@@ -30,10 +30,67 @@ zeroize = "=1.9.1"
 # client and proofs at the commit the core pins.
 ghost-wallet-core = { path = "../core" }
 
+# Only with the `nitro` feature (the enclave program, its parent proxy and
+# their tests): checking AWS's Nitro attestation signature (ECDSA P-384,
+# verify only; nothing outside the tests signs), the SHA-256 of the pinned
+# AWS root, and vsock sockets. The default build has none of these.
+libc = { version = "=0.2.191", optional = true }
+p384 = { version = "=0.14.0", default-features = false, features = ["ecdsa"], optional = true }
+sha2 = { version = "=0.11.1", default-features = false, optional = true }
+vsock = { version = "=0.5.5", optional = true }
+
+[features]
+default = []
+# The Nitro Enclaves build: the published measurements, attestation, the M
+# handover between enclaves, the phones' attestation and the parent proxy.
+nitro = ["dep:libc", "dep:p384", "dep:sha2", "dep:vsock"]
+
+[[bin]]
+name = "seal_enclave"
+path = "src/bin/seal_enclave.rs"
+required-features = ["nitro"]
+
+[[bin]]
+name = "seal_proxy"
+path = "src/bin/seal_proxy.rs"
+required-features = ["nitro"]
+
+[[test]]
+name = "measurements"
+path = "tests/measurements.rs"
+required-features = ["nitro"]
+
+[[test]]
+name = "attestation"
+path = "tests/attestation.rs"
+required-features = ["nitro"]
+
+[[test]]
+name = "key_share"
+path = "tests/key_share.rs"
+required-features = ["nitro"]
+
+[[test]]
+name = "proxy"
+path = "tests/proxy.rs"
+required-features = ["nitro"]
+
 # The lattice signatures and key encapsulation are slow unoptimised; build the
 # dependencies optimised in the tests too.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The enclave program's release build is reproducible: one codegen unit, no
+# incremental state, no debug info, symbols stripped, and (set by the build
+# scripts) a fixed target, `--remap-path-prefix` and `SOURCE_DATE_EPOCH`.
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+incremental = false
+debug = false
+strip = "symbols"
+panic = "unwind"
 
 # Keep this crate out of any parent workspace.
 [workspace]

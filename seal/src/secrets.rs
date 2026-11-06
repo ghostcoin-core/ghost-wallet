@@ -24,6 +24,14 @@ impl MasterKey {
     pub(crate) fn derive_from(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// For the key-share package only: the giving enclave encrypts M, under
+    /// keys only an attested copy on the published list can derive, and
+    /// nothing else reads M through this.
+    #[cfg(feature = "nitro")]
+    pub(crate) fn for_key_share_package(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 /// The most bytes a Phantom Key may have: the card's key slot.
