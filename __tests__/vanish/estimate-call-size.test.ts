@@ -98,7 +98,7 @@ function accountTx(callBytes: Uint8Array): string {
 }
 
 describe('the eth_estimateGas call of a signed transaction', () => {
-  it('sends a 1.3 MB reveal once, under input only, in a body under 5 MiB', async () => {
+  it('sends no request at all to check a 1.3 MB reveal: the node checks it when it is sent', async () => {
     const signed = reveal(REVEAL_BYTES);
     const node = limitedNode();
 
@@ -106,18 +106,19 @@ describe('the eth_estimateGas call of a signed transaction', () => {
       .checkSend(signed, null)
       .then(() => null, (error: unknown) => error);
 
-    expect(node.bodies).toHaveLength(1);
-    const body = node.bodies[0];
-    expect(new TextEncoder().encode(body).length).toBeLessThan(BODY_LIMIT);
     expect(outcome).toBeNull();
-    const [request] = JSON.parse(body) as Call[];
-    expect(request.method).toBe('eth_estimateGas');
-    const call = request.params[0] as Record<string, string>;
+    expect(node.bodies).toHaveLength(0);
+  });
+
+  it('puts a reveal’s bytes once, under input only, in a body under 5 MiB', () => {
+    const signed = reveal(REVEAL_BYTES);
+    const call = estimateCall(signed, null);
+
     expect(Object.keys(call).sort()).toEqual(['input', 'type']);
-    expect(call).not.toHaveProperty('data');
     expect(call.type).toBe('0x50');
     expect(call.input).toBe(`0x${signed.slice(4)}`);
-    expect(call.input.length).toBe(2 + REVEAL_BYTES * 2);
+    const body = JSON.stringify([{ jsonrpc: '2.0', id: 1, method: 'eth_estimateGas', params: [call, 'latest'] }]);
+    expect(new TextEncoder().encode(body).length).toBeLessThan(BODY_LIMIT);
   });
 
   it('puts an account transaction’s call bytes under input only, with no data key', () => {

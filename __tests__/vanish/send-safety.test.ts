@@ -365,10 +365,10 @@ describe('the check before sending, in the node layer', () => {
     });
   });
 
-  it('checks a Summon or Claim (no sender) by its type and payload', async () => {
+  it('asks the node nothing for a Summon or Claim (no sender): it checks a reveal when it is sent', async () => {
     const node = rpcNode(chainAnswers(() => null));
     await vanishNode(NODE_URL, node.fetchImpl).checkSend('0x50000102', null);
-    expect(node.calls[0].params[0]).toEqual({ type: '0x50', input: '0x000102' });
+    expect(node.calls).toEqual([]);
   });
 
   it('asks nothing, and passes nothing, for bytes it cannot read or an account transaction with no sender', async () => {

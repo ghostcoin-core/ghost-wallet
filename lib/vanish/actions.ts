@@ -283,10 +283,11 @@ function revealRefusal(error: unknown): unknown {
 }
 
 /**
- * Proves the reveal, has the node check it (`checkSend`), then saves it with
- * its marker as identity and sends it. A check the node refuses, or that
- * cannot reach the node, fails it with nothing saved or sent. After that only
- * the node's refusal fails it: a send that timed out or lost its connection
+ * Proves the reveal, then saves it with its marker as identity and sends it.
+ * The node checks a reveal when it is sent: its check before sending
+ * (`checkSend`, `eth_estimateGas`) cannot run one, so `checkSend` passes a
+ * reveal with no call. The node's refusal of the send fails it, with the coins
+ * still in the key: a send that timed out or lost its connection
  * may have reached the node, so the saved payment is returned as sending, and
  * the payment mover sends it again or finds its receipt.
  */
