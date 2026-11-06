@@ -13,19 +13,37 @@
 //! PINs) are never logged, formatted or returned, except the Phantom Key an
 //! Open releases, and that only encrypted to the phone key bound when the
 //! Open started. Nothing hands M out.
+//!
+//! The `nitro` feature (off by default) adds what runs the Seal on AWS Nitro
+//! Enclaves: the published measurements (`measurements`), checking and
+//! asking for attestation documents (`attestation`), the handover of M
+//! between attested enclaves, the only way M ever leaves one, and only
+//! encrypted to an attested copy (`key_share`), the document phones get
+//! (`phone_attestation`) and the parent proxy (`proxy`). Its design is in
+//! `docs/seal-enclave.md`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod answer;
 pub mod apdu;
+#[cfg(feature = "nitro")]
+pub mod attestation;
 pub mod card_keys;
 pub mod chain_check;
 pub mod error;
 pub mod flows;
 pub mod journal;
+#[cfg(feature = "nitro")]
+pub mod key_share;
 pub mod link;
+#[cfg(feature = "nitro")]
+pub mod measurements;
+#[cfg(feature = "nitro")]
+pub mod phone_attestation;
 pub mod primitives;
+#[cfg(feature = "nitro")]
+pub mod proxy;
 pub mod record;
 pub mod registry;
 pub mod release;
