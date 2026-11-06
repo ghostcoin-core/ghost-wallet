@@ -27,7 +27,10 @@ jest.mock(
     ),
   { virtual: true },
 );
-jest.mock('../../lib/seal/trusted-seal', () => ({ trustedSeal: () => require('./fake-seal').world.current.trusted() }));
+jest.mock('../../lib/seal/trusted-seal', () => ({
+  trustedSeal: () => require('./fake-seal').world.current.trusted(),
+  refreshTrustedSeal: async () => require('./fake-seal').world.current.refreshed(),
+}));
 jest.mock('../../lib/seal/pinned-measurements', () => {
   const actual = jest.requireActual('../../lib/seal/pinned-measurements');
   return { ...actual, PINNED_MEASUREMENTS: actual.parseMeasurementList(require('./fake-seal').PINNED_JSON) };
@@ -156,6 +159,19 @@ describe.each(DEVICE_NAMES)('Check NFC Chip on the %s', (device) => {
     expect(world.calls).toEqual([]);
     expect(shown()).toBe("Can't verify this card");
     expect(isRed('check-card-status-text')).toBe(true);
+  });
+
+  it('checks the Seal again at the start of the Check, and says "Can\'t verify" when it no longer verifies', async () => {
+    renderOn(device, CheckCardScreen);
+    world.sealedCard(5n * GHOST);
+    expect(world.refreshes).toBe(0);
+    // The Seal vouched for when the screen opened, but its attestation fails now.
+    world.noSeal = true;
+    await tapCheck();
+    expect(world.refreshes).toBe(1);
+    expect(world.calls).toEqual([]);
+    expect(shown()).toBe("Can't verify this card");
+    expect(screen.queryByText(/[0-9] GHOST/)).toBeNull();
   });
 
   it('shows nothing new when the card sheet is closed', async () => {

@@ -31,7 +31,10 @@ jest.mock(
     ),
   { virtual: true },
 );
-jest.mock('../../lib/seal/trusted-seal', () => ({ trustedSeal: () => require('./fake-seal').world.current.trusted() }));
+jest.mock('../../lib/seal/trusted-seal', () => ({
+  trustedSeal: () => require('./fake-seal').world.current.trusted(),
+  refreshTrustedSeal: async () => require('./fake-seal').world.current.refreshed(),
+}));
 jest.mock('../../lib/seal/pinned-measurements', () => {
   const actual = jest.requireActual('../../lib/seal/pinned-measurements');
   return { ...actual, PINNED_MEASUREMENTS: actual.parseMeasurementList(require('./fake-seal').PINNED_JSON) };

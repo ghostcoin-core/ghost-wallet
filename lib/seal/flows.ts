@@ -18,7 +18,7 @@ import {
 } from '../../modules/ghost-nfc/relay';
 import { statusOfAnswer, statusOfFailure, type CardStatus } from './card-status';
 import { clearFill, noteFill, pendingFill } from './fills';
-import { trustedSeal, type TrustedSeal } from './trusted-seal';
+import { refreshTrustedSeal, trustedSeal, type TrustedSeal } from './trusted-seal';
 import {
   answerCheck,
   readVerdict,
@@ -33,7 +33,10 @@ type Keeper = Pick<GhostNfcSealNative, 'keepOpenKey' | 'restoreOpenKey' | 'forge
 
 /** What the flows run on: each replaced by a fake in the tests. */
 export type SealDeps = VerifyOptions & {
+  /** The Seal as it was when the screen opened, used only when there is no `refresh`. */
   seal: TrustedSeal | null;
+  /** Fetches and checks the Seal's attestation when its cached check ran out; never throws. */
+  refresh?: () => Promise<TrustedSeal | null>;
   core: SealBindings | null;
   check: (url: string) => Promise<RelayedAnswer>;
   fill: (url: string, amountWei: bigint, pin: string | null) => Promise<RelayedFill>;
@@ -54,6 +57,7 @@ function optionalCore(): SealBindings | null {
 export function sealDeps(): SealDeps {
   return {
     seal: trustedSeal(),
+    refresh: () => refreshTrustedSeal(),
     core: optionalCore(),
     check: (url) => checkWithSeal(url),
     fill: (url, amountWei, pin) => fillWithSeal(url, amountWei, pin),
@@ -63,9 +67,22 @@ export function sealDeps(): SealDeps {
   };
 }
 
-/** The Seal and core, or null when either is missing: then no card can be verified. */
-function ready(deps: SealDeps): { seal: TrustedSeal; core: SealBindings } | null {
-  return deps.seal && deps.core ? { seal: deps.seal, core: deps.core } : null;
+/**
+ * The Seal and core at the start of a card flow, or null when either is
+ * missing: then no card can be verified. The Seal's attestation is fetched
+ * and checked again here (`refresh`) when its cached check has run out; this
+ * is the only place the app waits on it.
+ */
+async function readyNow(deps: SealDeps): Promise<{ seal: TrustedSeal; core: SealBindings } | null> {
+  let seal = deps.seal;
+  if (deps.refresh) {
+    try {
+      seal = await deps.refresh();
+    } catch {
+      seal = null;
+    }
+  }
+  return seal && deps.core ? { seal, core: deps.core } : null;
 }
 
 /**
@@ -73,7 +90,7 @@ function ready(deps: SealDeps): { seal: TrustedSeal; core: SealBindings } | null
  * the Seal's signed answer is verified. Null when the card sheet was closed.
  */
 export async function checkCard(deps: SealDeps): Promise<CardStatus | null> {
-  const parts = ready(deps);
+  const parts = await readyNow(deps);
   if (!parts) {
     return { kind: 'cant-verify' };
   }
@@ -114,7 +131,7 @@ export type FillResult =
  * `pin`, when set, becomes the card's Open PIN.
  */
 export async function fillCard(deps: SealDeps, amountWei: bigint, pin: string | null): Promise<FillResult> {
-  const parts = ready(deps);
+  const parts = await readyNow(deps);
   if (!parts) {
     return { ok: false, status: { kind: 'cant-verify' } };
   }
@@ -139,7 +156,7 @@ export async function fillCard(deps: SealDeps, amountWei: bigint, pin: string | 
  * then the card is Filling.
  */
 export async function confirmFill(deps: SealDeps): Promise<CardStatus | null> {
-  const parts = ready(deps);
+  const parts = await readyNow(deps);
   if (!parts) {
     return { kind: 'cant-verify' };
   }
@@ -190,7 +207,7 @@ export type OpenResult =
  * settles (`finishOpenClaim`).
  */
 export async function openCard(deps: SealDeps, pin: string | null): Promise<OpenResult> {
-  const parts = ready(deps);
+  const parts = await readyNow(deps);
   if (!parts) {
     return { ok: false, status: { kind: 'cant-verify' } };
   }

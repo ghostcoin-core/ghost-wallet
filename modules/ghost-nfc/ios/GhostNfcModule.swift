@@ -11,12 +11,18 @@
 // Fill's public commit data), never a command or a card answer. The Open's
 // phone key seed moves only between the native core and the Keychain
 // (OpenKeyKeychain.swift).
+//
+// The Seal's attestation is fetched natively (fetchSealAttestation,
+// SealAttestation.swift): JavaScript gets the attestation bytes and the hash
+// of the certificate the connection presented, and sets the relay's pin
+// (setSealPin) only after the native core verified the attestation.
 import ExpoModulesCore
 
 public final class GhostNfcModule: Module {
   private let reader = TagReader()
   private let vault = CardVault()
   private lazy var relay = SealRelay(reader: reader)
+  private let attestation = SealAttestation()
 
   public func definition() -> ModuleDefinition {
     Name("GhostNfc")
@@ -54,6 +60,18 @@ public final class GhostNfcModule: Module {
 
     AsyncFunction("relayOpen") { (sealUrl: String, alert: String, phoneKey: String, pin: String, promise: Promise) in
       self.relay.run(.open(phoneKey: phoneKey, pin: pin), sealUrl: sealUrl, alert: alert, promise: promise)
+    }
+
+    // The Seal's attestation (SealAttestation.swift): the attestation bytes
+    // and the hash of the certificate the connection presented, nothing else.
+    AsyncFunction("fetchSealAttestation") { (sealUrl: String, challenge: String, promise: Promise) in
+      self.attestation.fetch(sealUrl: sealUrl, challenge: challenge, promise: promise)
+    }
+
+    // The relay's pinned certificate, set only after the core verified the
+    // attestation that binds it; "" drops it.
+    Function("setSealPin") { (sealUrl: String, certSha256: String) in
+      SealPins.shared.set(sealUrl: sealUrl, certSha256: certSha256)
     }
 
     // The Open's phone key seed, between the native core and the Keychain.

@@ -35,6 +35,26 @@ export type GhostNfcNative = {
   openPhantomKey(uid: string, sealed: Uint8Array): void;
 };
 
+/**
+ * The Seal attestation fetch and the relay's pinned certificate
+ * (ios/SealAttestation.swift, ios/SealRelay.swift). Kept apart from
+ * `GhostNfcNative` and the relay's types so they do not change. Neither call
+ * carries card traffic or an APDU.
+ */
+export type GhostNfcSealPinNative = {
+  /**
+   * One HTTPS `POST /v1/attestation` with `challenge` (64 hex digits) to the Seal at `sealUrl`.
+   * Resolves with the attestation bytes and the SHA-256 of the DER of the leaf certificate the
+   * connection presented, both as hex. Nothing else comes back.
+   */
+  fetchSealAttestation(sealUrl: string, challenge: string): Promise<{ attestation: string; certSha256: string }>;
+  /**
+   * Lets the relay connect to the host of `sealUrl` only when its leaf certificate's SHA-256 is
+   * `certSha256` (64 hex digits); `""` drops the pin, and with no pin the relay connects nowhere.
+   */
+  setSealPin(sealUrl: string, certSha256: string): void;
+};
+
 /** Thrown when the person closes the card sheet. */
 export class CardCancelled extends Error {
   constructor() {

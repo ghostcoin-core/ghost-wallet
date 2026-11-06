@@ -13,12 +13,110 @@
 // card's key, encrypted to the native core's phone key) goes straight to the
 // native core (ghost_wallet_seal_open_take_release), never to JavaScript.
 // An Open PIN is sent to the Seal in the start request only and kept nowhere.
+//
+// The relay connects only to a Seal whose certificate is pinned (`SealPins`,
+// docs/seal-app-attestation.md): JavaScript sets the pin, the SHA-256 of the
+// leaf certificate's DER, only after the native core verified the Seal's
+// Nitro attestation that binds it. Every connection's leaf certificate is
+// hashed and compared with the pin of its host; with no pin, another hash or
+// no TLS at all, the connection is cancelled and the flow fails as
+// "seal-unreachable". Nothing here logs.
 import ExpoModulesCore
 import Foundation
 import Security
 
 final class SealAddressException: Exception {
-  override var reason: String { "The Seal address must be an https:// address (http:// only on this network)." }
+  override var reason: String { "The Seal address must be an https:// address." }
+}
+
+/// The certificate each Seal host is pinned to (memory only). Set only by
+/// `setSealPin` after the core's check of the attestation; an empty hash
+/// drops it.
+final class SealPins {
+  static let shared = SealPins()
+
+  private let lock = NSLock()
+  private var pins: [String: Data] = [:]
+
+  /// Pins the host of `sealUrl` to `certSha256` (64 hex digits), or drops its pin for anything else.
+  func set(sealUrl: String, certSha256: String) {
+    guard let url = URL(string: sealUrl.trimmingCharacters(in: .whitespaces)),
+          url.scheme?.lowercased() == "https", let host = url.host
+    else { return }
+    let key = Self.key(host: host, port: url.port ?? 443)
+    let hash = certSha256.count == 64 ? Self.bytes(certSha256) : nil
+    lock.lock()
+    pins[key] = hash
+    lock.unlock()
+  }
+
+  /// The pinned hash of `host` and `port`, if any.
+  func pinned(host: String, port: Int) -> Data? {
+    lock.lock()
+    defer { lock.unlock() }
+    return pins[Self.key(host: host, port: port > 0 ? port : 443)]
+  }
+
+  /// Whether `url` may be connected to at all: https:// with a pin for its host.
+  func allows(_ url: URL) -> Bool {
+    guard url.scheme?.lowercased() == "https", let host = url.host else { return false }
+    return pinned(host: host, port: url.port ?? 443) != nil
+  }
+
+  private static func key(host: String, port: Int) -> String {
+    "\(host.lowercased()):\(port)"
+  }
+
+  private static func bytes(_ hex: String) -> Data? {
+    let digits = Array(hex.utf8)
+    guard digits.count % 2 == 0 else { return nil }
+    var out = Data(capacity: digits.count / 2)
+    var index = 0
+    while index < digits.count {
+      guard let byte = UInt8(String(decoding: digits[index..<index + 2], as: UTF8.self), radix: 16) else { return nil }
+      out.append(byte)
+      index += 2
+    }
+    return out
+  }
+}
+
+/// The relay's connection check: a connection goes on only when its leaf
+/// certificate's SHA-256 equals the pin of its host; otherwise it is cancelled.
+private final class PinnedSealTrust: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
+  func urlSession(
+    _ session: URLSession,
+    didReceive challenge: URLAuthenticationChallenge,
+    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    check(challenge, completionHandler)
+  }
+
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    didReceive challenge: URLAuthenticationChallenge,
+    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    check(challenge, completionHandler)
+  }
+
+  private func check(
+    _ challenge: URLAuthenticationChallenge,
+    _ completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    let space = challenge.protectionSpace
+    guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+          let trust = space.serverTrust,
+          let pinned = SealPins.shared.pinned(host: space.host, port: space.port),
+          let presented = SealCertificates.leafSha256(trust),
+          presented == pinned
+    else {
+      completionHandler(.cancelAuthenticationChallenge, nil)
+      return
+    }
+    completionHandler(.useCredential, URLCredential(trust: trust))
+  }
 }
 
 final class SealRelayBusyException: Exception {
@@ -170,7 +268,7 @@ final class SealRelay {
     config.urlCache = nil
     config.httpCookieStorage = nil
     config.httpShouldSetCookies = false
-    http = URLSession(configuration: config)
+    http = URLSession(configuration: config, delegate: PinnedSealTrust(), delegateQueue: nil)
   }
 
   /// Runs one Check through the Seal at `sealUrl` on the next card tapped.
@@ -187,6 +285,11 @@ final class SealRelay {
       }
       guard !self.running else {
         promise.reject(SealRelayBusyException())
+        return
+      }
+      // No pinned certificate for this Seal: no connection at all.
+      guard SealPins.shared.allows(base) else {
+        promise.reject(SealUnreachableException())
         return
       }
       guard let challenge = Self.randomBytes(32) else {
@@ -237,6 +340,10 @@ final class SealRelay {
   private func post(_ run: Run, path: String, body: [String: String]) {
     guard run.elapsedMs < Self.maxSeconds * 1000 else {
       finish(run, error: SealExpiredException())
+      return
+    }
+    guard SealPins.shared.allows(run.base) else {
+      finish(run, error: SealUnreachableException())
       return
     }
     var request = URLRequest(url: run.base.appendingPathComponent(path))
@@ -397,7 +504,7 @@ final class SealRelay {
   private static func baseUrl(_ text: String) -> URL? {
     let trimmed = text.trimmingCharacters(in: .whitespaces)
     guard let url = URL(string: trimmed.hasSuffix("/") ? trimmed : trimmed + "/"),
-          let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
+          url.scheme?.lowercased() == "https",
           url.host != nil
     else { return nil }
     return url

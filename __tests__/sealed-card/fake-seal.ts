@@ -327,8 +327,25 @@ export class World {
     this.native = this.makeNative();
   }
 
+  /** How many times a card flow asked for the Seal's attestation to be checked again. */
+  refreshes = 0;
+
   trusted() {
-    return this.noSeal ? null : { url: FAKE_SEAL_URL, verifyingKey: this.seal.key, measurement: this.seal.measurement };
+    return this.noSeal
+      ? null
+      : {
+          url: FAKE_SEAL_URL,
+          verifyingKey: this.seal.key,
+          measurement: this.seal.measurement,
+          kemKey: new Uint8Array(1184).fill(0x4b),
+          tlsCertSha256: new Uint8Array(32).fill(0x7e),
+        };
+  }
+
+  /** What `refreshTrustedSeal` gives a card flow: the Seal as the attestation says now. */
+  refreshed() {
+    this.refreshes += 1;
+    return this.trusted();
   }
 
   /** Puts a fresh card, set up and empty, in the field. */

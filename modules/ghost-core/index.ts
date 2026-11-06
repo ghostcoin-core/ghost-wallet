@@ -56,7 +56,56 @@ type GhostCoreBindings = RestoreBindings &
   savedAccountWords(): string[];
 } & Partial<VanishBindings> &
   Partial<SendBindings> &
-  Partial<SealBindings>;
+  Partial<SealBindings> &
+  Partial<SealAttestationBindings>;
+
+/**
+ * The Seal attestation check of core/src/seal_attestation.rs, as generated.
+ * The Nitro document's AWS certificate chain and ECDSA signature, the PCRs
+ * against the pinned builds and the binding of the Seal's keys, this
+ * challenge and the TLS certificate are all checked there, never in
+ * JavaScript. Only public keys and a verdict come back.
+ */
+export type SealAttestationBindings = {
+  /** `refusal` is empty and `seal` set only when the attestation is accepted. */
+  verifySealAttestation(check: CoreSealAttestationCheck): CoreSealAttestationVerdict;
+  /** A fresh 32-byte challenge from the system's random source (public); empty if it failed. */
+  sealAttestationChallenge(): ArrayBuffer;
+};
+
+/** One build of the app's pinned list, revoked builds included (`allowed` false). */
+export type CorePinnedSealBuild = {
+  name: string;
+  pcr0: ArrayBuffer;
+  pcr1: ArrayBuffer;
+  pcr2: ArrayBuffer;
+  allowed: boolean;
+};
+
+export type CoreSealAttestationCheck = {
+  /** The `GPA2` phone attestation as the Seal answered it. */
+  attestation: ArrayBuffer;
+  /** The 32-byte challenge sent with the request. */
+  challenge: ArrayBuffer;
+  /** SHA-256 of the certificate the connection to the Seal presented (measured natively). */
+  tlsCertSha256: ArrayBuffer;
+  pinnedBuilds: CorePinnedSealBuild[];
+  /** Now, in Unix seconds. */
+  now: bigint;
+};
+
+export type CoreVerifiedSeal = {
+  /** The Seal's ML-DSA-65 verifying key (1952 bytes). */
+  verifyingKey: ArrayBuffer;
+  /** The Seal's ML-KEM-768 encapsulation key (1184 bytes). */
+  kemKey: ArrayBuffer;
+  /** PCR0 of its build (48 bytes). */
+  measurement: ArrayBuffer;
+  buildName: string;
+};
+
+/** One of `malformed`, `bad-chain`, `bad-signature`, `expired`, `not-yet-valid`, `not-pinned`, `revoked`, `debug-mode`, `keys-not-bound`, `tls-mismatch`. */
+export type CoreSealAttestationVerdict = { refusal: string; seal?: CoreVerifiedSeal };
 
 /**
  * The Sealed card calls of core/src/seal_answer.rs and core/src/seal_open.rs,
@@ -388,6 +437,15 @@ export function sealCore(): SealBindings {
     throw new Error('this build has no Sealed card checks in its native core');
   }
   return core as GhostCoreBindings & SealBindings;
+}
+
+/** The Seal attestation check; throws when this build has none in its native core. */
+export function sealAttestationCore(): SealAttestationBindings {
+  const core = bindings();
+  if (typeof core.verifySealAttestation !== 'function' || typeof core.sealAttestationChallenge !== 'function') {
+    throw new Error('this build has no Seal attestation check in its native core');
+  }
+  return core as GhostCoreBindings & SealAttestationBindings;
 }
 
 /**

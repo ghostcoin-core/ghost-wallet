@@ -67,6 +67,31 @@ describe('the pinned measurements', () => {
   });
 });
 
+describe('the Seal a card flow checks with', () => {
+  it('is the one the attestation gives at the start of the flow, not the one the screen opened with', async () => {
+    world.sealedCard(5n * GHOST);
+    const gone = jest.fn(async () => null);
+    expect(await checkCard({ ...depsOf(world), refresh: gone })).toEqual({ kind: 'cant-verify' });
+    expect(await fillCard({ ...depsOf(world), refresh: gone }, GHOST, null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
+    expect(gone).toHaveBeenCalledTimes(2);
+    expect(world.calls).toEqual([]);
+
+    const fresh = jest.fn(async () => world.trusted());
+    const status = await checkCard({ ...depsOf(world), seal: null, refresh: fresh });
+    expect(fresh).toHaveBeenCalledTimes(1);
+    expect(status).toMatchObject({ kind: 'secured', amountWei: 5n * GHOST });
+  });
+
+  it('is none when the refresh fails', async () => {
+    world.sealedCard(5n * GHOST);
+    const failing = jest.fn(async () => {
+      throw new Error('no attestation');
+    });
+    expect(await checkCard({ ...depsOf(world), refresh: failing })).toEqual({ kind: 'cant-verify' });
+    expect(world.calls).toEqual([]);
+  });
+});
+
 describe('what the core checks an answer against', () => {
   it('is the challenge the relay sent, the card tapped, now, the Seal key and the pinned list', async () => {
     world.sealedCard(5n * GHOST);

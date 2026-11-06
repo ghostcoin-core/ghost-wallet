@@ -16,6 +16,7 @@ pub mod header_sync;
 pub mod keychain;
 pub mod restore_scan;
 pub mod seal_answer;
+pub mod seal_attestation;
 pub mod seal_open;
 pub mod send;
 pub mod spot_check;
@@ -43,6 +44,10 @@ pub use restore_scan::{
     RestoredAccount, UNVERIFIED_NOTE,
 };
 pub use seal_answer::{SealAnswer, SealAnswerCheck, SealAnswerVerdict, verify_seal_answer, verify_seal_fill_answer};
+pub use seal_attestation::{
+    AttestationRefusal, PinnedSealBuild, SealAttestationCheck, SealAttestationVerdict, VerifiedSeal,
+    seal_attestation_challenge, verify_seal_attestation,
+};
 pub use seal_open::{
     SealOpenError, finish_seal_open, forget_seal_open_key, has_seal_open_key, seal_open_phone_key,
 };
