@@ -2,8 +2,11 @@
 //! GetKeyVersion, AuthenticateEV2First, GetCardUID, GetFileSettings,
 //! ChangeFileSettings, ChangeKey, ReadData, WriteData), which checks every
 //! MAC and enforces the record file's access rights; and stand-ins for the
-//! Seal's random source, clock, Phantom Key maker and chain check.
+//! Seal's random source, clock, Phantom Key maker and chain check. Fake chain
+//! nodes are in `nodes`.
 #![allow(dead_code)]
+
+pub mod nodes;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -123,8 +126,21 @@ impl PhantomKeyMaker for StubMaker {
             n += 1;
         }
         commit_data.truncate(430);
+        let spend_marker = stub_spend_marker(&key);
         self.made.borrow_mut().push((key.clone(), commit_data.clone()));
-        Ok(MadeKey { key: PhantomKey::new(key)?, commit_data })
+        Ok(MadeKey { key: PhantomKey::new(key)?, commit_data, spend_marker })
+    }
+}
+
+/// The stand-in spend marker of the coin of stub key `key`.
+pub fn stub_spend_marker(key: &[u8]) -> [u8; 32] {
+    sha3_256(&[b"stub spend marker", key])
+}
+
+impl StubMaker {
+    /// The spend marker of the coin with `commit_data`.
+    pub fn marker_for(&self, commit_data: &[u8]) -> [u8; 32] {
+        stub_spend_marker(&self.key_for(commit_data))
     }
 }
 

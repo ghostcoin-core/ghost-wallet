@@ -30,6 +30,7 @@ use crate::card_keys::{
     CardKeys, CardUid, KEY_APPLICATION_MASTER, KEY_CHECK_READ, KEY_RECORD_WRITE, card_keys_at, generation_of_version,
     key_version,
 };
+use crate::chain_check::{CoinStatusCheck, require_sealable};
 use crate::error::SealError;
 use crate::journal::{EntryKind, FillEntry, Journal, OpenEntry, OpenPhase};
 use crate::link::CardLink;
@@ -155,6 +156,7 @@ pub struct Seal {
     random: Box<dyn SealRandom>,
     clock: Box<dyn Clock>,
     journal: Box<dyn Journal>,
+    chain_status: Option<Box<dyn CoinStatusCheck>>,
 }
 
 impl Seal {
@@ -167,7 +169,25 @@ impl Seal {
         journal: Box<dyn Journal>,
     ) -> Seal {
         let signer = AnswerSigner::derive(&master);
-        Seal { master, signer, config, random, clock, journal }
+        Seal { master, signer, config, random, clock, journal, chain_status: None }
+    }
+
+    /// Installs the chain status check. From then on no answer says Sealed
+    /// unless `check` finds the card's coin (its commit data and spend marker
+    /// from the Fill journal entry) paid exactly, settled and unspent: Check
+    /// and Fill's confirmation refuse with [`SealError::NotSettled`],
+    /// [`SealError::CoinSpent`], [`SealError::CantCheckNow`] or
+    /// [`SealError::PaymentMismatch`] instead.
+    pub fn with_chain_status(mut self, check: Box<dyn CoinStatusCheck>) -> Seal {
+        self.chain_status = Some(check);
+        self
+    }
+
+    /// With a chain status check installed: whether the card's coin is
+    /// exact, settled and unspent. Without one: always.
+    fn confirm_chain_status(&self, uid: &CardUid, header: &Header) -> Result<(), SealError> {
+        let Some(check) = &self.chain_status else { return Ok(()) };
+        require_sealable(check.as_ref(), self.load_fill(uid)?, header.generation, header.coin, header.amount_wei)
     }
 
     /// The Seal's encoded ML-DSA-65 public key, which phones pin.
@@ -320,7 +340,9 @@ impl Seal {
     ///
     /// A Sealed card whose Open PIN has no tries left can never be opened, so
     /// it is never certified: Check refuses it with [`SealError::PinLocked`].
-    /// A journaled Open still comes first (Opening or Opened).
+    /// With a chain status check installed ([`Seal::with_chain_status`]), a
+    /// Sealed card is answered Sealed only while its coin is exact, settled
+    /// and unspent. A journaled Open still comes first (Opening or Opened).
     pub fn check(&mut self, card: &mut dyn CardTransport, request: &CheckRequest) -> Result<SignedAnswer, SealError> {
         let uid = request.uid;
         let pending = self.load_entry(&uid)?;
@@ -336,6 +358,9 @@ impl Seal {
             None if header.state == CardState::Empty => (CardState::Empty, [0u8; 32], 0),
             None => {
                 refuse_pin_locked(&header)?;
+                if header.state == CardState::Sealed {
+                    self.confirm_chain_status(&uid, &header)?;
+                }
                 (header.state, header.coin, header.amount_wei)
             }
         };
@@ -420,7 +445,13 @@ impl Seal {
         // Journal the coin before the card changes.
         self.save_fill(
             &uid,
-            &FillEntry { generation, coin, amount_wei: request.amount_wei, commit_data: made.commit_data.clone() },
+            &FillEntry {
+                generation,
+                coin,
+                amount_wei: request.amount_wei,
+                commit_data: made.commit_data.clone(),
+                spend_marker: made.spend_marker,
+            },
         )?;
         let slot = KeySlot { generation, coin, key: Some(made.key) };
         Self::write_slot(&mut link, &mut session, &uid, &slot)?;
@@ -471,6 +502,7 @@ impl Seal {
         match header.state {
             CardState::Sealed => {
                 refuse_pin_locked(&header)?;
+                self.confirm_chain_status(&uid, &header)?;
                 return self.answer(
                     AnswerKind::Fill,
                     &request.challenge,
@@ -497,6 +529,7 @@ impl Seal {
             PaymentVerdict::NotYet => return Err(SealError::NotPaid),
             PaymentVerdict::Mismatch => return Err(SealError::PaymentMismatch),
         }
+        self.confirm_chain_status(&uid, &header)?;
         let sealed = Header { state: CardState::Sealed, ..header };
         Self::write_header(&mut link, &mut session, &uid, &sealed)?;
         self.answer(

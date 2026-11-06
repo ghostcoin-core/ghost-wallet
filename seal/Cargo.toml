@@ -9,9 +9,10 @@ publish = false
 [lib]
 name = "ghost_seal"
 
-# Audited RustCrypto crates only, each pinned to one exact version. No
-# elliptic-curve crate, no networking, no cloud SDK. Default features are off
-# where a crate has any, so nothing optional comes in unasked.
+# Audited RustCrypto crates, each pinned to one exact version, and the
+# wallet core. No elliptic-curve crate, no networking, no cloud SDK. Default
+# features are off where a crate has any, so nothing optional comes in
+# unasked.
 [dependencies]
 aes = { version = "=0.9.2", features = ["zeroize"] }
 cbc = { version = "=0.2.1", default-features = false }
@@ -24,6 +25,10 @@ ml-kem = { version = "=0.3.3", default-features = false }
 rand_core = "=0.10.1"
 sha3 = { version = "=0.12.0", default-features = false }
 zeroize = "=1.9.1"
+# The wallet core: the chain check reuses its coin-tree check, its coin leaf
+# code and its settlement depth instead of copying them. It brings Ghost's
+# client and proofs at the commit the core pins.
+ghost-wallet-core = { path = "../core" }
 
 # The lattice signatures and key encapsulation are slow unoptimised; build the
 # dependencies optimised in the tests too.

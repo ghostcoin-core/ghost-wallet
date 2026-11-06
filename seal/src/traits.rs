@@ -78,16 +78,21 @@ pub trait ChainCheck {
     fn confirm_payment(&self, claim: &CoinClaim) -> PaymentVerdict;
 }
 
-/// A new Phantom Key and the public commit data of its coin.
+/// A new Phantom Key, the public commit data of its coin and the coin's
+/// spend marker.
 pub struct MadeKey {
     /// The key; wiped when dropped.
     pub key: PhantomKey,
     /// The coin's commit data (public: the Vanish carries it).
     pub commit_data: Vec<u8>,
+    /// The coin's spend marker, for the chain check's unspent test. It is
+    /// public once the coin is spent and tells nothing before.
+    pub spend_marker: [u8; 32],
 }
 
-/// The wallet core's Phantom Key derivation: makes a fresh Phantom Key and the
-/// commit data of its coin of `amount_wei`, from the Seal's random source.
+/// The wallet core's Phantom Key derivation: makes a fresh Phantom Key, the
+/// commit data of its coin of `amount_wei` and that coin's spend marker, from
+/// the Seal's random source.
 /// The enclave build backs it with the same calls the app's card Vanish
 /// uses (Ghost's client library: a new card-only key and its coin commit
 /// number 0); tests use a stand-in.

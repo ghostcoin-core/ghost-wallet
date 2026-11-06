@@ -5,9 +5,10 @@
 //!   generation, the coin, its amount, the phone key the Open is bound to and
 //!   the Phantom Key (which must survive the wipe of the card's key slot
 //!   until it is released).
-//! - A **Fill** entry holds the public commit data of a Fill waiting for its
-//!   payment, so a Fill whose answer was lost hands back the same coin
-//!   instead of a new key.
+//! - A **Fill** entry holds the public commit data of a Fill and its coin's
+//!   spend marker, so a Fill whose answer was lost hands back the same coin
+//!   instead of a new key, and the chain check can test the coin at every
+//!   Check.
 //!
 //! The store sees only sealed bytes: AES-256-CBC under a fresh IV, then
 //! HMAC-SHA3-256 over the entry kind, the UID, the IV and the ciphertext,
@@ -236,29 +237,37 @@ impl OpenEntry {
     }
 }
 
-/// A Fill waiting for its payment, as journaled. Public values only.
+/// The Fill entry's layout version: version 2 adds the spend marker.
+const FILL_ENTRY_VERSION: u8 = 2;
+
+/// A Fill, as journaled: the coin's commit data and its spend marker, which
+/// the chain check needs at every Check (the card holds only the coin's
+/// hash). Public values only: a spend marker is public once the coin is
+/// spent and tells nothing before.
 pub(crate) struct FillEntry {
     pub(crate) generation: u32,
     pub(crate) coin: [u8; 32],
     pub(crate) amount_wei: u128,
     pub(crate) commit_data: Vec<u8>,
+    pub(crate) spend_marker: [u8; 32],
 }
 
 impl FillEntry {
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(56 + self.commit_data.len());
-        out.push(ENTRY_VERSION);
+        let mut out = Vec::with_capacity(88 + self.commit_data.len());
+        out.push(FILL_ENTRY_VERSION);
         out.extend_from_slice(&self.generation.to_be_bytes());
         out.extend_from_slice(&self.coin);
         out.extend_from_slice(&self.amount_wei.to_be_bytes());
         out.extend_from_slice(&(self.commit_data.len() as u16).to_be_bytes());
         out.extend_from_slice(&self.commit_data);
+        out.extend_from_slice(&self.spend_marker);
         out
     }
 
     fn decode(bytes: &[u8]) -> Option<FillEntry> {
         let mut r = Reader { bytes, at: 0 };
-        if r.take(1)? != [ENTRY_VERSION] {
+        if r.take(1)? != [FILL_ENTRY_VERSION] {
             return None;
         }
         let generation = u32::from_be_bytes(r.array()?);
@@ -266,7 +275,8 @@ impl FillEntry {
         let amount_wei = u128::from_be_bytes(r.array()?);
         let length = usize::from(u16::from_be_bytes(r.array()?));
         let commit_data = r.take(length)?.to_vec();
-        r.done().then_some(FillEntry { generation, coin, amount_wei, commit_data })
+        let spend_marker = r.array()?;
+        r.done().then_some(FillEntry { generation, coin, amount_wei, commit_data, spend_marker })
     }
 
     pub(crate) fn seal(
