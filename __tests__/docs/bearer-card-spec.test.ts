@@ -158,6 +158,20 @@ describe('docs/bearer-card-spec.md', () => {
     expect(flat(section(text, 2, 'Design'))).toMatch(/\*\*Carry to Claim: not safe to accept\*\* \(an NTAG 424 DNA card\)/);
   });
 
+  it('names a Ghost Sealed card as the one exception to carry-to-Claim, pointing to its design', () => {
+    const rule = section(text, 3, 'NTAG 424 DNA is carry-to-Claim only');
+    const exception = flat(section(rule, 4, 'The one exception: a Ghost Sealed card'));
+    expect(exception).toMatch(/A Ghost Sealed card is the one exception to this rule/);
+    expect(exception).toMatch(/its keys and its Phantom Key live only in the Seal, an attested enclave/);
+    expect(exception).toMatch(/can be accepted after a fresh Check/);
+    expect(exception).toMatch(/Offline or trust-free certainty still needs the Java Card/);
+    expect(exception).toMatch(/Its design is in `docs\/sealed-card\.md`/);
+    expect(fs.existsSync(path.join(__dirname, '..', '..', 'docs', 'sealed-card.md'))).toBe(true);
+    // The rule itself and the Java Card plan stay as they were.
+    expect(flat(rule)).toMatch(/\*\*NTAG 424 DNA is carry-to-Claim only\.\*\*/);
+    expect(section(text, 2, 'Card type')).toMatch(/Java Card/);
+  });
+
   it('names no ticket, link or build tool', () => {
     // A tracker id (two or more capitals, a dash, digits); SHA-256 and AES-256 are algorithms.
     expect(text).not.toMatch(/\b(?!(?:SHA|AES)-)[A-Z]{2,}-\d+\b/);
