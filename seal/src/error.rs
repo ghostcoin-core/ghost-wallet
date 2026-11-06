@@ -77,6 +77,11 @@ pub enum SealError {
     Random,
     /// A release package that does not open with this phone key.
     BadRelease,
+    /// The card's UID is not in the card registry: the card setup never
+    /// finished it, so the Seal does not touch it.
+    NotAGhostCard,
+    /// The card registry refused or lost an entry, or an entry is malformed.
+    Registry(&'static str),
 }
 
 impl fmt::Display for SealError {
@@ -112,6 +117,8 @@ impl fmt::Display for SealError {
             SealError::BadAmount => f.write_str("the amount must be more than zero"),
             SealError::Random => f.write_str("the random source failed"),
             SealError::BadRelease => f.write_str("the release package does not open"),
+            SealError::NotAGhostCard => f.write_str("Not a Ghost card"),
+            SealError::Registry(what) => write!(f, "card registry: {what}"),
         }
     }
 }
