@@ -18,6 +18,11 @@
 //! | 145 | 16 | the amount in wei |
 //! | 161 | 8 | expiry, seconds since the Unix epoch |
 //! | 169 | 32 | binding: SHA3-256 of the commit data (Fill), of the release package (Open), zeros (Check) |
+//! | 201 | 1 | Open PIN: 0 none, 1 an Open of this card needs a PIN |
+//! | 202 | 1 | Open PIN tries left (0 without a PIN) |
+//!
+//! A receiver who is not given the PIN of a card whose answer says it needs
+//! one cannot redeem the card and must not accept it.
 
 use ml_dsa::{EncodedVerifyingKey, ExpandedSigningKey, MlDsa65, Seed, Signature, VerifyingKey};
 use zeroize::Zeroize;
@@ -33,7 +38,7 @@ pub const ANSWER_DOMAIN: &[u8; 20] = b"ghost-seal/v1/answer";
 /// The ML-DSA context string of every answer signature.
 pub const ANSWER_CONTEXT: &[u8] = b"ghost-seal answer";
 /// The answer's length.
-pub const ANSWER_BYTES: usize = 201;
+pub const ANSWER_BYTES: usize = 203;
 /// The length of the Seal's code measurement.
 pub const MEASUREMENT_BYTES: usize = 48;
 /// The HKDF label of the answer-signing key's seed.
@@ -73,6 +78,18 @@ pub struct AnswerBody {
     pub expires_at: u64,
     /// SHA3-256 of what the answer hands over with it, or zeros.
     pub binding: [u8; 32],
+    /// Whether an Open of this card needs its Open PIN.
+    pub pin_required: bool,
+    /// Open PIN tries left on the card (0 without a PIN).
+    pub pin_tries_left: u8,
+}
+
+impl AnswerBody {
+    /// Whether whoever holds the card can Open it with no PIN: the
+    /// receiver's test before accepting a card whose PIN it was not given.
+    pub fn opens_without_pin(&self) -> bool {
+        !self.pin_required
+    }
 }
 
 impl AnswerBody {
@@ -90,6 +107,8 @@ impl AnswerBody {
         out.extend_from_slice(&self.amount_wei.to_be_bytes());
         out.extend_from_slice(&self.expires_at.to_be_bytes());
         out.extend_from_slice(&self.binding);
+        out.push(u8::from(self.pin_required));
+        out.push(if self.pin_required { self.pin_tries_left } else { 0 });
         debug_assert_eq!(out.len(), ANSWER_BYTES);
         out
     }
@@ -105,8 +124,19 @@ impl AnswerBody {
             3 => AnswerKind::Open,
             _ => return None,
         };
+        let pin_required = match bytes[201] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        let pin_tries_left = bytes[202];
+        if !pin_required && pin_tries_left != 0 {
+            return None;
+        }
         let take = |from: usize, to: usize| &bytes[from..to];
         Some(AnswerBody {
+            pin_required,
+            pin_tries_left,
             kind,
             challenge: take(21, 53).try_into().ok()?,
             uid: CardUid(take(53, 60).try_into().ok()?),

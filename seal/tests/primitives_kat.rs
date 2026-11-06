@@ -154,11 +154,26 @@ fn answers_encode_and_verify() {
         amount_wei: 5,
         expires_at: START_TIME + 60,
         binding: [6u8; 32],
+        pin_required: true,
+        pin_tries_left: 3,
     };
     let bytes = body.encode();
     assert_eq!(bytes.len(), ANSWER_BYTES);
+    assert_eq!(ANSWER_BYTES, 203);
     assert_eq!(&bytes[..20], b"ghost-seal/v1/answer");
-    assert_eq!(AnswerBody::decode(&bytes), Some(body));
+    assert_eq!(&bytes[201..], &[1, 3]);
+    assert!(!body.opens_without_pin());
+    assert_eq!(AnswerBody::decode(&bytes), Some(body.clone()));
+    // No PIN encodes as 0, 0; a PIN flag other than 0 or 1, or tries without a PIN, is no answer.
+    let no_pin = AnswerBody { pin_required: false, pin_tries_left: 0, ..body };
+    assert_eq!(&no_pin.encode()[201..], &[0, 0]);
+    assert!(no_pin.opens_without_pin());
+    let mut odd = bytes.clone();
+    odd[201] = 2;
+    assert_eq!(AnswerBody::decode(&odd), None);
+    let mut tries_without_pin = bytes.clone();
+    tries_without_pin[201] = 0;
+    assert_eq!(AnswerBody::decode(&tries_without_pin), None);
     assert_eq!(seal.answer_verifying_key().len(), 1952);
     assert!(AnswerVerifier::new(&seal.answer_verifying_key(), MEASUREMENT).is_ok());
     assert!(AnswerVerifier::new(&[0u8; 10], MEASUREMENT).is_err());
