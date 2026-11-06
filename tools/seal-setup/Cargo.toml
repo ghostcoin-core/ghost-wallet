@@ -1,0 +1,38 @@
+[package]
+name = "seal-setup"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Sets up Ghost test cards with the dev test Seal's keys over a USB NFC reader, and records them in the card registry."
+publish = false
+
+[lib]
+name = "seal_setup"
+path = "src/lib.rs"
+
+[[bin]]
+name = "seal-setup"
+path = "src/main.rs"
+
+[features]
+# The PC/SC reader transport. Off by default, so no default build or test
+# needs the system smart-card library; build it on the Mac Studio with
+# `--features pcsc-reader`.
+pcsc-reader = ["dep:pcsc"]
+
+[dependencies]
+ghost-seal = { path = "../../seal" }
+pcsc = { version = "=2.9.0", optional = true }
+
+[dev-dependencies]
+# The tests reuse the Seal's simulated card (seal/tests/support), whose node
+# stand-ins use the wallet core; it is already a dependency of ghost-seal.
+ghost-wallet-core = { path = "../../core" }
+
+# The Seal's crypto crates are slow unoptimised; build the dependencies
+# optimised in the tests too.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Keep this crate out of any parent workspace.
+[workspace]

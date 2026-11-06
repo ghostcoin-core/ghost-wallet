@@ -27,9 +27,11 @@ pub mod journal;
 pub mod link;
 pub mod primitives;
 pub mod record;
+pub mod registry;
 pub mod release;
 pub mod secrets;
 pub mod session;
+pub mod setup;
 pub mod traits;
 
 pub use answer::{AnswerBody, AnswerKind, AnswerRejected, AnswerVerifier, SignedAnswer};
@@ -42,6 +44,8 @@ pub use error::SealError;
 pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest, Seal, SealConfig};
 pub use journal::{EntryKind, Journal, MemoryJournal};
 pub use record::CardState;
+pub use registry::{CardRegistry, FileRegistry, MemoryRegistry, RegistryEntry};
+pub use setup::{SetupReport, SetupRequest, set_up_card};
 pub use release::PhoneSecret;
 pub use secrets::{MasterKey, PhantomKey, Pin};
 pub use traits::{

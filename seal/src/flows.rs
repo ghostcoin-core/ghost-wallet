@@ -39,6 +39,7 @@ use crate::record::{
     CardState, HEADER_BYTES, HEADER_OFFSET, Header, KEY_SLOT_BYTES, KEY_SLOT_OFFSET, KeySlot, PIN_TRIES, RECORD_FILE,
     RECORD_FILE_BYTES,
 };
+use crate::registry::CardRegistry;
 use crate::release::{PhoneKey, phone_key_hash, seal_release};
 use crate::secrets::{MasterKey, Pin};
 use crate::session::Session;
@@ -157,9 +158,26 @@ pub struct Seal {
     clock: Box<dyn Clock>,
     journal: Box<dyn Journal>,
     chain_status: Option<Box<dyn CoinStatusCheck>>,
+    registry: Option<Box<dyn CardRegistry>>,
 }
 
 impl Seal {
+    /// Installs the card registry: from now on Check, Fill and Open refuse a
+    /// UID the card setup never registered ([`SealError::NotAGhostCard`])
+    /// before they send the card anything. Without one, every UID is let
+    /// through as before.
+    pub fn with_registry(mut self, registry: Box<dyn CardRegistry>) -> Seal {
+        self.registry = Some(registry);
+        self
+    }
+
+    fn require_registered(&self, uid: &CardUid) -> Result<(), SealError> {
+        match &self.registry {
+            Some(registry) if !registry.contains(uid) => Err(SealError::NotAGhostCard),
+            _ => Ok(()),
+        }
+    }
+
     /// A Seal holding `master`.
     pub fn new(
         master: MasterKey,
@@ -169,7 +187,7 @@ impl Seal {
         journal: Box<dyn Journal>,
     ) -> Seal {
         let signer = AnswerSigner::derive(&master);
-        Seal { master, signer, config, random, clock, journal, chain_status: None }
+        Seal { master, signer, config, random, clock, journal, chain_status: None, registry: None }
     }
 
     /// Installs the chain status check. From then on no answer says Sealed
@@ -345,6 +363,7 @@ impl Seal {
     /// and unspent. A journaled Open still comes first (Opening or Opened).
     pub fn check(&mut self, card: &mut dyn CardTransport, request: &CheckRequest) -> Result<SignedAnswer, SealError> {
         let uid = request.uid;
+        self.require_registered(&uid)?;
         let pending = self.load_entry(&uid)?;
         let mut link = CardLink::new(card);
         let generation = Self::generation_of(&mut link, KEY_CHECK_READ)?;
@@ -383,6 +402,7 @@ impl Seal {
         request: &FillRequest,
         maker: &mut dyn PhantomKeyMaker,
     ) -> Result<FillOutcome, SealError> {
+        self.require_registered(&request.uid)?;
         if request.amount_wei == 0 {
             return Err(SealError::BadAmount);
         }
@@ -492,6 +512,7 @@ impl Seal {
         chain: &dyn ChainCheck,
     ) -> Result<SignedAnswer, SealError> {
         let uid = request.uid;
+        self.require_registered(&uid)?;
         if self.load_entry(&uid)?.is_some() {
             return Err(SealError::WrongState(CardState::Opening));
         }
@@ -554,6 +575,7 @@ impl Seal {
     /// after any failure: it carries on where the card and the journal are.
     pub fn open(&mut self, card: &mut dyn CardTransport, request: &OpenRequest) -> Result<OpenOutcome, SealError> {
         let uid = request.uid;
+        self.require_registered(&uid)?;
         let phone = PhoneKey::parse(&request.phone_key)?;
         let mut link = CardLink::new(card);
         let entry = match self.load_entry(&uid)? {
