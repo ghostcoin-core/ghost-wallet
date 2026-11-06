@@ -4,6 +4,8 @@
 
 #[path = "fixtures/nitro_authority.rs"]
 mod authority;
+#[path = "fixtures/test_release_key.rs"]
+mod release;
 
 use std::fmt::{Debug, Display};
 use std::io::{Read, Write};
@@ -17,9 +19,11 @@ use authority::{Authority, AuthoritySource, NOW, allowed_new, allowed_old, pcrs,
 use ghost_seal::attestation::fake::{FakeSource, FakeVerifier};
 use ghost_seal::attestation::{AttestationRejected, AttestationVerifier};
 use ghost_seal::key_share::{
-    self, GiverContext, KEM_KEY_BYTES, NONCE_BYTES, Receiver, ShareRefused, read_frame, write_frame,
+    self, CONTROL_GENESIS, CONTROL_JOIN, CONTROL_SIGNED_LIST, ControlFrame, GiverContext, KEM_KEY_BYTES, NONCE_BYTES,
+    Receiver, ShareRefused, read_frame, write_frame,
 };
-use ghost_seal::measurements::{MeasurementList, MeasurementRefused};
+use ghost_seal::measurements::{ListError, MeasurementRefused, OWN_BUILD_NAME, TrustedList};
+use release::TestOnlyReleaseKey;
 use ghost_seal::phone_attestation::answer_key;
 use ghost_seal::primitives::sha3_256;
 use ghost_seal::proxy::relay;
@@ -60,14 +64,27 @@ impl SealRandom for TestRandom {
     }
 }
 
+/// The fixture, signed by the tests' stand-in for the release key, as an
+/// enclave holding it would trust it.
+fn trusted_fixture() -> TrustedList {
+    trusted_list(FIXTURE)
+}
+
+fn trusted_list(text: &str) -> TrustedList {
+    let release = TestOnlyReleaseKey::new();
+    let mut trusted = TrustedList::compiled_in();
+    trusted.install_signed(&release.sign(text), &release.release_key()).unwrap();
+    trusted
+}
+
 struct World {
     authority: Rc<Authority>,
-    list: MeasurementList,
+    list: TrustedList,
 }
 
 impl World {
     fn new() -> World {
-        World { authority: Rc::new(Authority::new(0x21)), list: MeasurementList::parse(FIXTURE).unwrap() }
+        World { authority: Rc::new(Authority::new(0x21)), list: trusted_fixture() }
     }
 
     fn source(&self, measured: ghost_seal::measurements::Pcrs) -> AuthoritySource {
@@ -82,7 +99,7 @@ impl World {
     fn give_as(
         &self,
         measured: ghost_seal::measurements::Pcrs,
-        list: &MeasurementList,
+        list: &TrustedList,
         verifier: &dyn AttestationVerifier,
         request: &[u8],
         now: u64,
@@ -132,11 +149,12 @@ fn a_receiver_on_a_measurement_not_on_the_list_is_refused() {
     let world = World::new();
     let receiver = world.receiver(unlisted(), 1);
     assert_eq!(world.give(&receiver.request()).err(), Some(ShareRefused::ReceiverNotAllowed(MeasurementRefused::NotListed)));
-    // And with an empty list (the published list today), nobody gets M.
+    // And with only what the image compiles in (no build today), nobody but
+    // a copy of the giver's own build gets M.
     let receiver = world.receiver(allowed_new(), 1);
     let refused = world.give_as(
         allowed_old(),
-        &MeasurementList::empty(),
+        &TrustedList::compiled_in(),
         &world.authority.verifier(),
         &receiver.request(),
         NOW,
@@ -171,9 +189,12 @@ fn a_receiver_whose_pcr1_or_pcr2_differs_from_the_list_is_refused() {
 #[test]
 fn a_giver_not_on_the_list_is_refused_by_the_receiver() {
     let world = World::new();
-    // A rogue giver that lists itself; the receiver holds the published list.
+    // A rogue giver that lists itself under its own key; the receiver holds
+    // the list the release key signed.
     let rogue = FIXTURE.replace("\"builds\": [", &format!("\"builds\": [{},", rogue_entry()));
-    let rogue_list = MeasurementList::parse(&rogue).unwrap();
+    let rogue_key = TestOnlyReleaseKey::other();
+    let mut rogue_list = TrustedList::compiled_in();
+    rogue_list.install_signed(&rogue_key.sign(&rogue), &rogue_key.release_key()).unwrap();
     let receiver = world.receiver(allowed_new(), 1);
     let given = world.give_as(unlisted(), &rogue_list, &world.authority.verifier(), &receiver.request(), NOW).unwrap();
     assert_eq!(
@@ -203,6 +224,124 @@ fn a_revoked_or_unlisted_giver_does_not_give() {
         let refused = world.give_as(giver, &world.list, &world.authority.verifier(), &request, NOW);
         assert_eq!(refused.err(), Some(ShareRefused::GiverNotAllowed(why)));
     }
+}
+
+/// The host's own build: a valid enclave, on no list the giver trusts.
+fn host_entry() -> String {
+    format!(
+        r#"{{"name": "host-build", "released": "2026-11-02", "pcr0": "{}", "pcr1": "{}", "pcr2": "{}", "status": "allowed"}}"#,
+        "d1".repeat(48),
+        "b1".repeat(48),
+        "d2".repeat(48)
+    )
+}
+
+#[test]
+fn a_host_supplied_list_naming_an_extra_measurement_is_refused() {
+    let world = World::new();
+    let host_list = FIXTURE.replace("\"builds\": [", &format!("\"builds\": [{},", host_entry()));
+    let release = TestOnlyReleaseKey::new();
+    // The giver is offered the host's list unsigned, and signed by a key that
+    // is not the release key: both refused, and the held list is unchanged.
+    let mut giver_list = world.list.clone();
+    for offered in [host_list.clone(), TestOnlyReleaseKey::other().sign(&host_list)] {
+        assert!(matches!(giver_list.install_signed(&offered, &release.release_key()), Err(ListError::Signature(_))));
+    }
+    // So the host's build, with a perfectly good document, gets no M.
+    let receiver = world.receiver(unlisted(), 1);
+    let refused = world.give_as(allowed_old(), &giver_list, &world.authority.verifier(), &receiver.request(), NOW);
+    assert_eq!(refused.err(), Some(ShareRefused::ReceiverNotAllowed(MeasurementRefused::NotListed)));
+}
+
+#[test]
+fn a_handover_to_a_build_not_on_the_trusted_list_is_refused_even_with_a_valid_document() {
+    let world = World::new();
+    let receiver = world.receiver(unlisted(), 1);
+    let request = receiver.request();
+    // The receiver's document itself is good: right root, fresh, its key bound.
+    let document = &request[4 + KEM_KEY_BYTES + 4..];
+    let attested = world.authority.verifier().verify(document, NOW).expect("a valid document");
+    assert_eq!(attested.pcrs, unlisted());
+    // A giver trusting the signed list, or only itself, or both, refuses it.
+    let mut own_only = TrustedList::compiled_in();
+    own_only.trust_own_build(&mut world.source(allowed_old()), &world.authority.verifier(), NOW).unwrap();
+    let mut both = world.list.clone();
+    both.trust_own_build(&mut world.source(allowed_old()), &world.authority.verifier(), NOW).unwrap();
+    for list in [&world.list, &own_only, &both, &TrustedList::compiled_in()] {
+        let refused = world.give_as(allowed_old(), list, &world.authority.verifier(), &request, NOW);
+        assert_eq!(refused.err(), Some(ShareRefused::ReceiverNotAllowed(MeasurementRefused::NotListed)));
+    }
+}
+
+#[test]
+fn a_join_ignores_any_list_the_host_passes() {
+    let host_list = FIXTURE.replace("\"builds\": [", &format!("\"builds\": [{},", host_entry()));
+    let frame = [&[CONTROL_JOIN][..], host_list.as_bytes()].concat();
+    // The join start has no field for a list: whatever follows is dropped.
+    assert_eq!(ControlFrame::parse(&frame), Ok(ControlFrame::Join));
+    assert_eq!(ControlFrame::parse(&[CONTROL_JOIN]), Ok(ControlFrame::Join));
+    assert_eq!(ControlFrame::parse(&[CONTROL_JOIN, 0xff, 0xfe]), Ok(ControlFrame::Join));
+    // A genesis start or a later list hands its text to the signature check.
+    let genesis = [&[CONTROL_GENESIS][..], host_list.as_bytes()].concat();
+    assert_eq!(ControlFrame::parse(&genesis), Ok(ControlFrame::Genesis { signed_list: Some(host_list.as_str()) }));
+    assert_eq!(ControlFrame::parse(&[CONTROL_GENESIS]), Ok(ControlFrame::Genesis { signed_list: None }));
+    let later = [&[CONTROL_SIGNED_LIST][..], host_list.as_bytes()].concat();
+    assert_eq!(ControlFrame::parse(&later), Ok(ControlFrame::SignedList(host_list.as_str())));
+    for bad in [&[][..], &[0][..], &[4][..], &[CONTROL_SIGNED_LIST, 0xff][..]] {
+        assert!(ControlFrame::parse(bad).is_err());
+    }
+
+    // The joining enclave checks its giver against what it trusts itself:
+    // a giver on the host's list only is refused.
+    let world = World::new();
+    let mut joiner = TrustedList::compiled_in();
+    joiner.trust_own_build(&mut world.source(allowed_new()), &world.authority.verifier(), NOW).unwrap();
+    let receiver = world.receiver(allowed_new(), 1);
+    let host_trusted = trusted_list(&host_list);
+    let given = world.give_as(unlisted(), &host_trusted, &world.authority.verifier(), &receiver.request(), NOW).unwrap();
+    assert_eq!(
+        receiver.accept(&given.package, &world.authority.verifier(), &joiner, NOW).err(),
+        Some(ShareRefused::GiverNotAllowed(MeasurementRefused::NotListed))
+    );
+}
+
+#[test]
+fn a_copy_of_the_same_build_gets_m_with_no_list_at_all() {
+    let world = World::new();
+    let mut giver = TrustedList::compiled_in();
+    giver.trust_own_build(&mut world.source(allowed_old()), &world.authority.verifier(), NOW).unwrap();
+    let mut joiner = TrustedList::compiled_in();
+    joiner.trust_own_build(&mut world.source(allowed_old()), &world.authority.verifier(), NOW).unwrap();
+    let receiver = world.receiver(allowed_old(), 1);
+    let given = world.give_as(allowed_old(), &giver, &world.authority.verifier(), &receiver.request(), NOW).unwrap();
+    assert_eq!(given.receiver.name, OWN_BUILD_NAME);
+    let (received, from) = receiver.accept(&given.package, &world.authority.verifier(), &joiner, NOW).unwrap();
+    assert_eq!(from.name, OWN_BUILD_NAME);
+    assert!(same_m(&received, &master()));
+    // Another build is not a copy.
+    let other = world.receiver(allowed_new(), 2);
+    let refused = world.give_as(allowed_old(), &giver, &world.authority.verifier(), &other.request(), NOW);
+    assert_eq!(refused.err(), Some(ShareRefused::ReceiverNotAllowed(MeasurementRefused::NotListed)));
+}
+
+#[test]
+fn a_signed_list_that_revokes_the_givers_own_build_stops_it_giving() {
+    let world = World::new();
+    let mut giver = TrustedList::compiled_in();
+    giver.trust_own_build(&mut world.source(revoked()), &world.authority.verifier(), NOW).unwrap();
+    let receiver = world.receiver(revoked(), 1);
+    assert!(world.give_as(revoked(), &giver, &world.authority.verifier(), &receiver.request(), NOW).is_ok());
+    let release = TestOnlyReleaseKey::new();
+    giver.install_signed(&release.sign(FIXTURE), &release.release_key()).unwrap();
+    let receiver = world.receiver(revoked(), 2);
+    let refused = world.give_as(revoked(), &giver, &world.authority.verifier(), &receiver.request(), NOW);
+    assert_eq!(
+        refused.err(),
+        Some(ShareRefused::ReceiverNotAllowed(MeasurementRefused::Revoked { name: "seal-2026-09-01".into() }))
+    );
+    // A debug-mode enclave never trusts its own build.
+    let mut debug = TrustedList::compiled_in();
+    assert!(debug.trust_own_build(&mut world.source(pcrs(0, 0, 0)), &world.authority.verifier(), NOW).is_err());
 }
 
 #[test]
@@ -354,7 +493,7 @@ impl Clock for FixedClock {
 
 #[test]
 fn the_protocol_runs_with_any_verifier_and_source() {
-    let list = MeasurementList::parse(FIXTURE).unwrap();
+    let list = trusted_fixture();
     let verifier = FakeVerifier::new([3; 32]);
     let mut receiver_source = FakeSource::new([3; 32], allowed_new(), Box::new(FixedClock(NOW)));
     let receiver = Receiver::start(&mut receiver_source, &mut TestRandom::new(1)).unwrap();

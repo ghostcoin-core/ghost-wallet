@@ -2,6 +2,11 @@
 //! leaves an enclave: encrypted to another attested enclave on the
 //! published list.
 //!
+//! Both sides check the other's PCRs only against a [`TrustedList`]: the
+//! builds compiled into their own image, a list signed by the compiled-in
+//! release key, and their own attested build. A list the host writes is
+//! never one of them (see [`crate::measurements`]).
+//!
 //! 1. The receiving enclave makes a fresh ML-KEM-768 key pair and a fresh
 //!    32-byte nonce, and asks the NSM for a document whose `user_data` is
 //!    SHA3-256([`REQUEST_LABEL`] || its encapsulation key) and whose `nonce`
@@ -38,7 +43,7 @@ use ml_kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey, KeyEx
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::attestation::{AttestationError, AttestationRejected, AttestationSource, AttestationVerifier, AttestedDocument};
-use crate::measurements::{Build, MeasurementList, MeasurementRefused};
+use crate::measurements::{Build, MeasurementRefused, TrustedList};
 use crate::primitives::{aes256_cbc_decrypt, aes256_cbc_encrypt, ct_eq, hkdf_sha3_256, hmac_sha3_256, pad, sha3_256, unpad};
 use crate::release::{KEM_CIPHERTEXT_BYTES, PHONE_KEY_BYTES};
 use crate::secrets::MasterKey;
@@ -190,8 +195,9 @@ impl<'a> Package<'a> {
 pub struct GiverContext<'a> {
     /// Checks the receiver's document (the AWS chain in an enclave).
     pub verifier: &'a dyn AttestationVerifier,
-    /// The published list the receiver must be an allowed build of.
-    pub list: &'a MeasurementList,
+    /// The list the receiver must be an allowed build of: only what the
+    /// giving enclave trusts itself, never a list the host wrote.
+    pub list: &'a TrustedList,
     /// The giving enclave's own NSM.
     pub source: &'a mut dyn AttestationSource,
     /// Randomness for the encapsulation and the IV.
@@ -301,7 +307,7 @@ impl Receiver {
         self,
         package: &[u8],
         verifier: &dyn AttestationVerifier,
-        list: &MeasurementList,
+        list: &TrustedList,
         now_unix: u64,
     ) -> Result<(MasterKey, Build), ShareRefused> {
         let package = Package::parse(package)?;
@@ -325,6 +331,46 @@ impl Receiver {
         let plain = unpad(&plain).map_err(|_| ShareRefused::BadPackage)?;
         let mut bytes: [u8; 32] = plain.as_slice().try_into().map_err(|_| ShareRefused::BadPackage)?;
         Ok((MasterKey::take(&mut bytes), build))
+    }
+}
+
+/// Control frame: start as the first enclave.
+pub const CONTROL_GENESIS: u8 = 1;
+/// Control frame: start as a copy.
+pub const CONTROL_JOIN: u8 = 2;
+/// Control frame: a signed measurements list.
+pub const CONTROL_SIGNED_LIST: u8 = 3;
+
+/// A frame on the enclave's control port, from the parent host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlFrame<'a> {
+    /// Start as the first enclave and make M. A list sent with it is taken
+    /// only through [`TrustedList::install_signed`]: unsigned, it is refused.
+    Genesis {
+        /// The list text after the mode byte, if any.
+        signed_list: Option<&'a str>,
+    },
+    /// Start as a copy and get M from a running enclave. Whatever the host
+    /// sends after the mode byte is ignored: a joining enclave checks its
+    /// giver only against what it trusts itself.
+    Join,
+    /// A later list; taken only through [`TrustedList::install_signed`].
+    SignedList(&'a str),
+}
+
+impl<'a> ControlFrame<'a> {
+    /// Reads a control frame: one byte (1 genesis, 2 join, 3 signed list),
+    /// then, for 1 and 3, the list's JSON.
+    pub fn parse(frame: &'a [u8]) -> Result<ControlFrame<'a>, &'static str> {
+        let (&kind, rest) = frame.split_first().ok_or("an empty control frame")?;
+        let text = || core::str::from_utf8(rest).map_err(|_| "the list is not UTF-8");
+        match kind {
+            CONTROL_GENESIS if rest.is_empty() => Ok(ControlFrame::Genesis { signed_list: None }),
+            CONTROL_GENESIS => Ok(ControlFrame::Genesis { signed_list: Some(text()?) }),
+            CONTROL_JOIN => Ok(ControlFrame::Join),
+            CONTROL_SIGNED_LIST => Ok(ControlFrame::SignedList(text()?)),
+            _ => Err("an unknown control frame"),
+        }
     }
 }
 

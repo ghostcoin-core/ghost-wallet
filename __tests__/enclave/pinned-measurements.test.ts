@@ -106,6 +106,15 @@ describe('the pinned measurements', () => {
     expect(refused(list([entry()]))).toBe(false);
   });
 
+  it('reads a release signature on the published file, and refuses one that is not well formed', () => {
+    const signature = '5a'.repeat(3309);
+    const signed = parseMeasurementList(list([entry()], { signature }));
+    expect(signed).toEqual(parseMeasurementList(list([entry()])));
+    for (const bad of ['', signature.slice(2), signature.toUpperCase(), `${signature}00`, 1, null]) {
+      expect(refused(list([entry()], { signature: bad }))).toBe(true);
+    }
+  });
+
   it('refuses bad PCRs, names, dates and statuses', () => {
     for (const pcr0 of [hex('AB'), hex('a1').slice(2), `${hex('a1')}aa`, `${hex('a1').slice(2)}zz`, hex('00')]) {
       expect(refused(list([entry({ pcr0 })]))).toBe(true);

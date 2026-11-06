@@ -10,7 +10,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ghost_seal::proxy::{CloseReason, MemoryLog, Proxy, ProxyEvent, ProxyLimits, ProxyLog, UnixConnector};
+use std::collections::VecDeque;
+use std::io;
+use std::path::Path;
+
+use ghost_seal::key_share::{read_frame, write_frame};
+use ghost_seal::proxy::{
+    BoundedService, CloseReason, DeadlineStream, MemoryLog, Proxy, ProxyEvent, ProxyLimits, ProxyListener, ProxyLog,
+    ServiceLimits, ServiceStats, UnixConnector,
+};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -307,4 +315,180 @@ fn a_unix_stream_pair_relays_too() {
     assert_eq!(relay.join().unwrap(), CloseReason::UpstreamClosed);
     let mut rest = Vec::new();
     assert_eq!(a.read_to_end(&mut rest).unwrap(), 0);
+}
+
+// The enclave's service port: a fixed pool, a short queue, a time limit on
+// each whole connection.
+
+struct Service {
+    path: PathBuf,
+    stats: Arc<ServiceStats>,
+    /// The most requests worked on at once.
+    most_at_once: Arc<AtomicUsize>,
+}
+
+/// A stand-in for the enclave's service: answers each frame with
+/// `answer:` and the frame, after holding one shared lock for `work`, as the
+/// enclave holds its state through an attestation. The frame `panic` makes
+/// the handler panic.
+fn start_service(limits: ServiceLimits, work: Duration) -> Service {
+    let path = socket_path();
+    let service = BoundedService::new(UnixListener::bind(&path).unwrap(), limits);
+    let stats = service.stats();
+    let state = Arc::new(Mutex::new(()));
+    let working = Arc::new(AtomicUsize::new(0));
+    let most_at_once = Arc::new(AtomicUsize::new(0));
+    let most = most_at_once.clone();
+    thread::spawn(move || {
+        let handler = move |stream: &mut DeadlineStream<UnixStream>| {
+            while let Ok(frame) = read_frame(stream) {
+                if frame == b"panic" {
+                    panic!("a handler panics (test)");
+                }
+                most.fetch_max(working.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                {
+                    let _held = state.lock().unwrap_or_else(|e| e.into_inner());
+                    thread::sleep(work);
+                }
+                working.fetch_sub(1, Ordering::SeqCst);
+                if write_frame(stream, &[&b"answer:"[..], &frame].concat()).is_err() {
+                    break;
+                }
+            }
+        };
+        let _ = service.serve(handler, None);
+    });
+    Service { path, stats, most_at_once }
+}
+
+/// Asks once: `None` if the service closed the connection or did not answer
+/// within `wait`.
+fn ask(path: &Path, request: &[u8], wait: Duration) -> Option<Vec<u8>> {
+    let mut stream = UnixStream::connect(path).ok()?;
+    stream.set_read_timeout(Some(wait)).ok()?;
+    stream.set_write_timeout(Some(wait)).ok()?;
+    write_frame(&mut stream, request).ok()?;
+    read_frame(&mut stream).ok()
+}
+
+/// Asks again and again until answered, for at most `within`; the answer
+/// and how long it took.
+fn ask_until_answered(path: &Path, request: &[u8], within: Duration) -> Option<(Vec<u8>, Duration)> {
+    let started = Instant::now();
+    while started.elapsed() < within {
+        if let Some(answer) = ask(path, request, Duration::from_millis(500)) {
+            return Some((answer, started.elapsed()));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
+#[test]
+fn a_flood_of_disconnected_requests_is_bounded_and_the_service_keeps_answering() {
+    let limits = ServiceLimits { workers: 2, queue: 2, connection_time: Duration::from_secs(2) };
+    let service = start_service(limits, Duration::from_millis(20));
+    // 400 clients each send a whole request and hang up at once, far faster
+    // than the service can work (20 ms each, one at a time).
+    let flooders: Vec<_> = (0..4)
+        .map(|_| {
+            let path = service.path.clone();
+            thread::spawn(move || {
+                for _ in 0..100 {
+                    if let Ok(mut stream) = UnixStream::connect(&path) {
+                        let _ = write_frame(&mut stream, b"a request from a client that already left");
+                    }
+                }
+            })
+        })
+        .collect();
+    for flooder in flooders {
+        flooder.join().unwrap();
+    }
+    // A full queue turned connections away instead of piling up work.
+    let refused = service.stats.refused.load(Ordering::SeqCst);
+    let accepted = service.stats.accepted.load(Ordering::SeqCst);
+    assert!(refused > 0, "no connection was refused ({accepted} accepted)");
+    assert!(accepted < 400);
+    // And it still answers, soon: at most the pool and the queue were left to
+    // work through (400 queued requests would take 8 seconds).
+    let (answer, waited) =
+        ask_until_answered(&service.path, b"hello", Duration::from_secs(3)).expect("answered after the flood");
+    assert_eq!(answer, b"answer:hello");
+    assert!(waited < Duration::from_secs(2), "answered only after {waited:?}");
+    // Never more requests in hand at once than workers.
+    assert!(service.most_at_once.load(Ordering::SeqCst) <= 2);
+    assert_eq!(service.stats.handler_panics.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_connection_that_drips_bytes_is_cut_off_at_its_time_limit() {
+    let limits = ServiceLimits { workers: 1, queue: 1, connection_time: Duration::from_millis(400) };
+    let service = start_service(limits, Duration::ZERO);
+    // The header of a 1000-byte frame, then a byte every 50 ms: no single
+    // read ever waits long, so only a limit on the whole connection frees
+    // the one worker.
+    let mut slow = UnixStream::connect(&service.path).unwrap();
+    slow.write_all(&1000u32.to_be_bytes()).unwrap();
+    // Drips for up to 4 seconds; true once the service has closed it.
+    let drip = thread::spawn(move || {
+        for _ in 0..80 {
+            if slow.write_all(b"x").is_err() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    });
+    thread::sleep(Duration::from_millis(50));
+    let answered = ask_until_answered(&service.path, b"quick", Duration::from_secs(3));
+    let (answer, waited) = answered.expect("answered while the slow client still drips");
+    assert_eq!(answer, b"answer:quick");
+    assert!(waited < Duration::from_secs(2), "answered only after {waited:?}");
+    assert!(drip.join().unwrap(), "the service closed the slow connection");
+}
+
+#[test]
+fn a_handler_that_panics_does_not_stop_the_service() {
+    let limits = ServiceLimits { workers: 1, queue: 4, connection_time: Duration::from_secs(2) };
+    let service = start_service(limits, Duration::ZERO);
+    assert_eq!(ask(&service.path, b"panic", Duration::from_secs(2)), None);
+    let (answer, _) =
+        ask_until_answered(&service.path, b"after", Duration::from_secs(3)).expect("the one worker still serves");
+    assert_eq!(answer, b"answer:after");
+    assert_eq!(service.stats.handler_panics.load(Ordering::SeqCst), 1);
+}
+
+/// A listener that fails as a process out of file descriptors does, between
+/// the connections a test gives it.
+struct ScriptedListener(Mutex<VecDeque<io::Result<UnixStream>>>);
+
+impl ProxyListener for ScriptedListener {
+    type Stream = UnixStream;
+    fn accept_stream(&self) -> io::Result<UnixStream> {
+        let next = self.0.lock().unwrap().pop_front();
+        next.unwrap_or_else(|| Err(io::Error::from_raw_os_error(24)))
+    }
+}
+
+#[test]
+fn failed_accepts_never_stop_the_accept_loop() {
+    let (mut client, served) = UnixStream::pair().unwrap();
+    let mut script: VecDeque<io::Result<UnixStream>> = (0..5).map(|_| Err(io::Error::from_raw_os_error(24))).collect();
+    script.push_back(Ok(served));
+    let limits = ServiceLimits { workers: 1, queue: 1, connection_time: Duration::from_secs(2) };
+    let service = BoundedService::new(ScriptedListener(Mutex::new(script)), limits);
+    let stats = service.stats();
+    write_frame(&mut client, b"after five failed accepts").unwrap();
+    let echo = |stream: &mut DeadlineStream<UnixStream>| {
+        if let Ok(frame) = read_frame(stream) {
+            let _ = write_frame(stream, &frame);
+        }
+    };
+    // The loop ends only at the test's limit of 8 failures in a row.
+    assert!(service.serve(echo, Some(8)).is_err());
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    assert_eq!(read_frame(&mut client).unwrap(), b"after five failed accepts");
+    assert_eq!(stats.accept_failures.load(Ordering::SeqCst), 5 + 8);
+    assert_eq!(stats.accepted.load(Ordering::SeqCst), 1);
 }

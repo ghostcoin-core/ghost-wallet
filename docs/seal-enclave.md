@@ -70,6 +70,51 @@ duplicate JSON keys or trailing data. Both read the fixture
 Until the first build is published, the published list and the app's pinned
 list hold no build, and every Seal is refused.
 
+The published file also carries `"signature"`: the release key's ML-DSA-65
+signature (FIPS 204, context `ghost-seal measurements`) over
+`ghost-seal/v1/measurements/release` || the list's digest (SHA3-256 of the
+builds in canonical form, so JSON spacing does not matter), as 6618 lowercase
+hex digits. Both readers take the field and check that it is well formed; only
+the enclave verifies it (below). The release key's private half is made and
+kept offline by the release owner and is never in the repository, an image or
+a fixture; the tests sign with test-only keys made from fixed patterns in
+`seal/tests/fixtures/test_release_key.rs`. Until the release key exists the
+published file has no signature, and no enclave takes it.
+
+### The rule: an enclave enforces only a list it trusts itself
+
+The list a giving enclave checks a receiver's attested PCR0, PCR1 and PCR2
+against, and the list a joining enclave checks its giver against, never comes
+from the host or from another enclave. It is a `TrustedList`
+(`seal/src/measurements.rs`), made of exactly:
+
+1. **The builds compiled into its own image** (`COMPILED_BUILDS`, empty
+   today). The image's own PCRs cover them. An image cannot list itself or a
+   later build, so this holds earlier builds.
+2. **A list signed by the release key whose public key is compiled into its
+   image** (`RELEASE_KEY_HEX`, empty until the release key is made; with no
+   key, no signed list is taken). The host can carry such a list to the
+   enclave but cannot write one. A signed list replaces a held one only if it
+   extends it: every build held stays, with the same name, date and PCRs, and
+   every revoked build stays revoked. An older signed list cannot roll back a
+   newer one in a running enclave.
+3. **Its own build**, read from its own attestation document at start. A copy
+   of the very same image is the same code that already holds M, so regional
+   copies of one build need no list at all.
+
+A build that the compiled-in builds or the signed list mark `revoked` is
+refused, whatever else names it, including the enclave's own build. A list the
+host sends unsigned, or signed by any other key, is refused and changes
+nothing. A join start carries no list: anything the host sends after the join
+byte is ignored, and the joining enclave checks its giver against (1) and (3)
+only. A debug-mode enclave (zero PCRs) is never trusted, not even as its own
+build.
+
+So a host that starts a published image with a list naming its own build
+gets nothing: the list is refused, and the published image hands M only to a
+build in (1), (2) or (3), even when the host's build presents a perfectly
+valid attestation document.
+
 ## Attestation documents
 
 `seal/src/attestation.rs` checks Nitro attestation documents: COSE_Sign1 with
@@ -114,7 +159,8 @@ The enclave asks the Nitro Secure Module for its own documents through
    nonce. Request: `GKQ1` || encapsulation key (1184) || document length
    (u32 BE) || document.
 2. The giving enclave verifies the document and accepts it only when its
-   PCR0, PCR1 and PCR2 are one allowed build of its list and it binds the key.
+   PCR0, PCR1 and PCR2 are one allowed build of its trusted list (see the rule
+   above) and it binds the key.
    It encapsulates to the key and gets its own document: `user_data` =
    SHA3-256(`ghost-seal/v1/key-share/package` || the receiver document's hash
    || nonce || KEM ciphertext), `nonce` = the receiver's nonce. It checks that
@@ -140,8 +186,10 @@ for; a receiver takes one package and is used up.
 ### Upgrades
 
 A new build gets M the same way as a new region: once its PCRs are published
-in `enclave/measurements.json` and the list given to the running enclaves
-names it as allowed. The app pins the list of builds it accepts.
+in `enclave/measurements.json`, the release owner has signed that list
+offline, and the running enclaves have been given the signed list
+(`seal_proxy list`). A new build compiles the builds it may take M from into
+`COMPILED_BUILDS`. The app pins the list of builds it accepts.
 
 ## Attestation for phones (`seal/src/phone_attestation.rs`)
 
@@ -165,17 +213,36 @@ limits open connections (256 by default), closes a connection idle for its
 idle timeout (120 seconds by default), and when either side closes, closes the
 other. Everything it carries is encrypted end to end to the enclave (TLS, a
 key-share request or package). `seal_proxy start` sends the enclave its one
-start frame.
+start frame (the mode alone) and then offers it the list file; `seal_proxy
+list` offers a later one. The enclave takes a list only if it is signed by
+its release key.
 
 ## Enclave program protocol
 
 Frames are a u32 big-endian length and the bytes (at most 64 KiB). Control
-port: one start frame, mode (1 genesis, 2 join) || the list JSON; the answer
-is a status text; a second start is refused, so an enclave whose join failed
-stays without M until it is restarted. Service port: kind (1 key-share
+port: a start frame, 1 (genesis) optionally followed by a signed list, or 2
+(join; anything after it is ignored); after the start, 3 || a signed list.
+The answer is a status text. A second start is refused, so an enclave whose
+join failed stays without M until it is restarted; a list that is not signed
+by the compiled-in release key is refused. Service port: kind (1 key-share
 request, 2 phone attestation with a 32-byte challenge) || body; the answer is
 0 || body, or 1 || why it was refused. Before it holds M, the enclave refuses
 every service request.
+
+### Bounded service
+
+The service port runs on a fixed pool of 4 worker threads, all started at
+once; no thread is made per connection. Accepted connections wait in a queue
+of 8; a connection that finds the queue full is closed at once. Each
+connection has 30 seconds in all from the moment it is accepted, the queue
+included; every read and write waits at most until then, however slowly the
+bytes come, and a connection whose time ran out in the queue is closed unread.
+So clients that send a whole request and hang up, or drip bytes, can occupy
+at most the pool and the queue. A failed accept (out of file descriptors, say)
+waits a moment and goes on; no thread or resource failure panics the accept
+loop, and a handler that panics leaves its worker running. The parent proxy
+likewise closes a connection it has no thread for instead of panicking. The
+handover a joining enclave makes has 60 seconds in all.
 
 Serving Check, Fill and Open to phones from the enclave (TLS ended inside the
 enclave) is a later step.
@@ -184,19 +251,24 @@ enclave) is a later step.
 
 - **AWS Nitro**: the enclave's isolation and the NSM's attestation, signed
   under the pinned AWS root.
-- **The list a running enclave enforces.** An enclave image cannot hold the
-  measurements of builds made after it, so the list comes in the start frame
-  from the host, which takes it from the published list at a pinned SHA-256
-  (a stack parameter). Whoever deploys the stacks is trusted to give only the
-  published list; a list naming a build that is not published would let that
-  build receive M. The list's SHA-256 is in each stack's parameters, so every
-  start can be checked against the repository afterwards.
+- **The release key.** Whoever holds the release key's private half (offline)
+  decides which later builds may receive M. The host and whoever deploys the
+  stacks do not: the list they carry counts only with the release signature.
+  Revocation reaches a running enclave when it is given the signed list that
+  carries it; a host can delay that by not delivering it, and a freshly
+  started enclave can be offered an older signed list (from before a
+  revocation) that extends what it compiles in. Keep revoked builds from
+  running, and start replacements from an image that compiles the revocation
+  in.
 - **The published code**: anyone can rebuild it and must get the published
   PCRs.
 
 ## Not yet done
 
 The live deploy and the first real M (they need an AWS account), the first
-real PCR values (they need a Nitro-capable builder), the reproducibility check
+real PCR values (they need a Nitro-capable builder), the release key (made
+offline by the release owner; its public half goes into `RELEASE_KEY_HEX`
+before the first image is built, and its signature into
+`enclave/measurements.json` each time a build is published), the reproducibility check
 in CI, the enclave serving phones, and the app's check of the phone
 attestation.

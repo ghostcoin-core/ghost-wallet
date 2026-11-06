@@ -10,6 +10,11 @@
 // A Seal is accepted only when its PCR0, PCR1 and PCR2 all equal one allowed
 // build's. A revoked build is never accepted. The list is empty until the
 // first build is published, and an empty list refuses every Seal.
+//
+// The published file may also carry "signature": the release key's ML-DSA-65
+// signature over its builds (6618 lowercase hex digits), which the enclaves
+// check before they trust a list. The app's list is trusted because it ships
+// in the app, so this reader checks only that a signature is well formed.
 
 /** The format version this reader accepts. */
 export const MEASUREMENTS_VERSION = 1;
@@ -52,7 +57,11 @@ export class MeasurementListError extends Error {
   }
 }
 
+/** An ML-DSA-65 signature's length in bytes. */
+export const RELEASE_SIGNATURE_BYTES = 3309;
+
 const PCR = /^[0-9a-f]{96}$/;
+const SIGNATURE = new RegExp(`^[0-9a-f]{${2 * RELEASE_SIGNATURE_BYTES}}$`);
 const ZERO_PCR = /^0+$/;
 const NAME = /^[A-Za-z0-9._-]+$/;
 
@@ -202,9 +211,9 @@ function object(value: Json, what: string): Map<string, Json> {
   return value;
 }
 
-function onlyKeys(fields: Map<string, Json>, keys: readonly string[], what: string) {
+function onlyKeys(fields: Map<string, Json>, keys: readonly string[], what: string, optional: readonly string[] = []) {
   for (const key of fields.keys()) {
-    if (!keys.includes(key)) {
+    if (!keys.includes(key) && !optional.includes(key)) {
       throw new MeasurementListError(`${what} has an unknown field ${JSON.stringify(key)}`);
     }
   }
@@ -265,7 +274,13 @@ function readBuild(entry: Json, index: number): PublishedBuild {
 /** Reads a list in the published format; throws `MeasurementListError` on anything else. */
 export function parseMeasurementList(json: string): MeasurementList {
   const top = object(readJson(json), 'the list');
-  onlyKeys(top, ['version', 'builds'], 'the list');
+  onlyKeys(top, ['version', 'builds'], 'the list', ['signature']);
+  if (top.has('signature')) {
+    const signature = top.get('signature');
+    if (typeof signature !== 'string' || !SIGNATURE.test(signature)) {
+      throw new MeasurementListError(`signature is not ${2 * RELEASE_SIGNATURE_BYTES} lowercase hex digits`);
+    }
+  }
   const version = top.get('version');
   if (version === null || typeof version !== 'object' || !('number' in version) || version.number !== '1') {
     throw new MeasurementListError(`version is not ${MEASUREMENTS_VERSION}`);
