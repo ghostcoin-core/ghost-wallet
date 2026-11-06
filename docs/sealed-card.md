@@ -87,7 +87,8 @@ the waiting one is paid.
 1. Read the version of key 1: the generation of the check key.
 2. AuthenticateEV2First with key 1, then GetCardUID.
 3. Read the header frame only. The key slot is never read.
-4. Answer the state, the coin and the amount, signed over the phone's
+4. Answer the state, the coin, the amount and the Open PIN status (whether
+   an Open needs a PIN, and the tries left), signed over the phone's
    challenge. While an Open is journaled the answer is **Opening** (or
    **Opened** once the key was released), whatever the card still says.
 5. A Sealed card whose Open PIN has no tries left can never be opened, so it
@@ -143,6 +144,10 @@ is refused.
   and the card's keys rotated before the key is released.
 - **The answer comes from the right code.** It carries the Seal's code
   measurement, which the phone compares with the one it pins.
+- **Nothing stands between the receiver and the coin unseen.** Every answer
+  says, under its signature, whether an Open needs a PIN and how many tries
+  are left, so a sender cannot pass on a PIN-protected card while keeping the
+  PIN; a card whose PIN tries are used up is never answered Sealed.
 
 ## What is still trusted
 
@@ -272,7 +277,7 @@ and never reads it as a state.
 
 ## Signed answers
 
-Every Check, Fill and Open answer is these 201 bytes, signed with ML-DSA-65
+Every Check, Fill and Open answer is these 203 bytes, signed with ML-DSA-65
 (FIPS 204, deterministic signing, context string `ghost-seal answer`) under
 a key whose seed is HKDF(M) with the label
 `ghost-seal/v1/answer-signing-key`. Integers are big endian.
@@ -290,11 +295,20 @@ a key whose seed is HKDF(M) with the label
 | 145 | 16 | amount in wei (0 when Empty) |
 | 161 | 8 | expiry, seconds since the Unix epoch |
 | 169 | 32 | binding: SHA3-256 of the commit data (Fill), of the release package (Open), zeros (Check) |
+| 201 | 1 | Open PIN: 0 none, 1 an Open of this card needs its PIN |
+| 202 | 1 | Open PIN tries left (0 without a PIN) |
 
 A phone accepts an answer only when the signature verifies under the pinned
 Seal key, the measurement is the pinned one, the challenge is the one it
 just sent, the UID is the card it tapped and the expiry has not passed.
 Answers live 120 seconds.
+
+A receiver accepts a Sealed card as payment only if it can redeem it: when
+the answer says an Open needs a PIN, the receiver must have been given that
+PIN (and the answer shows how many tries are left); otherwise the card is not
+safe to accept. The PIN status is inside the signature, so a relay cannot
+hide it. An answer about a card with a journaled Open carries no PIN status:
+that Open is bound to its phone key and no PIN stands before the key.
 
 ## Open release
 

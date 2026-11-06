@@ -131,6 +131,88 @@ fn a_wrong_pin_hits_the_retry_limit() {
 }
 
 #[test]
+fn check_tells_a_receiver_the_card_needs_a_pin_it_was_not_given() {
+    // The sender fills and funds a card with a PIN and keeps the PIN.
+    let mut sealed = sealed_card(Some("4831"));
+    let mut s = seal(&sealed.journal, &sealed.clock, 1);
+    let verifier = AnswerVerifier::new(&s.answer_verifying_key(), MEASUREMENT).unwrap();
+    let now = sealed.clock.0.get();
+
+    // The receiver's Check: Sealed, and signed as needing a PIN with every try left.
+    let challenge = [0xf1; 32];
+    let answer = s.check(&mut sealed.card, &CheckRequest { uid: UID, challenge }).unwrap();
+    let body = verifier.verify(&answer.bytes, &answer.signature, &challenge, &UID, now).unwrap();
+    assert_eq!(body.state, CardState::Sealed);
+    assert!(body.pin_required);
+    assert_eq!(body.pin_tries_left, PIN_TRIES);
+    assert!(!body.opens_without_pin(), "a receiver without the PIN must see it cannot redeem this card");
+
+    // That is exactly what an Open without the PIN finds.
+    let phone = phone(0x77);
+    assert_eq!(s.open(&mut sealed.card, &open_with(None, phone.public_key())).err(), Some(SealError::PinRequired));
+
+    // A relay cannot hide the PIN flag or the tries: the signature fails.
+    for (offset, value) in [(201usize, 0u8), (202, 0), (202, PIN_TRIES + 1)] {
+        let mut edited = answer.bytes.clone();
+        edited[offset] = value;
+        if offset == 201 {
+            edited[202] = 0;
+        }
+        assert_eq!(
+            verifier.verify(&edited, &answer.signature, &challenge, &UID, now),
+            Err(AnswerRejected::BadSignature),
+            "byte {offset}"
+        );
+    }
+
+    // Wrong guesses show in the next answer.
+    for _ in 0..2 {
+        assert!(matches!(s.open(&mut sealed.card, &open_with(Some("0000"), phone.public_key())), Err(SealError::WrongPin { .. })));
+    }
+    let later = s.check(&mut sealed.card, &CheckRequest { uid: UID, challenge: [0xf2; 32] }).unwrap();
+    assert!(later.body.pin_required);
+    assert_eq!(later.body.pin_tries_left, PIN_TRIES - 2);
+}
+
+#[test]
+fn every_answer_carries_the_pin_status() {
+    // Without a PIN: every answer says so.
+    let mut plain = sealed_card(None);
+    let mut s = seal(&plain.journal, &plain.clock, 1);
+    let checked = s.check(&mut plain.card, &CheckRequest { uid: UID, challenge: [0xf3; 32] }).unwrap();
+    assert!(checked.body.opens_without_pin());
+    assert_eq!(checked.body.pin_tries_left, 0);
+    let opened = s.open(&mut plain.card, &open_with(None, phone(0x78).public_key())).unwrap();
+    assert!(!opened.answer.body.pin_required);
+
+    // With a PIN: the Fill and its confirmation say so too.
+    let journal = ghost_seal::MemoryJournal::new();
+    let clock = support::TestClock::new();
+    let mut card = support::SimCard::set_up(UID);
+    let mut s = seal(&journal, &clock, 2);
+    let filled = s
+        .fill(
+            &mut card,
+            &ghost_seal::FillRequest {
+                uid: UID,
+                challenge: [0xf4; 32],
+                amount_wei: support::AMOUNT,
+                pin: Some(Pin::new("4831").unwrap()),
+            },
+            &mut support::StubMaker::default(),
+        )
+        .unwrap();
+    assert!(filled.answer.body.pin_required);
+    assert_eq!(filled.answer.body.pin_tries_left, PIN_TRIES);
+    let chain = support::StubChain::default();
+    chain.pay(&filled.commit_data, support::AMOUNT);
+    let confirmed = s.confirm_fill(&mut card, &CheckRequest { uid: UID, challenge: [0xf5; 32] }, &chain).unwrap();
+    assert_eq!(confirmed.body.state, CardState::Sealed);
+    assert!(confirmed.body.pin_required);
+    assert_eq!(confirmed.body.pin_tries_left, PIN_TRIES);
+}
+
+#[test]
 fn a_pin_locked_card_never_gets_a_fresh_sealed_answer() {
     let mut sealed = sealed_card(Some("4831"));
     let phone = phone(0x75);

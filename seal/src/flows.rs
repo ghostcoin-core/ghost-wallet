@@ -57,6 +57,25 @@ pub fn record_file_settings() -> [u8; 3] {
     [comm_mode::FULL, rights[0], rights[1]]
 }
 
+/// The Open PIN status every answer carries, so a receiver sees before
+/// accepting whether redeeming the card needs a PIN it was not given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PinStatus {
+    required: bool,
+    tries_left: u8,
+}
+
+impl PinStatus {
+    const NONE: PinStatus = PinStatus { required: false, tries_left: 0 };
+
+    fn of(header: &Header) -> PinStatus {
+        match header.pin_hash {
+            Some(_) => PinStatus { required: true, tries_left: header.pin_tries_left },
+            None => PinStatus::NONE,
+        }
+    }
+}
+
 /// A Sealed card whose Open PIN tries are used up can never be opened: no
 /// answer may call it Sealed.
 fn refuse_pin_locked(header: &Header) -> Result<(), SealError> {
@@ -180,8 +199,11 @@ impl Seal {
         state: CardState,
         amount_wei: u128,
         binding: [u8; 32],
+        pin: PinStatus,
     ) -> Result<SignedAnswer, SealError> {
         self.signer.sign(AnswerBody {
+            pin_required: pin.required,
+            pin_tries_left: pin.tries_left,
             kind,
             challenge: *challenge,
             uid: *uid,
@@ -317,7 +339,10 @@ impl Seal {
                 (header.state, header.coin, header.amount_wei)
             }
         };
-        self.answer(AnswerKind::Check, &request.challenge, &uid, header.generation, coin, state, amount, [0u8; 32])
+        // A pending or finished Open is bound to its phone key: no PIN stands
+        // between it and the key any more.
+        let pin = if pending.is_some() { PinStatus::NONE } else { PinStatus::of(&header) };
+        self.answer(AnswerKind::Check, &request.challenge, &uid, header.generation, coin, state, amount, [0u8; 32], pin)
     }
 
     // -----------------------------------------------------------------------
@@ -379,6 +404,7 @@ impl Seal {
                         CardState::Empty,
                         pending.amount_wei,
                         pending.coin,
+                        PinStatus::of(&header),
                     )?;
                     return Ok(FillOutcome { commit_data: pending.commit_data, amount_wei: pending.amount_wei, answer });
                 }
@@ -421,6 +447,7 @@ impl Seal {
             CardState::Empty,
             request.amount_wei,
             coin,
+            PinStatus::of(&filled),
         )?;
         Ok(FillOutcome { commit_data: made.commit_data, amount_wei: request.amount_wei, answer })
     }
@@ -453,6 +480,7 @@ impl Seal {
                     CardState::Sealed,
                     header.amount_wei,
                     header.coin,
+                    PinStatus::of(&header),
                 );
             }
             CardState::Empty if header.key_present => {}
@@ -480,6 +508,7 @@ impl Seal {
             CardState::Sealed,
             sealed.amount_wei,
             sealed.coin,
+            PinStatus::of(&sealed),
         )
     }
 
@@ -599,6 +628,7 @@ impl Seal {
             CardState::Opened,
             entry.amount_wei,
             binding,
+            PinStatus::NONE,
         )?;
         Ok(OpenOutcome { release, answer })
     }
