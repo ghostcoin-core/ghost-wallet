@@ -27,13 +27,62 @@ jq) for `compute-pcrs.sh`. Expect roughly $200 to $400 a month for 2 to 3 hosts.
 
 ## Release key (once, before the first image)
 
-The release owner makes an ML-DSA-65 (FIPS 204) key pair on an offline
-machine and keeps the private half there. Its public half (1952 bytes, as
-lowercase hex) goes into `RELEASE_KEY_HEX` in `seal/src/measurements.rs`;
-every image built after that trusts lists it signs. A signature is over
+The release key is an ML-DSA-65 (FIPS 204) key pair. Its private half (a
+32-byte seed) lives only on an offline machine: a computer with no network
+(wifi and bluetooth off, no cable) that is used for nothing else. Its public
+half (1952 bytes, 3904 lowercase hex digits) is compiled into every image as
+`RELEASE_KEY_HEX` in `seal/src/measurements.rs`. A signature is over
 `ghost-seal/v1/measurements/release` || the list's digest
 (`MeasurementList::signing_message`), with context `ghost-seal measurements`,
-written into the list as `"signature": "<6618 hex>"`.
+written into the list as `"signature": "<6618 hex>"`. The tool
+`tools/seal-release-key` makes the key and writes that signature; it never
+opens a socket and never prints the private half.
+
+### Make the key (once)
+
+1. On the networked builder, at a commit on `main`:
+   `cargo build --release --locked --manifest-path tools/seal-release-key/Cargo.toml`.
+   The binary is `tools/seal-release-key/target/release/seal-release-key`.
+   Note its SHA-256: `sha256sum tools/seal-release-key/target/release/seal-release-key`.
+2. Copy only that binary to the offline machine (a freshly formatted USB
+   stick that carries nothing else). The offline machine runs the same OS
+   and CPU architecture as the builder. On the offline machine, check the
+   SHA-256 matches the one from step 1; stop if it does not.
+3. On the offline machine:
+   `./seal-release-key keygen --out release.key`. It writes the private half
+   to `release.key` (mode 0600; it refuses a file that already exists) and
+   prints only the public half: 3904 lowercase hex digits.
+4. Keep `release.key` on the offline machine. Never copy it anywhere else.
+5. Carry back only the public hex: write it down, or copy only that text to
+   the USB stick (`./seal-release-key keygen --out release.key > release.pub`
+   does both at once), and check it reads back the same.
+6. Back on a networked machine, a one-line change puts the public hex into
+   `RELEASE_KEY_HEX` in `seal/src/measurements.rs`, reviewed like any other
+   change. Every image built after that trusts the lists the key signs.
+
+### Sign a list (each publish)
+
+1. Bring the list to sign (`enclave/measurements.json` at a commit on
+   `main`) and the public hex to the offline machine.
+2. On the offline machine:
+   `./seal-release-key sign measurements.json --key release.key --out measurements.signed.json`.
+   It refuses a key file that group or others can read (`chmod 600 release.key`),
+   reads the list strictly, drops any old signature and writes the list in
+   one layout with its new `"signature"`. It never overwrites an existing
+   output unless given `--force`.
+3. Still offline:
+   `./seal-release-key verify measurements.signed.json --public release.pub`
+   (or the hex itself after `--public`). It exits 0 and prints `ok: ...`
+   only when the list is signed and the signature verifies; anything else
+   prints one line and exits non-zero.
+4. Carry back only `measurements.signed.json`, commit it as
+   `enclave/measurements.json`, and run `verify` once more on the builder
+   with the public hex.
+
+The private half is never on a networked machine, in the repository, in an
+image or in a fixture; the tests' keys are test-only keys made in the tests.
+If the offline machine or `release.key` is lost, no new list can be signed:
+the images trust only the key compiled into them.
 
 ## Publish a build
 
