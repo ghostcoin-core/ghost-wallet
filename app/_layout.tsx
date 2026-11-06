@@ -35,6 +35,9 @@ function GuardedStack() {
         <Stack.Screen name="vanish" />
         <Stack.Screen name="summon" />
         <Stack.Screen name="wipe-card" />
+        <Stack.Screen name="check-card" />
+        <Stack.Screen name="fill-card" />
+        <Stack.Screen name="open-card" />
       </Stack.Protected>
       <Stack.Protected guard={open.developer}>
         <Stack.Screen name="bench" options={{ contentStyle: { backgroundColor: '#0A0A12' } }} />

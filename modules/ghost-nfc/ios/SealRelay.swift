@@ -1,14 +1,18 @@
 // The Seal relay (docs/seal-relay.md): the phone carries the Seal's card
 // traffic. It opens the NFC session (TagReader) and a connection to the Seal
-// (URLSession), starts a Check with the card's UID and a fresh 32-byte
-// challenge, then passes each command from the Seal to the card and each
-// answer from the card back to the Seal, as opaque bytes, until the Seal's
-// signed answer comes back.
+// (URLSession), starts a Check, a Fill, a Fill's confirmation or an Open
+// with the card's UID and a fresh 32-byte challenge, then passes each command
+// from the Seal to the card and each answer from the card back to the Seal,
+// as opaque bytes, until the Seal's signed answer comes back.
 //
 // It never decrypts the traffic and holds no card key: the card's secure
 // messaging runs between the chip and the Seal. Nothing here hands the
 // traffic to JavaScript either: the only result is the card's UID, the
-// challenge, the Seal's signed answer and the time of each round trip.
+// challenge, the Seal's signed answer, the time of each round trip and, for
+// a Fill, the coin's public commit data. An Open's release package (the
+// card's key, encrypted to the native core's phone key) goes straight to the
+// native core (ghost_wallet_seal_open_take_release), never to JavaScript.
+// An Open PIN is sent to the Seal in the start request only and kept nowhere.
 import ExpoModulesCore
 import Foundation
 import Security
@@ -34,18 +38,123 @@ final class SealRefusedException: GenericException<String> {
 }
 
 final class SealBadAnswerException: Exception {
-  override var reason: String { "The Seal's answer is not a Check of this card." }
+  override var reason: String { "The Seal's answer is not an answer of this flow about this card." }
+}
+
+final class SealNotGhostCardException: Exception {
+  override var reason: String { "Not a Ghost card." }
+}
+
+final class SealFillingException: Exception {
+  override var reason: String { "The card is filling, waiting for its payment to settle." }
+}
+
+final class SealCantCheckException: Exception {
+  override var reason: String { "The Seal cannot check the chain right now." }
+}
+
+final class SealPinRequiredException: Exception {
+  override var reason: String { "This card needs its PIN to open." }
+}
+
+final class SealWrongPinException: Exception {
+  override var reason: String { "Wrong PIN." }
+}
+
+final class SealPinLockedException: Exception {
+  override var reason: String { "This card is locked: its PIN has no tries left." }
+}
+
+final class SealSpentException: Exception {
+  override var reason: String { "This card was emptied." }
+}
+
+final class SealWrongStateException: Exception {
+  override var reason: String { "This card cannot do that now." }
+}
+
+final class SealFillPendingException: Exception {
+  override var reason: String { "This card is already being filled with another amount or PIN." }
 }
 
 final class SealRelay {
   /// The signed answer's layout (seal/src/answer.rs).
   private static let answerDomain = Data("ghost-seal/v1/answer".utf8)
   private static let answerBytes = 203
-  private static let kindCheck: UInt8 = 1
-  /// A Check is about seven card round trips; anything far past that is not a Check.
-  private static let maxSteps = 32
+  /// A coin's commit data (core/src/vanish.rs).
+  private static let commitDataBytes = 430
+  /// The longest release package (core/src/seal_open.rs).
+  private static let maxReleaseBytes = 1220
   /// Stay inside the iOS NFC session limit of 60 seconds.
   private static let maxSeconds = 50.0
+
+  /// What the relay runs: its start path, its answer kind and how many card round trips it may take.
+  enum Flow {
+    case check
+    case fill(amountWei: String, pin: String)
+    case fillConfirm
+    case open(phoneKey: String, pin: String)
+
+    var path: String {
+      switch self {
+      case .check: return "v1/check/start"
+      case .fill: return "v1/fill/start"
+      case .fillConfirm: return "v1/fill/confirm"
+      case .open: return "v1/open/start"
+      }
+    }
+
+    /// 1 Check, 2 Fill (and its confirmation), 3 Open.
+    var kind: UInt8 {
+      switch self {
+      case .check: return 1
+      case .fill, .fillConfirm: return 2
+      case .open: return 3
+      }
+    }
+
+    /// A Check is about seven card round trips; an Open rotates five keys and
+    /// authenticates with each new one. Anything far past that is refused.
+    var maxSteps: Int {
+      switch self {
+      case .check: return 32
+      case .fill, .fillConfirm: return 64
+      case .open: return 160
+      }
+    }
+
+    var working: String {
+      switch self {
+      case .check: return "Checking the card with the Seal…"
+      case .fill: return "Filling the card with the Seal…"
+      case .fillConfirm: return "Checking the card's payment with the Seal…"
+      case .open: return "Opening the card with the Seal…"
+      }
+    }
+
+    var done: String {
+      switch self {
+      case .check, .fillConfirm: return "Card checked."
+      case .fill: return "The card holds a new key."
+      case .open: return "Card opened."
+      }
+    }
+
+    func startBody(uid: Data, challenge: Data) -> [String: String] {
+      var body = ["uid": SealRelay.hex(uid), "challenge": SealRelay.hex(challenge)]
+      switch self {
+      case .check, .fillConfirm:
+        break
+      case let .fill(amountWei, pin):
+        body["amountWei"] = amountWei
+        if !pin.isEmpty { body["pin"] = pin }
+      case let .open(phoneKey, pin):
+        body["phoneKey"] = phoneKey
+        if !pin.isEmpty { body["pin"] = pin }
+      }
+      return body
+    }
+  }
 
   private let reader: TagReader
   private let queue = DispatchQueue(label: "com.ghostcoin.wallet.seal-relay")
@@ -66,6 +175,11 @@ final class SealRelay {
 
   /// Runs one Check through the Seal at `sealUrl` on the next card tapped.
   func check(sealUrl: String, alert: String, promise: Promise) {
+    run(.check, sealUrl: sealUrl, alert: alert, promise: promise)
+  }
+
+  /// Runs `flow` through the Seal at `sealUrl` on the next card tapped.
+  func run(_ flow: Flow, sealUrl: String, alert: String, promise: Promise) {
     queue.async {
       guard let base = Self.baseUrl(sealUrl) else {
         promise.reject(SealAddressException())
@@ -80,7 +194,7 @@ final class SealRelay {
         return
       }
       self.running = true
-      let run = Run(base: base, challenge: challenge, promise: promise)
+      let run = Run(flow: flow, base: base, challenge: challenge, promise: promise)
       self.reader.begin(alert: alert) { result in
         self.queue.async {
           switch result {
@@ -89,8 +203,8 @@ final class SealRelay {
           case let .success(uid):
             run.uid = uid
             run.started = DispatchTime.now().uptimeNanoseconds
-            self.reader.update(alert: "Checking the card with the Seal…")
-            self.post(run, path: "v1/check/start", body: ["uid": Self.hex(uid), "challenge": Self.hex(challenge)])
+            self.reader.update(alert: flow.working)
+            self.post(run, path: flow.path, body: flow.startBody(uid: uid, challenge: challenge))
           }
         }
       }
@@ -100,6 +214,7 @@ final class SealRelay {
   // MARK: The relay loop (on `queue`)
 
   private final class Run {
+    let flow: Flow
     let base: URL
     let challenge: Data
     let promise: Promise
@@ -109,7 +224,8 @@ final class SealRelay {
     var steps = 0
     var rounds: [[String: Any]] = []
 
-    init(base: URL, challenge: Data, promise: Promise) {
+    init(flow: Flow, base: URL, challenge: Data, promise: Promise) {
+      self.flow = flow
       self.base = base
       self.challenge = challenge
       self.promise = promise
@@ -150,7 +266,7 @@ final class SealRelay {
     switch fields["status"] as? String {
     case "apdu":
       run.steps += 1
-      guard run.steps <= Self.maxSteps, let session = fields["session"] as? String,
+      guard run.steps <= run.flow.maxSteps, let session = fields["session"] as? String,
             let command = (fields["apdu"] as? String).flatMap(Self.bytes)
       else {
         finish(run, error: SealBadAnswerException())
@@ -172,12 +288,12 @@ final class SealRelay {
     case "done":
       guard let answer = (fields["answer"] as? String).flatMap(Self.bytes),
             let signature = (fields["signature"] as? String).flatMap(Self.bytes),
-            Self.isCheck(answer, challenge: run.challenge, uid: run.uid)
+            Self.isAnswer(answer, kind: run.flow.kind, challenge: run.challenge, uid: run.uid)
       else {
         finish(run, error: SealBadAnswerException())
         return
       }
-      let result: [String: Any] = [
+      var result: [String: Any] = [
         "uid": Self.hex(run.uid),
         "challenge": Self.hex(run.challenge),
         "answer": Self.hex(answer),
@@ -185,7 +301,35 @@ final class SealRelay {
         "rounds": run.rounds,
         "totalMs": run.elapsedMs,
       ]
-      reader.end(alert: "Card checked.", error: nil)
+      switch run.flow {
+      case .fill:
+        guard let commitData = (fields["commitData"] as? String).flatMap(Self.bytes),
+              commitData.count == Self.commitDataBytes
+        else {
+          finish(run, error: SealBadAnswerException())
+          return
+        }
+        result["commitData"] = Self.hex(commitData)
+      case .open:
+        // The release goes to the native core only; it is wiped here once handed over.
+        guard var release = (fields["release"] as? String).flatMap(Self.bytes),
+              release.count <= Self.maxReleaseBytes
+        else {
+          finish(run, error: SealBadAnswerException())
+          return
+        }
+        let held = release.withUnsafeBytes { bytes in
+          ghost_wallet_seal_open_take_release(bytes.bindMemory(to: UInt8.self).baseAddress, UInt(bytes.count))
+        }
+        CardCrypto.wipe(&release)
+        guard held == 0 else {
+          finish(run, error: SealBadAnswerException())
+          return
+        }
+      case .check, .fillConfirm:
+        break
+      }
+      reader.end(alert: run.flow.done, error: nil)
       running = false
       run.promise.resolve(result)
     default:
@@ -213,18 +357,20 @@ final class SealRelay {
 
   // MARK: Helpers
 
-  /// Whether `answer` is a Check answer over this challenge about this card.
-  /// The state and amount are read from these signed bytes, never from
-  /// unsigned fields; the signature itself is checked by the Check screen.
-  private static func isCheck(_ answer: Data, challenge: Data, uid: Data) -> Bool {
+  /// Whether `answer` is an answer of `kind` over this challenge about this
+  /// card. The state and amount are read from these signed bytes, never from
+  /// unsigned fields; the signature itself is checked by the native core.
+  private static func isAnswer(_ answer: Data, kind: UInt8, challenge: Data, uid: Data) -> Bool {
     let bytes = [UInt8](answer)
     guard bytes.count == answerBytes, uid.count == 7 else { return false }
     return Data(bytes[0..<20]) == answerDomain
-      && bytes[20] == kindCheck
+      && bytes[20] == kind
       && Data(bytes[21..<53]) == challenge
       && Data(bytes[53..<60]) == uid
   }
 
+  /// The Seal's refusal, by its `reason` code (docs/seal-relay.md); the
+  /// message is never shown as is.
   private static func refusal(_ fields: [String: Any]) -> Exception {
     switch fields["error"] as? String {
     case "expired":
@@ -232,7 +378,19 @@ final class SealRelay {
     case "card-dropped":
       return NfcSessionException()
     default:
-      return SealRefusedException((fields["message"] as? String) ?? "no reason given")
+      break
+    }
+    switch fields["reason"] as? String {
+    case "not-a-ghost-card": return SealNotGhostCardException()
+    case "filling", "not-paid": return SealFillingException()
+    case "cant-check-now": return SealCantCheckException()
+    case "pin-required": return SealPinRequiredException()
+    case "wrong-pin": return SealWrongPinException()
+    case "pin-locked": return SealPinLockedException()
+    case "spent": return SealSpentException()
+    case "wrong-state": return SealWrongStateException()
+    case "fill-pending": return SealFillPendingException()
+    default: return SealRefusedException((fields["message"] as? String) ?? "no reason given")
     }
   }
 
@@ -255,7 +413,7 @@ final class SealRelay {
     return Data(bytes)
   }
 
-  private static func hex(_ data: Data) -> String {
+  fileprivate static func hex(_ data: Data) -> String {
     data.map { String(format: "%02x", $0) }.joined()
   }
 

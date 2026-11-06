@@ -166,6 +166,13 @@ export default function HomeScreen() {
                 testID="open-summon"
               />
             </ButtonRow>
+            <Button
+              label="Check NFC Chip"
+              icon="check"
+              secondary
+              onPress={() => router.push('/check-card')}
+              testID="open-check-card"
+            />
             {testNetwork && address !== null ? (
               <>
                 <Button

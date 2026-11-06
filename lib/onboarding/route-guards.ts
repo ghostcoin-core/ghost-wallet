@@ -28,6 +28,11 @@ export const ROUTE_GROUPS = {
   vanish: 'wallet',
   summon: 'wallet',
   'wipe-card': 'wallet',
+  // Ghost Sealed cards: Check, Fill and Open into the wallet. Fill pays from
+  // the account and Open claims into it, so they are wallet screens.
+  'check-card': 'wallet',
+  'fill-card': 'wallet',
+  'open-card': 'wallet',
   // The feasibility bench holds only the public test words, and the device and
   // simulator scripts open it by link (ghostwallet://bench), so it stays
   // reachable without an account or unlock. Seven taps on the version in

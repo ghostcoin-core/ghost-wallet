@@ -27,6 +27,19 @@ rand = { version = "0.10.1", default-features = false, features = ["std_rng", "s
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 # Must stay on the minor version that uniffi-bindgen-react-native supports.
 uniffi = "=0.31"
+# The Sealed card calls (src/seal_answer.rs, src/seal_open.rs): checking the
+# Seal's ML-DSA-65 answer signatures, and the phone's ML-KEM-768 key an Open
+# releases a card's key to, opened with HKDF and HMAC over SHA3-256 and
+# AES-256-CBC. Audited RustCrypto crates at exactly the versions and features
+# `seal/Cargo.toml` pins; no cipher, MAC, KDF or KEM is written here.
+aes = { version = "=0.9.2", features = ["zeroize"] }
+cbc = { version = "=0.2.1", default-features = false }
+hkdf = "=0.13.0"
+hmac = "=0.13.0"
+ml-dsa = { version = "=0.1.1", default-features = false, features = ["zeroize"] }
+ml-kem = { version = "=0.3.3", default-features = false }
+sha3 = { version = "=0.12.0", default-features = false }
+zeroize = "=1.9.1"
 
 [dev-dependencies]
 rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }

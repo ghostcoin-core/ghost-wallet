@@ -9,10 +9,14 @@ import path from 'path';
 import { CardCancelled } from '../../modules/ghost-nfc';
 import {
   checkWithSeal,
+  confirmFillWithSeal,
+  fillWithSeal,
+  openWithSeal,
   readResult,
   RELAY_PROBLEMS,
   SealRelayError,
   type GhostNfcRelayNative,
+  type GhostNfcSealNative,
   type NativeSealCheck,
 } from '../../modules/ghost-nfc/relay';
 
@@ -167,11 +171,22 @@ function problemOf(promise: Promise<unknown>): Promise<string> {
 }
 
 describe('a Check through the Seal', () => {
-  it('returns only the card UID, the state, the amount, the signed answer and the timings', async () => {
+  it('returns only the card UID, the state, the amount, the signed answer, the challenge and the timings', async () => {
     const { nfc, calls } = relayDouble();
     const result = await checkWithSeal(SEAL_URL, nfc);
 
-    expect(Object.keys(result).sort()).toEqual(['amountWei', 'answer', 'rounds', 'signature', 'state', 'totalMs', 'uid']);
+    expect(Object.keys(result).sort()).toEqual([
+      'amountWei',
+      'answer',
+      'challenge',
+      'rounds',
+      'signature',
+      'state',
+      'totalMs',
+      'uid',
+    ]);
+    // The challenge the native relay made and sent: the answer's check needs it.
+    expect(hex(result.challenge)).toBe(hex(stream(42, 32)));
     expect(result.uid).toBe('04518DFAA96180');
     expect(result.state).toBe('sealed');
     expect(result.amountWei).toBe(AMOUNT);
@@ -242,7 +257,7 @@ describe('a Check through the Seal', () => {
     } as unknown as NativeSealCheck;
     const result = readResult(native);
     expect(Object.keys(result)).not.toContain('extra');
-    expect(Object.keys(result)).not.toContain('challenge');
+    expect(hex(result.challenge)).toBe(hex(challenge));
     expect(result.rounds).toEqual([{ kind: 'seal', ms: 3 }]);
     expect(() => readResult({ ...native, rounds: [{ kind: 'phone', ms: 1 }] })).toThrow(SealRelayError);
   });
@@ -301,6 +316,95 @@ describe('a failed relay', () => {
     nfc.supported = false;
     expect(await problemOf(checkWithSeal(SEAL_URL, nfc))).toBe('no-nfc');
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('a Fill and an Open through the Seal', () => {
+  /** A signed answer of `kind` over `challenge` (a stand-in signature). */
+  function answerOf(kind: number, challenge: Uint8Array): string {
+    const out = new Uint8Array(203);
+    out.set(Array.from('ghost-seal/v1/answer', (c) => c.charCodeAt(0)), 0);
+    out[20] = kind;
+    out.set(challenge, 21);
+    out.set(UID, 53);
+    return hex(out);
+  }
+
+  function sealNative(kindOf: { fill: number; open: number } = { fill: 2, open: 3 }) {
+    const challenge = stream(77, 32);
+    const calls: unknown[][] = [];
+    const base = { uid: hex(UID), challenge: hex(challenge), signature: hex(stream(9, 3309)), rounds: [], totalMs: 5 };
+    const nfc: GhostNfcSealNative = {
+      isSupported: () => true,
+      relayCheck: async () => ({ ...base, answer: answerOf(1, challenge) }),
+      relayFill: async (...args) => {
+        calls.push(['fill', ...args]);
+        return { ...base, answer: answerOf(kindOf.fill, challenge), commitData: hex(stream(5, 430)) };
+      },
+      relayFillConfirm: async (...args) => {
+        calls.push(['confirm', ...args]);
+        return { ...base, answer: answerOf(kindOf.fill, challenge) };
+      },
+      relayOpen: async (...args) => {
+        calls.push(['open', ...args]);
+        return { ...base, answer: answerOf(kindOf.open, challenge) };
+      },
+      keepOpenKey: () => {},
+      restoreOpenKey: () => false,
+      forgetOpenKey: () => {},
+    };
+    return { nfc, calls, challenge };
+  }
+
+  it('fills with the amount and PIN, and hands back the commit data and the challenge', async () => {
+    const { nfc, calls, challenge } = sealNative();
+    const filled = await fillWithSeal(SEAL_URL, AMOUNT, '1234', nfc);
+    expect(calls).toEqual([['fill', SEAL_URL, expect.any(String), AMOUNT.toString(), '1234']]);
+    expect(filled.commitData).toHaveLength(430);
+    expect(hex(filled.challenge)).toBe(hex(challenge));
+    await fillWithSeal(SEAL_URL, AMOUNT, null, nfc);
+    expect(calls[1][4]).toBe('');
+  });
+
+  it('never sends a PIN that is not 4 to 8 digits', async () => {
+    const { nfc, calls } = sealNative();
+    for (const pin of ['123', '123456789', '12a4']) {
+      expect(await problemOf(fillWithSeal(SEAL_URL, AMOUNT, pin, nfc))).toBe('wrong-pin');
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it('opens to the phone key as hex, and refuses an answer of another flow', async () => {
+    const { nfc, calls } = sealNative();
+    const phoneKey = stream(3, 1184);
+    const opened = await openWithSeal(SEAL_URL, phoneKey, null, nfc);
+    expect(calls).toEqual([['open', SEAL_URL, expect.any(String), hex(phoneKey), '']]);
+    expect(Object.keys(opened)).not.toContain('release');
+    expect(await problemOf(openWithSeal(SEAL_URL, stream(3, 100), null, nfc))).toBe('failed');
+
+    const swapped = sealNative({ fill: 3, open: 1 });
+    expect(await problemOf(openWithSeal(SEAL_URL, phoneKey, null, swapped.nfc))).toBe('bad-answer');
+    expect(await problemOf(fillWithSeal(SEAL_URL, AMOUNT, null, swapped.nfc))).toBe('bad-answer');
+    expect(await problemOf(confirmFillWithSeal(SEAL_URL, swapped.nfc))).toBe('bad-answer');
+  });
+
+  it('maps the Seal refusal reasons of a Sealed card', async () => {
+    const cases: [string, string][] = [
+      ['ERR_SEAL_NOT_GHOST_CARD', 'not-a-ghost-card'],
+      ['ERR_SEAL_FILLING', 'filling'],
+      ['ERR_SEAL_CANT_CHECK', 'cant-check-now'],
+      ['ERR_SEAL_PIN_REQUIRED', 'pin-required'],
+      ['ERR_SEAL_WRONG_PIN', 'wrong-pin'],
+      ['ERR_SEAL_PIN_LOCKED', 'pin-locked'],
+      ['ERR_SEAL_SPENT', 'spent'],
+    ];
+    for (const [code, problem] of cases) {
+      const { nfc } = sealNative();
+      nfc.relayOpen = async () => {
+        throw Object.assign(new Error('refused'), { code });
+      };
+      expect(await problemOf(openWithSeal(SEAL_URL, stream(3, 1184), '1234', nfc))).toBe(problem);
+    }
   });
 });
 

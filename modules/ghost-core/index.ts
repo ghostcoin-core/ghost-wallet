@@ -55,7 +55,60 @@ type GhostCoreBindings = RestoreBindings &
   /** The 24 words of the saved account, for the recovery words screen only. */
   savedAccountWords(): string[];
 } & Partial<VanishBindings> &
-  Partial<SendBindings>;
+  Partial<SendBindings> &
+  Partial<SealBindings>;
+
+/**
+ * The Sealed card calls of core/src/seal_answer.rs and core/src/seal_open.rs,
+ * as generated. The Seal's answer signatures (ML-DSA-65) and the checks of
+ * each answer run there, never in JavaScript. The Open's ML-KEM-768 private
+ * key, the release the Seal sends and the card key it holds stay in native
+ * code: JavaScript gets the public phone key and a verdict only.
+ */
+export type SealBindings = {
+  /** Checks a Check answer: `refusal` is empty and `answer` set only when it is accepted. */
+  verifySealAnswer(check: CoreSealAnswerCheck): CoreSealAnswerVerdict;
+  /** Checks a Fill answer, which must bind exactly `commitData`. */
+  verifySealFillAnswer(check: CoreSealAnswerCheck, commitData: ArrayBuffer): CoreSealAnswerVerdict;
+  /** The Open's public phone key (an ML-KEM-768 encapsulation key), made in native code when none is held. */
+  sealOpenPhoneKey(): ArrayBuffer;
+  hasSealOpenKey(): boolean;
+  /** Wipes the Open's phone key: once the Claim of the opened card settled. */
+  forgetSealOpenKey(): void;
+  /**
+   * Checks the Open answer against the release the relay handed to the core,
+   * opens it and holds the card's key in the core's card-key slot for the Claim.
+   */
+  finishSealOpen(check: CoreSealAnswerCheck): CoreSealAnswerVerdict;
+};
+
+export type CoreSealAnswerCheck = {
+  verifyingKey: ArrayBuffer;
+  measurement: ArrayBuffer;
+  pinnedMeasurements: ArrayBuffer[];
+  answer: ArrayBuffer;
+  signature: ArrayBuffer;
+  challenge: ArrayBuffer;
+  uid: ArrayBuffer;
+  /** Now, in Unix seconds. */
+  now: bigint;
+  kind: 'check' | 'fill' | 'open';
+};
+
+export type CoreSealAnswer = {
+  kind: string;
+  uid: ArrayBuffer;
+  generation: number;
+  coin: ArrayBuffer;
+  state: string;
+  amountWei: string;
+  expiresAt: bigint;
+  binding: ArrayBuffer;
+  pinRequired: boolean;
+  pinTriesLeft: number;
+};
+
+export type CoreSealAnswerVerdict = { refusal: string; answer?: CoreSealAnswer };
 
 /** The plain send calls of core/src/send.rs, as generated. */
 export type SendBindings = {
@@ -326,6 +379,15 @@ export function sendCore(): VanishBindings & SendBindings {
     throw new Error('this build has no send in its native core');
   }
   return core as unknown as VanishBindings & SendBindings;
+}
+
+/** The Sealed card calls; throws when this build has no Seal checks in its native core. */
+export function sealCore(): SealBindings {
+  const core = bindings();
+  if (typeof core.verifySealAnswer !== 'function' || typeof core.finishSealOpen !== 'function') {
+    throw new Error('this build has no Sealed card checks in its native core');
+  }
+  return core as GhostCoreBindings & SealBindings;
 }
 
 /**
