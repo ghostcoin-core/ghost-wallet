@@ -1,16 +1,19 @@
-// The loader of the Seal the app trusts (docs/seal-app-attestation.md).
+// The loader of one Seal region the app trusts (docs/seal-app-attestation.md).
 //
 // Only inside a card flow (Check, Fill, Open), never at app start or in the
-// background: it makes a fresh 32-byte challenge (public), has the native
+// background, once for each listed region (trusted-seal.ts): for that
+// region's address it makes a fresh 32-byte challenge (public), has the native
 // module fetch the Seal's `GPA2` attestation over HTTPS with the hash of the
 // certificate that connection presented, and has the native core check it
 // (core/src/seal_attestation.rs: AWS's Nitro chain and signature, the PCRs
 // against the pinned list, and the binding of the Seal's keys, this
 // challenge and that certificate). Only a verified result gives a Seal, and
-// only then is the relay pinned to that certificate. Anything else (no
-// address, no native module, a fetch error, any refusal) gives null and
-// drops the pin, so the screens show "Can't verify this card", never an
-// amount. Nothing here is cryptography, and nothing here logs.
+// only then is the relay pinned to that certificate (that region's host).
+// Anything else (no address, no native module, a fetch error or one past its
+// 10 second deadline, any refusal) gives null and drops that region's pin, so
+// cards homed there show "Can't verify this card", never an amount; the
+// other regions are not touched. The checks are the same for every region.
+// Nothing here is cryptography, and nothing here logs.
 import {
   sealAttestationCore,
   type CorePinnedSealBuild,
@@ -18,15 +21,16 @@ import {
   type SealAttestationBindings,
 } from '../../modules/ghost-core';
 import type { GhostNfcSealPinNative } from '../../modules/ghost-nfc';
-import { fetchSealAttestation, setSealPin } from '../../modules/ghost-nfc/relay';
+import { fetchSealAttestation, SealRelayError, setSealPin } from '../../modules/ghost-nfc/relay';
 import { PINNED_MEASUREMENTS, type MeasurementList } from './pinned-measurements';
-import { SEAL_URL } from './seal-config';
+import type { SealRegion } from './seal-config';
 import type { TrustedSeal } from './trusted-seal';
 
-/** What the loader runs on: each replaced by a fake in the tests. */
-export type SealAttestationDeps = {
-  /** The Seal's address (`SEAL_URL`); `""` means no Seal. */
-  url: string;
+/** How long one region's attestation fetch may take, in milliseconds. */
+export const ATTESTATION_DEADLINE_MS = 10_000;
+
+/** What the loader runs on, for every region alike: each replaced by a fake in the tests. */
+export type AttestationParts = {
   /** The native fetch and pin; undefined uses the app's module (null when the build has none). */
   native?: GhostNfcSealPinNative | null;
   /** The native core's check; null when the build has none. */
@@ -36,6 +40,16 @@ export type SealAttestationDeps = {
   /** A fresh 32-byte challenge (public); undefined takes it from the core's random source. */
   random?: () => Uint8Array;
   list: MeasurementList;
+  /** The fetch's deadline in milliseconds; undefined is `ATTESTATION_DEADLINE_MS`. */
+  deadlineMs?: number;
+};
+
+/** What the loader of one region runs on. */
+export type SealAttestationDeps = AttestationParts & {
+  /** The region's id, as `SEAL_REGIONS` lists it; `""` means no Seal. */
+  region: string;
+  /** The region's https:// address; `""` means no Seal. */
+  url: string;
 };
 
 function optionalCore(): SealAttestationBindings | null {
@@ -46,9 +60,23 @@ function optionalCore(): SealAttestationBindings | null {
   }
 }
 
-/** The app's address, core, clock and pinned list. */
-export function attestationDeps(): SealAttestationDeps {
-  return { url: SEAL_URL, core: optionalCore, now: () => Date.now(), list: PINNED_MEASUREMENTS };
+/** The app's core, clock and pinned list. */
+export function appAttestationParts(): AttestationParts {
+  return { core: optionalCore, now: () => Date.now(), list: PINNED_MEASUREMENTS };
+}
+
+/** The app's loader of `region`. */
+export function attestationDeps(region: SealRegion, parts: AttestationParts = appAttestationParts()): SealAttestationDeps {
+  return { ...parts, region: region.id, url: region.url };
+}
+
+/** `run`, or a `seal-unreachable` failure once `ms` have passed without it settling. */
+function withDeadline<T>(run: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SealRelayError('seal-unreachable')), ms);
+  });
+  return Promise.race([run, late]).finally(() => clearTimeout(timer));
 }
 
 function bytes(hex: string): Uint8Array {
@@ -78,8 +106,13 @@ export function pinnedBuilds(list: MeasurementList = PINNED_MEASUREMENTS): CoreP
   }));
 }
 
-/** The Seal from the core's verdict, or null for any refusal or anything malformed. */
-function sealOf(url: string, verdict: CoreSealAttestationVerdict | null | undefined, tlsCertSha256: Uint8Array): TrustedSeal | null {
+/** The region's Seal from the core's verdict, or null for any refusal or anything malformed. */
+function sealOf(
+  region: string,
+  url: string,
+  verdict: CoreSealAttestationVerdict | null | undefined,
+  tlsCertSha256: Uint8Array,
+): TrustedSeal | null {
   const seal = verdict?.seal;
   if (!verdict || verdict.refusal !== '' || !seal) {
     return null;
@@ -90,16 +123,16 @@ function sealOf(url: string, verdict: CoreSealAttestationVerdict | null | undefi
   if (!verifyingKey || !kemKey || !measurement) {
     return null;
   }
-  return { url, verifyingKey, measurement, kemKey, tlsCertSha256 };
+  return { region, url, verifyingKey, measurement, kemKey, tlsCertSha256 };
 }
 
 /**
- * Fetches and checks the Seal's attestation once. Never throws: any failure
- * is null, with the relay's pin dropped.
+ * Fetches and checks one region's attestation once. Never throws: any
+ * failure is null, with that region's pin dropped.
  */
-export async function loadTrustedSeal(deps: SealAttestationDeps = attestationDeps()): Promise<TrustedSeal | null> {
+export async function loadTrustedSeal(deps: SealAttestationDeps): Promise<TrustedSeal | null> {
   const url = deps.url;
-  if (!url) {
+  if (!url || !deps.region) {
     return null;
   }
   const pin = (hash: Uint8Array | null) => (deps.native === undefined ? setSealPin(url, hash) : setSealPin(url, hash, deps.native));
@@ -114,8 +147,10 @@ export async function loadTrustedSeal(deps: SealAttestationDeps = attestationDep
       pin(null);
       return null;
     }
-    const fetched =
-      deps.native === undefined ? await fetchSealAttestation(url, challenge) : await fetchSealAttestation(url, challenge, deps.native);
+    const fetched = await withDeadline(
+      deps.native === undefined ? fetchSealAttestation(url, challenge) : fetchSealAttestation(url, challenge, deps.native),
+      deps.deadlineMs ?? ATTESTATION_DEADLINE_MS,
+    );
     const verdict = core.verifySealAttestation({
       attestation: buffer(fetched.attestation),
       challenge: buffer(challenge),
@@ -123,7 +158,7 @@ export async function loadTrustedSeal(deps: SealAttestationDeps = attestationDep
       pinnedBuilds: pinnedBuilds(deps.list),
       now: BigInt(Math.floor(deps.now() / 1000)),
     });
-    const seal = sealOf(url, verdict, fetched.certSha256);
+    const seal = sealOf(deps.region, url, verdict, fetched.certSha256);
     if (!seal || !pin(seal.tlsCertSha256)) {
       pin(null);
       return null;

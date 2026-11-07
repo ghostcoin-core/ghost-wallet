@@ -15,7 +15,9 @@
 // The Seal's attestation is fetched natively (fetchSealAttestation,
 // SealAttestation.swift): JavaScript gets the attestation bytes and the hash
 // of the certificate the connection presented, and sets the relay's pin
-// (setSealPin) only after the native core verified the attestation.
+// (setSealPin) only after the native core verified the attestation. It
+// hands the relay the ordered list of live Seal regions (setSealRegions);
+// the relay, not JavaScript, chooses each card's home region from it.
 import ExpoModulesCore
 
 public final class GhostNfcModule: Module {
@@ -72,6 +74,13 @@ public final class GhostNfcModule: Module {
     // attestation that binds it; "" drops it.
     Function("setSealPin") { (sealUrl: String, certSha256: String) in
       SealPins.shared.set(sealUrl: sealUrl, certSha256: certSha256)
+    }
+
+    // The ordered list of live Seal regions, `[{ id, url }]` as JSON, kept in
+    // memory for the relay to choose each card's home region from. A list
+    // that does not parse clears it and returns false.
+    Function("setSealRegions") { (regionsJson: String) -> Bool in
+      SealRegions.shared.set(json: regionsJson)
     }
 
     // The Open's phone key seed, between the native core and the Keychain.

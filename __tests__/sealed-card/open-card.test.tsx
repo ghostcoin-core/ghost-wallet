@@ -30,8 +30,8 @@ jest.mock(
   { virtual: true },
 );
 jest.mock('../../lib/seal/trusted-seal', () => ({
-  trustedSeal: () => require('./fake-seal').world.current.trusted(),
-  refreshTrustedSeal: async () => require('./fake-seal').world.current.refreshed(),
+  trustedSeal: (region: string) => require('./fake-seal').world.current.trustedSeal(region),
+  refreshTrustedSeals: async () => require('./fake-seal').world.current.refreshed(),
 }));
 jest.mock('../../lib/seal/pinned-measurements', () => {
   const actual = jest.requireActual('../../lib/seal/pinned-measurements');
@@ -209,5 +209,5 @@ it('never hands JavaScript the release or the card key', async () => {
   };
   await press('open-run');
   expect(results).toHaveLength(1);
-  expect(Object.keys(results[0] as object).sort()).toEqual(['answer', 'challenge', 'rounds', 'signature', 'totalMs', 'uid']);
+  expect(Object.keys(results[0] as object).sort()).toEqual(['answer', 'challenge', 'region', 'rounds', 'signature', 'totalMs', 'uid']);
 });

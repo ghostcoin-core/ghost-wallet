@@ -17,6 +17,7 @@ pub mod keychain;
 pub mod restore_scan;
 pub mod seal_answer;
 pub mod seal_attestation;
+pub mod seal_home_region;
 pub mod seal_open;
 pub mod send;
 pub mod spot_check;

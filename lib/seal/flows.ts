@@ -5,11 +5,22 @@
 // ML-KEM key and holds the card's key for the Claim (core/src/seal_open.rs).
 // No key, seed or words are ever in JavaScript; a PIN is passed through to
 // the relay and kept nowhere.
+//
+// Each card is served by one Seal region, its home. A flow starts by checking
+// every listed region's attestation (`refreshTrustedSeals`) and goes on to
+// the card only when at least one region verified. The native relay then
+// reads the card's UID, chooses its home region and runs the flow there
+// (`HOME_REGION`); JavaScript never chooses a region. The answer is checked
+// with the Seal of the region that answered it, and only that region's key,
+// measurement and pin: a region with no verified Seal, or one not listed, is
+// "Can't verify this card". A `wrong-region` refusal is shown as a plain
+// message; nothing is sent again, to that region or to any other.
 import { sealCore, type SealBindings } from '../../modules/ghost-core';
 import {
   checkWithSeal,
   confirmFillWithSeal,
   fillWithSeal,
+  HOME_REGION,
   openKeyKeeper,
   openWithSeal,
   type GhostNfcSealNative,
@@ -18,7 +29,8 @@ import {
 } from '../../modules/ghost-nfc/relay';
 import { statusOfAnswer, statusOfFailure, type CardStatus } from './card-status';
 import { clearFill, noteFill, pendingFill } from './fills';
-import { refreshTrustedSeal, trustedSeal, type TrustedSeal } from './trusted-seal';
+import { SEAL_REGIONS } from './seal-config';
+import { refreshTrustedSeals, trustedSeal, type TrustedSeal, type TrustedSeals } from './trusted-seal';
 import {
   answerCheck,
   readVerdict,
@@ -33,15 +45,16 @@ type Keeper = Pick<GhostNfcSealNative, 'keepOpenKey' | 'restoreOpenKey' | 'forge
 
 /** What the flows run on: each replaced by a fake in the tests. */
 export type SealDeps = VerifyOptions & {
-  /** The Seal as it was when the screen opened, used only when there is no `refresh`. */
-  seal: TrustedSeal | null;
-  /** Fetches and checks the Seal's attestation when its cached check ran out; never throws. */
-  refresh?: () => Promise<TrustedSeal | null>;
+  /** The verified Seals by region id as they were when the screen opened, used only when there is no `refresh`. */
+  seals: TrustedSeals;
+  /** Checks every region's attestation whose cached check ran out, and gives the verified ones; never throws. */
+  refresh?: () => Promise<TrustedSeals>;
   core: SealBindings | null;
-  check: (url: string) => Promise<RelayedAnswer>;
-  fill: (url: string, amountWei: bigint, pin: string | null) => Promise<RelayedFill>;
-  confirm: (url: string) => Promise<RelayedAnswer>;
-  open: (url: string, phoneKey: Uint8Array, pin: string | null) => Promise<RelayedAnswer>;
+  /** Each relay call runs on the next card tapped, in the card's home region, chosen natively. */
+  check: () => Promise<RelayedAnswer>;
+  fill: (amountWei: bigint, pin: string | null) => Promise<RelayedFill>;
+  confirm: () => Promise<RelayedAnswer>;
+  open: (phoneKey: Uint8Array, pin: string | null) => Promise<RelayedAnswer>;
   keeper: Keeper | null;
 };
 
@@ -53,36 +66,61 @@ function optionalCore(): SealBindings | null {
   }
 }
 
-/** The app's Seal, core and relay. */
+/** The verified Seals cached now, by region id; nothing is fetched. */
+function cachedSeals(): TrustedSeals {
+  const seals = new Map<string, TrustedSeal>();
+  for (const region of SEAL_REGIONS) {
+    const seal = trustedSeal(region.id);
+    if (seal) {
+      seals.set(region.id, seal);
+    }
+  }
+  return seals;
+}
+
+/** The app's Seals, core and relay. */
 export function sealDeps(): SealDeps {
   return {
-    seal: trustedSeal(),
-    refresh: () => refreshTrustedSeal(),
+    seals: cachedSeals(),
+    refresh: () => refreshTrustedSeals(),
     core: optionalCore(),
-    check: (url) => checkWithSeal(url),
-    fill: (url, amountWei, pin) => fillWithSeal(url, amountWei, pin),
-    confirm: (url) => confirmFillWithSeal(url),
-    open: (url, phoneKey, pin) => openWithSeal(url, phoneKey, pin),
+    check: () => checkWithSeal(HOME_REGION),
+    fill: (amountWei, pin) => fillWithSeal(HOME_REGION, amountWei, pin),
+    confirm: () => confirmFillWithSeal(HOME_REGION),
+    open: (phoneKey, pin) => openWithSeal(HOME_REGION, phoneKey, pin),
     keeper: openKeyKeeper(),
   };
 }
 
+type Ready = { seals: TrustedSeals; core: SealBindings };
+
 /**
- * The Seal and core at the start of a card flow, or null when either is
- * missing: then no card can be verified. The Seal's attestation is fetched
- * and checked again here (`refresh`) when its cached check has run out; this
- * is the only place the app waits on it.
+ * The verified Seals and the core at the start of a card flow, or null when
+ * no region verified or the core is missing: then no card can be verified,
+ * and no card sheet opens. Every region's attestation is fetched and checked
+ * again here (`refresh`) when its cached check has run out; this is the only
+ * place the app waits on it.
  */
-async function readyNow(deps: SealDeps): Promise<{ seal: TrustedSeal; core: SealBindings } | null> {
-  let seal = deps.seal;
+async function readyNow(deps: SealDeps): Promise<Ready | null> {
+  let seals: TrustedSeals | null = deps.seals;
   if (deps.refresh) {
     try {
-      seal = await deps.refresh();
+      seals = await deps.refresh();
     } catch {
-      seal = null;
+      seals = null;
     }
   }
-  return seal && deps.core ? { seal, core: deps.core } : null;
+  return seals && seals.size > 0 && deps.core ? { seals, core: deps.core } : null;
+}
+
+/**
+ * The Seal to check `relayed` with: the verified Seal of the region that
+ * answered it, or null for a region with no verified Seal or not listed.
+ */
+function sealOfAnswer(parts: Ready, relayed: RelayedAnswer): TrustedSeal | null {
+  const region = relayed.region;
+  const seal = region ? parts.seals.get(region) : undefined;
+  return seal && seal.region === region ? seal : null;
 }
 
 /**
@@ -96,11 +134,15 @@ export async function checkCard(deps: SealDeps): Promise<CardStatus | null> {
   }
   let relayed: RelayedAnswer;
   try {
-    relayed = await deps.check(parts.seal.url);
+    relayed = await deps.check();
   } catch (error) {
     return statusOfFailure(error);
   }
-  const verdict = verifyCheckAnswer(parts.core, parts.seal, relayed, deps);
+  const seal = sealOfAnswer(parts, relayed);
+  if (!seal) {
+    return { kind: 'cant-verify' };
+  }
+  const verdict = verifyCheckAnswer(parts.core, seal, relayed, deps);
   if (!verdict.ok) {
     return { kind: 'cant-verify' };
   }
@@ -137,11 +179,15 @@ export async function fillCard(deps: SealDeps, amountWei: bigint, pin: string | 
   }
   let relayed: RelayedFill;
   try {
-    relayed = await deps.fill(parts.seal.url, amountWei, pin);
+    relayed = await deps.fill(amountWei, pin);
   } catch (error) {
     return { ok: false, status: statusOfFailure(error) };
   }
-  const verdict = verifyFillAnswer(parts.core, parts.seal, relayed, { amountWei, pin: pin !== null }, deps);
+  const seal = sealOfAnswer(parts, relayed);
+  if (!seal) {
+    return { ok: false, status: { kind: 'cant-verify' } };
+  }
+  const verdict = verifyFillAnswer(parts.core, seal, relayed, { amountWei, pin: pin !== null }, deps);
   if (!verdict.ok) {
     return { ok: false, status: { kind: 'cant-verify' } };
   }
@@ -162,11 +208,15 @@ export async function confirmFill(deps: SealDeps): Promise<CardStatus | null> {
   }
   let relayed: RelayedAnswer;
   try {
-    relayed = await deps.confirm(parts.seal.url);
+    relayed = await deps.confirm();
   } catch (error) {
     return statusOfFailure(error);
   }
-  const verdict = verifyConfirmAnswer(parts.core, parts.seal, relayed, deps);
+  const seal = sealOfAnswer(parts, relayed);
+  if (!seal) {
+    return { kind: 'cant-verify' };
+  }
+  const verdict = verifyConfirmAnswer(parts.core, seal, relayed, deps);
   if (!verdict.ok) {
     return { kind: 'cant-verify' };
   }
@@ -224,15 +274,21 @@ export async function openCard(deps: SealDeps, pin: string | null): Promise<Open
   }
   let relayed: RelayedAnswer;
   try {
-    relayed = await deps.open(parts.seal.url, phoneKey, pin);
+    relayed = await deps.open(phoneKey, pin);
   } catch (error) {
+    // A refusal (`wrong-region` too) released nothing: no card key is held.
     const status = statusOfFailure(error);
     const problem = (error as { problem?: string } | null)?.problem;
     return { ok: false, status, wrongPin: problem === 'wrong-pin', pinRequired: problem === 'pin-required' };
   }
+  const seal = sealOfAnswer(parts, relayed);
+  if (!seal) {
+    // The release stays sealed in the core, unopened: only that region's checked answer opens it.
+    return { ok: false, status: { kind: 'cant-verify' } };
+  }
   let verdict: AnswerVerdict;
   try {
-    verdict = readVerdict(parts.core.finishSealOpen(answerCheck(parts.seal, relayed, 'open', deps)));
+    verdict = readVerdict(parts.core.finishSealOpen(answerCheck(seal, relayed, 'open', deps)));
   } catch {
     verdict = { ok: false, refusal: 'core-failed' };
   }
