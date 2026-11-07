@@ -7,7 +7,10 @@
 //! refuses an unregistered card, and refuses to start without a registry,
 //! with fewer than two nodes or without a journal file; its journal file
 //! (mode 0600) keeps a Fill cut off before a restart, which it finishes
-//! after one.
+//! after one. Its Fill factory is the enclave's maker (`CoreKeyMaker` on the
+//! chain check's network): a Fill makes the wallet core's key and coin, its
+//! confirmation seals the card once the coin is paid, and its Check stops
+//! answering Sealed once the coin's own spend marker is spent.
 
 mod support;
 
@@ -32,6 +35,9 @@ use ghost_seal::test_server::{
     WARNING, dev_test_master, dev_test_master_bytes, dev_test_seal,
 };
 use ghost_seal::{CardRegistry, CardState, CardTransport, CardUid, ChainNode, CheckRequest, FillRequest, RegistryEntry};
+use ghost_wallet_core::seal_open::phantom_key_from_bytes;
+use ghost_wallet_core::vanish::{tree_leaves, unspent_coin};
+use ghost_wallet_core::{COMMIT_DATA_BYTES, commit_leaf, find_coins};
 use serde_json::{Value, json};
 use support::nodes::{FakeChain, NETWORK, two_nodes};
 use support::{AMOUNT, DropStyle, SettledCheck, SimCard, StubChain, StubMaker, UID, contains, hex, registered};
@@ -491,6 +497,57 @@ fn after_a_restart_on_the_same_file_a_fill_that_was_cut_off_is_finished() {
     };
     let body = verifier().verify(&answer, &signature, &challenge, &UID, now()).expect("a verified answer");
     assert_eq!((body.state, body.amount_wei), (CardState::Sealed, AMOUNT));
+    server.stop();
+    let _ = std::fs::remove_file(&journal);
+}
+
+#[test]
+fn the_servers_fill_makes_a_real_coin_that_its_confirmation_seals_and_its_check_follows() {
+    let chain = Arc::new(Mutex::new(FakeChain::new()));
+    let journal = journal_file("core-maker");
+    let options = Options::from_args(&args_with_journal(&journal, &[]), Some("1")).unwrap();
+    let server = TestSealServer::start_with(&options, installed_on(&chain, &[UID])).unwrap();
+    let mut card = dev_card(UID);
+
+    // The Fill, with the server's own maker: the wallet core's coin.
+    let filled = server.fill(&mut card, &fill_request()).expect("a Fill with the core's maker");
+    assert_eq!(filled.commit_data.len(), COMMIT_DATA_BYTES);
+    assert_eq!(filled.commit_data[..2], [0x00, 0x03]);
+    // The card's key slot (offset 128: length at 40, key at 41) holds the
+    // core's key bytes, which find the coin on the server's network only.
+    let length = usize::from(card.file[128 + 40]);
+    let key_bytes = card.file[128 + 41..128 + 41 + length].to_vec();
+    assert_eq!((key_bytes.len(), key_bytes[0]), (33, 0x20));
+    let key = phantom_key_from_bytes(&key_bytes).expect("the core's key bytes");
+    let leaf = commit_leaf(filled.commit_data.clone(), AMOUNT.to_string()).unwrap();
+    let found = find_coins(&key, NETWORK.chain_id, &[leaf.clone()], &[]).unwrap();
+    assert_eq!((found.status.as_str(), found.amount_wei), ("found", AMOUNT.to_string()));
+    assert_eq!(find_coins(&key, NETWORK.chain_id + 1, &[leaf.clone()], &[]).unwrap().status, "not-found");
+    // The key never crossed the relay: the card traffic is EV2 secured.
+    for bytes in &card.transcript {
+        assert!(!contains(bytes, &key_bytes[1..]));
+    }
+
+    // Paid exactly on the fake chain and confirmed: Sealed, and the server's
+    // relayed Check answers Sealed.
+    let marker = *unspent_coin(&key, NETWORK.chain_id, &tree_leaves(&[leaf]).unwrap(), &[]).unwrap().marker.as_bytes();
+    let coin = CoinQuery { commit_data: filled.commit_data.clone(), amount_wei: AMOUNT, spend_marker: marker };
+    chain.lock().unwrap().pay(&coin, safe_depth(AMOUNT));
+    let paid = StubChain::default();
+    paid.pay(&filled.commit_data, AMOUNT);
+    let sealed = server.seal().confirm_fill(&mut card, &CheckRequest { uid: UID, challenge: [0x44; 32] }, &paid).unwrap();
+    assert_eq!(sealed.body.state, CardState::Sealed);
+    let challenge = [0x45u8; 32];
+    let Relayed::Done { answer, signature, .. } = relay_check(server.addr(), &mut card, UID, challenge) else {
+        panic!("the Check of the filled card did not finish");
+    };
+    let body = verifier().verify(&answer, &signature, &challenge, &UID, now()).expect("a verified answer");
+    assert_eq!((body.state, body.amount_wei), (CardState::Sealed, AMOUNT));
+
+    // The journaled spend marker is the coin's own: once it is spent on the
+    // chain, the Check no longer answers Sealed.
+    chain.lock().unwrap().spend(marker);
+    assert!(matches!(relay_check(server.addr(), &mut card, UID, [0x46u8; 32]), Relayed::Refused { status: 422, .. }));
     server.stop();
     let _ = std::fs::remove_file(&journal);
 }

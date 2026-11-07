@@ -9,7 +9,11 @@
 //! log finishing the Open the first began, and a rollback while it runs
 //! refused; the real chain status check over `RpcNode`s needs two nodes and
 //! never seals without them; the attestation route with the tests'
-//! authority; and no answer, log line or error text carrying M or the PIN.
+//! authority; no answer, log line or error text carrying M or the PIN; and,
+//! over TLS ended in the enclave, a Fill answered `unavailable` without a
+//! key maker and served with the enclave's own (`CoreKeyMakerSource`), its
+//! key the wallet core's, found by the core's lookup, and in no answer or
+//! log line.
 
 #[path = "fixtures/nitro_authority.rs"]
 mod authority;
@@ -18,8 +22,11 @@ mod enclave;
 #[path = "fixtures/test_release_key.rs"]
 mod release;
 mod support;
+#[path = "support/tls_client.rs"]
+mod tls_client;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use authority::{Authority, AuthoritySource, NOW, allowed_new, allowed_old, revoked, unlisted};
 use ghost_seal::attestation::AttestationRejected;
@@ -653,6 +660,112 @@ fn a_host_that_rolls_the_log_back_while_the_enclave_runs_is_refused() {
     let again = carry(&service, &mut card, post(&service, "/v1/open/start", &open), &mut Vec::new());
     assert_eq!(again.0, 422, "{}", again.1);
     assert_eq!(store.records(), records, "nothing more was appended");
+}
+
+/// The phone's relay over TLS: carries a flow from its start answer to its
+/// end on `tls`, each command to the card and each answer back.
+fn carry_tls(
+    tls: &mut (impl std::io::Read + std::io::Write),
+    card: &mut SimCard,
+    mut answer: (u16, Value),
+    seen: &mut Vec<Value>,
+) -> (u16, Value) {
+    seen.push(answer.1.clone());
+    while answer.0 == 200 && answer.1["status"] == "apdu" {
+        let apdu = from_hex(answer.1["apdu"].as_str().unwrap()).unwrap();
+        let card_answer = card.transceive(&apdu).expect("the card stays in the field");
+        let step = json!({ "session": answer.1["session"].clone(), "answer": to_hex(&card_answer) });
+        answer = tls_client::post(tls, "/v1/relay/step", &step);
+        seen.push(answer.1.clone());
+    }
+    answer
+}
+
+/// A service with `deps` holding the test M, served on a local port as the
+/// enclave serves its service port.
+fn served(deps: ServiceDeps) -> (Arc<EnclaveService>, std::net::SocketAddr, Arc<MemoryServiceLog>) {
+    let log = Arc::new(MemoryServiceLog::default());
+    let service = Arc::new(enclave::service(deps, allowed_old(), log.clone()));
+    service.install_master(support::master());
+    assert!(service.serves_flows());
+    let addr = enclave::serve(service.clone(), Duration::from_secs(60));
+    (service, addr, log)
+}
+
+#[test]
+fn with_the_core_key_maker_installed_a_fill_over_tls_is_served_and_its_key_is_in_no_answer_or_log_line() {
+    let fill = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x61; 32]), "amountWei": AMOUNT.to_string(), "pin": PIN });
+
+    // Without a key maker, the flows are served and a Fill is not.
+    let (service, addr, _) = served(enclave::deps_with_maker(None).0);
+    let mut tls = tls_client::connect(addr, service.certificate_hash());
+    assert_unavailable(&tls_client::post(&mut tls, "/v1/fill/start", &fill));
+    let check = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x60; 32]) });
+    let started = tls_client::post(&mut tls, "/v1/check/start", &check);
+    assert_eq!((started.0, started.1["status"].as_str()), (200, Some("apdu")), "{}", started.1);
+    tls_client::post(&mut tls, "/v1/relay/abort", &json!({ "session": started.1["session"].clone() }));
+
+    // With the enclave's own key maker: the same Fill over TLS is served.
+    let (deps, fakes) = enclave::deps_with_maker(Some(enclave::core_key_maker()));
+    let (service, addr, log) = served(deps);
+    let hash = service.certificate_hash();
+    let key = answer_key(&support::master());
+    let mut seen = Vec::new();
+    let mut card = SimCard::set_up(UID);
+    let mut tls = tls_client::connect(addr, hash);
+    let start = tls_client::post(&mut tls, "/v1/fill/start", &fill);
+    let done = carry_tls(&mut tls, &mut card, start, &mut seen);
+    let body = verified(&key, &done.1, [0x61; 32], &UID);
+    let commit_data = from_hex(done.1["commitData"].as_str().unwrap()).unwrap();
+    assert_eq!((body.kind, body.state, body.coin), (AnswerKind::Fill, CardState::Empty, sha3_256(&[&commit_data])));
+    assert_eq!(commit_data.len(), ghost_wallet_core::COMMIT_DATA_BYTES);
+
+    // Paid on the fake chain (its payment check needs only the coin; the
+    // Seal's own status check asks with its journal's spend marker), then
+    // confirmed over TLS: Sealed.
+    assert!(fakes.maker.made.lock().unwrap().is_empty(), "the enclave's own maker made the key");
+    fakes.chain.pay(CoinQuery { commit_data: commit_data.clone(), amount_wei: AMOUNT, spend_marker: [0u8; 32] });
+    let mut tls = tls_client::connect(addr, hash);
+    let confirm = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x62; 32]) });
+    let start = tls_client::post(&mut tls, "/v1/fill/confirm", &confirm);
+    let done = carry_tls(&mut tls, &mut card, start, &mut seen);
+    assert_eq!(verified(&key, &done.1, [0x62; 32], &UID).state, CardState::Sealed);
+
+    // Opened over TLS: the phone gets the core's key bytes, and the wallet
+    // core finds exactly the filled amount with them.
+    let phone = support::phone(0x63);
+    let mut tls = tls_client::connect(addr, hash);
+    let open = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x64; 32]), "phoneKey": to_hex(&phone.public_key()), "pin": PIN });
+    let start = tls_client::post(&mut tls, "/v1/open/start", &open);
+    let done = carry_tls(&mut tls, &mut card, start, &mut seen);
+    let body = verified(&key, &done.1, [0x64; 32], &UID);
+    assert_eq!(body.state, CardState::Opened);
+    let release = from_hex(done.1["release"].as_str().unwrap()).unwrap();
+    let phantom = phone.open(&release, &UID, body.generation).expect("the release opens");
+    let bytes = phantom.expose_secret().to_vec();
+    assert_eq!((bytes.len(), bytes[0]), (33, 0x20), "the core's key bytes");
+    let core_key = ghost_wallet_core::seal_open::phantom_key_from_bytes(&bytes).expect("the core takes them");
+    let leaf = ghost_wallet_core::commit_leaf(commit_data.clone(), AMOUNT.to_string()).unwrap();
+    let found = ghost_wallet_core::find_coins(&core_key, support::nodes::NETWORK.chain_id, &[leaf], &[]).unwrap();
+    assert_eq!((found.status.as_str(), found.amount_wei), ("found", AMOUNT.to_string()));
+
+    // The key's bytes, in every form, are in no answer and no log line.
+    let secret = &bytes[1..];
+    let forms = [secret.to_vec(), to_hex(secret).into_bytes(), to_hex(secret).to_uppercase().into_bytes(), format!("{secret:?}").into_bytes()];
+    let mut texts: Vec<Vec<u8>> = seen.iter().flat_map(exposed).collect();
+    texts.extend(seen.iter().map(|answer| answer.to_string().into_bytes()));
+    texts.extend(card.transcript.iter().cloned());
+    let events = log.0.lock().unwrap().clone();
+    assert!(!events.is_empty());
+    for event in &events {
+        texts.push(event.to_string().into_bytes());
+        texts.push(format!("{event:?}").into_bytes());
+    }
+    for text in &texts {
+        for form in &forms {
+            assert!(!support::contains(text, form), "the key leaked into {}", String::from_utf8_lossy(text));
+        }
+    }
 }
 
 /// A deterministic random source (test only).

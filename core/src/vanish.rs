@@ -747,7 +747,8 @@ pub fn reveal_leaf(envelope: Vec<u8>) -> Result<RevealedLeaf, VanishError> {
     })
 }
 
-fn tree_leaves(leaves: &[CoinLeaf]) -> Result<Vec<TreeLeaf>, VanishError> {
+/// The coin tree's leaves, as Ghost's restore reads them.
+pub fn tree_leaves(leaves: &[CoinLeaf]) -> Result<Vec<TreeLeaf>, VanishError> {
     leaves
         .iter()
         .map(|leaf| {
@@ -787,7 +788,7 @@ pub struct KeyCoins {
 }
 
 /// The key's unspent coin: the first one if several are unspent.
-fn unspent_coin(
+pub fn unspent_coin(
     key: &PhantomKey,
     chain_id: u64,
     leaves: &[TreeLeaf],

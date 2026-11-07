@@ -3,7 +3,9 @@
 //! stands in for the NSM and the AWS root, and fakes stand in for the chain
 //! status check (the fake chain and its nodes), the card registry
 //! (`MemoryRegistry`), the durable journal (a shared journal in memory) and
-//! the Phantom Key maker. Included by path by the tests that need it, next
+//! the Phantom Key maker (a stand-in, or the enclave's own
+//! `CoreKeyMakerSource` on the tests' chain). Included by path by the tests
+//! that need it, next
 //! to `authority` (fixtures/nitro_authority.rs), `release`
 //! (fixtures/test_release_key.rs) and `support`.
 #![allow(dead_code)]
@@ -17,8 +19,8 @@ use std::time::Duration;
 use ghost_seal::attestation::{AttestationSource, AttestationVerifier};
 use ghost_seal::chain_check::safe_depth;
 use ghost_seal::enclave_serve::{
-    ChainStatus, DurableJournal, EnclaveAttestation, EnclaveService, KeyMakerSource, MemoryServiceLog, RegistrySource,
-    ServiceConfig, ServiceDeps,
+    ChainStatus, CoreKeyMakerSource, DurableJournal, EnclaveAttestation, EnclaveService, KeyMakerSource,
+    MemoryServiceLog, RegistrySource, ServiceConfig, ServiceDeps,
 };
 use ghost_seal::enclave_tls::EnclaveTls;
 use ghost_seal::journal::Journal;
@@ -31,7 +33,7 @@ use ghost_seal::{
 
 use crate::authority::{Authority, AuthoritySource, NOW};
 use crate::release::TestOnlyReleaseKey;
-use crate::support::nodes::{FakeChain, node_check, two_nodes};
+use crate::support::nodes::{FakeChain, NETWORK, node_check, two_nodes};
 use crate::support::{FixedClock, MEASUREMENT, SharedJournal, SyncMaker, UID};
 
 /// The published-list fixture.
@@ -161,6 +163,21 @@ impl KeyMakerSource for TestKeyMaker {
     fn key_maker(&self) -> Box<dyn PhantomKeyMaker> {
         Box::new(self.0.clone())
     }
+}
+
+/// The enclave's own Phantom Key maker, as the enclave program installs it,
+/// for coins on the tests' chain.
+pub fn core_key_maker() -> Arc<dyn KeyMakerSource> {
+    Arc::new(CoreKeyMakerSource { chain_id: NETWORK.chain_id })
+}
+
+/// Deps with the fake chain check, the registry (holding [`UID`]) and the
+/// journal, and `key_maker` as the Phantom Key maker (none: a Fill is
+/// answered `unavailable`).
+pub fn deps_with_maker(key_maker: Option<Arc<dyn KeyMakerSource>>) -> (ServiceDeps, Fakes) {
+    let (mut deps, fakes) = deps(true, true, true);
+    deps.key_maker = key_maker;
+    (deps, fakes)
 }
 
 /// The fakes behind a [`ServiceDeps`], for the test to drive and read.

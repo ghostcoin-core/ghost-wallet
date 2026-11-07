@@ -18,6 +18,12 @@
 //! card the registry does not hold is refused "Not a Ghost card"
 //! (`not-a-ghost-card`) before any card traffic.
 //!
+//! Its Fill factory is the enclave's Phantom Key maker: a fresh
+//! `CoreKeyMaker` per Fill, the wallet core's derivation, making coins on
+//! the chain of `--network` (the network its chain check follows). It
+//! serves no Fill over HTTP; [`TestSealServer::fill`] runs one on the
+//! server's Seal and journal, for the tests and development tools.
+//!
 //! Its journal is the enclave's log code (`journal_log`) over the host's
 //! file store (`host_journal::HostStore`) in this process, under the test M:
 //! the file `--journal FILE` (created mode 0600), read and verified whole at
@@ -56,17 +62,18 @@ use tiny_http::{Header, Method, Request, Response, Server, SslConfig};
 use crate::card_keys::CardUid;
 use crate::chain_check::{ChainNode, CoinQuery, CoinStatus, CoinStatusCheck, Network, NodeChainCheck};
 use crate::error::SealError;
-use crate::flows::{Seal, SealConfig};
+use crate::flows::{FillOutcome, FillRequest, Seal, SealConfig};
 use crate::host_journal::HostStore;
 use crate::journal::{Journal, MemoryJournal};
 use crate::journal_log::JournalLog;
+use crate::key_maker::CoreKeyMaker;
 use crate::node_list::NodeList;
 use crate::node_rpc::{NodeAddress, RpcNode, TcpTransport};
 use crate::primitives::sha3_256;
 use crate::registry::{CardRegistry, FileRegistry, MemoryRegistry};
-use crate::relay::{Relay, RelayError, RelayLimits, SessionId, Step, from_hex, to_hex};
+use crate::relay::{KeyMakerFactory, Relay, RelayError, RelayLimits, SessionId, Step, from_hex, to_hex};
 use crate::secrets::MasterKey;
-use crate::traits::{SystemClock, SystemRandom};
+use crate::traits::{CardTransport, PhantomKeyMaker, SystemClock, SystemRandom};
 
 /// The text whose SHA3-256 is the test M. Public: the test M protects nothing.
 pub const DEV_TEST_MASTER_LABEL: &[u8] = b"ghost-seal/dev-test-master/v1";
@@ -435,6 +442,7 @@ pub struct TestSealServer {
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
     sessions: SessionSeals,
+    key_maker: KeyMakerFactory,
 }
 
 /// How the server's Seals are made.
@@ -503,6 +511,12 @@ impl TestSealServer {
         // served.
         let journal = open_dev_journal(&options.journal)?;
 
+        // A Fill's Phantom Key maker: the wallet core's derivation, for coins
+        // on the network the chain check follows (`--network`).
+        let chain_id = installed.network.chain_id;
+        let key_maker: KeyMakerFactory =
+            Arc::new(move || Box::new(CoreKeyMaker::new(chain_id)) as Box<dyn PhantomKeyMaker>);
+
         // Each session's Seal: the test M, its own check over the nodes, the
         // registry as it stands and the one shared journal.
         let sessions = SessionSeals { installed, journal };
@@ -541,7 +555,7 @@ impl TestSealServer {
                 }
             }));
         }
-        Ok(TestSealServer { addr, https: options.tls.is_some(), shared, stop, threads, sessions })
+        Ok(TestSealServer { addr, https: options.tls.is_some(), shared, stop, threads, sessions, key_maker })
     }
 
     /// A Seal as each of the server's sessions runs: the test M, the chain
@@ -550,6 +564,18 @@ impl TestSealServer {
     /// HTTP (a Fill) on the same journal.
     pub fn seal(&self) -> Seal {
         self.sessions.seal()
+    }
+
+    /// A fresh Phantom Key maker from the server's Fill factory: the wallet
+    /// core's derivation on the chain check's network.
+    pub fn key_maker(&self) -> Box<dyn PhantomKeyMaker> {
+        (self.key_maker)()
+    }
+
+    /// A Fill of `card` on the server's Seal and journal, its key made by
+    /// the server's Fill factory.
+    pub fn fill(&self, card: &mut dyn CardTransport, request: &FillRequest) -> Result<FillOutcome, SealError> {
+        self.seal().fill(card, request, self.key_maker().as_mut())
     }
 
     /// The address it listens on.

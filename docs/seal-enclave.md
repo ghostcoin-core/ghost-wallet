@@ -384,9 +384,12 @@ the card registry the host loads (`LoadedRegistry`) and the durable
 journal: the append-only sealed log (`seal/src/journal_log.rs`, a
 `SharedLog`) over the parent's store (`seal/src/host_journal.rs`, below).
 With M, the three and a loaded registry, `ServiceDeps::ready()` is true and
-Check, Fill confirmation and Open are served. It installs no
-`KeyMakerSource` yet (a Fill needs one), so a Fill start is still answered
-HTTP 503 `unavailable`.
+Check, Fill confirmation and Open are served. It also installs the Phantom
+Key maker a Fill needs (`CoreKeyMakerSource`, a fresh `CoreKeyMaker` from
+`seal/src/key_maker.rs` per Fill), on the chain of the release network the
+chain check follows, so a Fill start is served too. Without a key maker a
+Fill start is answered HTTP 503 `unavailable` while the other flows are
+served.
 
 The journal is opened once, with the M just installed
 (`DurableJournal::journal(&master)`): the enclave reads every record from
@@ -452,10 +455,7 @@ real PCR values (they need a Nitro-capable builder), the release key (made
 offline by the release owner; its public half goes into `RELEASE_KEY_HEX`
 before the first image is built, and its signature into
 `enclave/measurements.json` each time a build is published), the reproducibility check
-in CI, what the enclave still needs before it answers every flow (the
-`KeyMakerSource` for a Fill; the chain check over the host's vsock ports 5003
-and 5004, the card registry loaded by the host and the durable sealed journal
-on the host's vsock port 5005 are installed), the journal's head kept where
+in CI, the journal's head kept where
 the host cannot touch it (so a tail cut while the enclave is stopped is
 caught) and a journal that survives a replaced host, a faster Vanish lookup than the
 bounded block scan, nodes of independent operators in the release node list,
