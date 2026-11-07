@@ -8,7 +8,7 @@ mod nitro_authority;
 
 use ghost_wallet_core::seal_attestation::{
     AWS_NITRO_ROOT_SHA256, AttestationRefusal, PinnedSealBuild, SealAttestationCheck, VerifiedSeal,
-    seal_attestation_challenge, verify_seal_attestation, verify_with_root,
+    check_nitro_document, seal_attestation_challenge, verify_seal_attestation, verify_with_root,
 };
 use ghost_wallet_core::seal_open::phone_key_of;
 use ml_dsa::{ExpandedSigningKey, MlDsa65, Seed};
@@ -521,6 +521,177 @@ fn garbage_never_panics() {
         let _ = verify(&check(bytes), &seal.authority);
         let _ = verify(&check(good[..cut].to_vec()), &seal.authority);
     }
+}
+
+// --- Indefinite-length CBOR, as the NSM's CBOR library writes it -------------
+
+/// A string of head `initial` (0x5f bytes, 0x7f text) in three chunks: the
+/// first half, an empty chunk, the rest. `piece` writes one chunk.
+fn chunked(initial: u8, len: usize, mid: usize, piece: impl Fn(usize, usize) -> Value) -> Vec<u8> {
+    [vec![initial], cbor(&piece(0, mid)), cbor(&piece(mid, mid)), cbor(&piece(mid, len)), vec![0xff]].concat()
+}
+
+/// `value` with every map, array, byte string and text string written
+/// indefinite-length.
+fn indefinite(value: &Value) -> Vec<u8> {
+    match value {
+        Value::Bytes(b) => chunked(0x5f, b.len(), b.len() / 2, |from, to| Value::Bytes(b[from..to].to_vec())),
+        Value::Text(t) => {
+            let mut mid = t.len() / 2;
+            while !t.is_char_boundary(mid) {
+                mid -= 1;
+            }
+            chunked(0x7f, t.len(), mid, |from, to| Value::Text(t[from..to].into()))
+        }
+        Value::Array(items) => [vec![0x9f], items.iter().flat_map(indefinite).collect(), vec![0xff]].concat(),
+        Value::Map(fields) => {
+            let inner: Vec<u8> = fields.iter().flat_map(|(k, v)| [indefinite(k), indefinite(v)].concat()).collect();
+            [vec![0xbf], inner, vec![0xff]].concat()
+        }
+        Value::Tag(tag, inner) => {
+            let mut head = cbor(&Value::Tag(*tag, Box::new(Value::Null)));
+            head.pop();
+            [head, indefinite(inner)].concat()
+        }
+        other => cbor(other),
+    }
+}
+
+#[test]
+fn core_indefinite_map_payload_decodes() {
+    let seal = Seal::new();
+    let definite = cbor(&Value::Map(seal.fields()));
+    let payload = indefinite(&Value::Map(seal.fields()));
+    assert_eq!(payload[0], 0xbf, "an indefinite map, as the NSM wrote it");
+    assert_ne!(payload, definite);
+    let document = seal.authority.sign_payload(&payload);
+
+    // It verifies, and says what the definite form says.
+    assert_eq!(check_nitro_document(&document, &seal.authority.fingerprint(), NOW), Ok(()));
+    let found = verify(&check(seal.attestation_of(&document)), &seal.authority).expect("accepted");
+    assert_eq!(Ok(found.clone()), verify(&check(seal.attestation()), &seal.authority));
+    assert_eq!(found.build_name, "seal-test-new");
+    assert_eq!(found.measurement, allowed().pcr0.to_vec());
+    assert_eq!(found.verifying_key, verifying_key(7));
+
+    // Its PCRs and user data are read, not passed over.
+    let mut other = Seal::new();
+    other.pcrs = pcrs(0xa3, 0xb1, 0xc2);
+    let unpinned = other.authority.sign_payload(&indefinite(&Value::Map(other.fields())));
+    assert_eq!(refusal_of(&check(other.attestation_of(&unpinned)), &other.authority), AttestationRefusal::NotPinned);
+    let mut unbound = Seal::new();
+    unbound.challenge = vec![0x11; 32];
+    let unbound = unbound.authority.sign_payload(&indefinite(&Value::Map(unbound.fields())));
+    assert_eq!(refusal_of(&check(seal.attestation_of(&unbound)), &seal.authority), AttestationRefusal::KeysNotBound);
+
+    // The signature covers the payload's bytes as carried: signed over the
+    // definite form, the indefinite one is refused, and the other way round.
+    let protected = es384_protected_header();
+    let swapped = encode_cose_sign1(&protected, &payload, &seal.authority.signature(&definite));
+    assert_eq!(refusal_of(&check(seal.attestation_of(&swapped)), &seal.authority), AttestationRefusal::BadSignature);
+    let swapped = encode_cose_sign1(&protected, &definite, &seal.authority.signature(&payload));
+    assert_eq!(refusal_of(&check(seal.attestation_of(&swapped)), &seal.authority), AttestationRefusal::BadSignature);
+
+    // The whole document indefinite too: tag 18 over an indefinite array,
+    // an indefinite empty map, the payload's bytes in chunks.
+    let parts = Value::Array(vec![
+        Value::Bytes(protected),
+        Value::Map(Vec::new()),
+        Value::Bytes(payload.clone()),
+        Value::Bytes(seal.authority.signature(&payload)),
+    ]);
+    let whole = indefinite(&Value::Tag(18, Box::new(parts)));
+    assert_eq!(&whole[..2], &[0xd2, 0x9f]);
+    assert_eq!(check_nitro_document(&whole, &seal.authority.fingerprint(), NOW), Ok(()));
+    assert_eq!(verify(&check(seal.attestation_of(&whole)), &seal.authority), Ok(found));
+    // One byte of the payload changed inside a chunk is caught.
+    let pcr0 = whole.windows(4).position(|w| w == [0xa2; 4]).expect("PCR0 is there");
+    let mut changed = whole.clone();
+    changed[pcr0] ^= 0x01;
+    assert_eq!(
+        check_nitro_document(&changed, &seal.authority.fingerprint(), NOW),
+        Err("attestation document signature does not verify".to_owned())
+    );
+}
+
+#[test]
+fn core_indefinite_items_keep_the_rules() {
+    // Bytes given as a whole document: the decoder's reason and where.
+    let refusal = |bytes: &[u8]| check_nitro_document(bytes, &[0; 32], NOW).expect_err("refused");
+    let not_cbor = |reason: &str, at: usize, bytes: &[u8]| {
+        format!("malformed attestation document: the document is not CBOR: {reason} at byte {at} of {}", bytes.len())
+    };
+    const RESERVED: &str = "indefinite or reserved length";
+    const STRAY: &str = "a break outside an indefinite-length item";
+    const CHUNK: &str = "a chunk is not a definite-length string of its string's type";
+    let cases: Vec<(Vec<u8>, &str, usize)> = vec![
+        // Integers and tags have no indefinite form.
+        (vec![0x1f], RESERVED, 0),
+        (vec![0x81, 0x3f], RESERVED, 1),
+        (vec![0x9f, 0xdf, 0x00, 0xff], RESERVED, 1),
+        // A break only ends an indefinite item, a map's only where a key would start.
+        (vec![0xff], STRAY, 0),
+        (vec![0x81, 0xff], STRAY, 1),
+        (vec![0xa1, 0x01, 0xff], STRAY, 2),
+        (vec![0xbf, 0x01, 0xff], STRAY, 2),
+        (vec![0xbf, 0x01, 0x02, 0x03, 0xff, 0xff], STRAY, 4),
+        (vec![0xd2, 0xff], STRAY, 1),
+        (vec![0x9f, 0xff, 0xff], "data after the value", 2),
+        // Duplicate keys inside an indefinite map.
+        (vec![0xbf, 0x61, b'a', 0x01, 0x61, b'a', 0x02, 0xff], "a map key appears twice", 4),
+        (vec![0xbf, 0x61, b'a', 0x01, 0x7f, 0x61, b'a', 0xff, 0x02, 0xff], "a map key appears twice", 4),
+        // A chunk is a definite-length string of its string's type.
+        (vec![0x5f, 0x61, b'a', 0xff], CHUNK, 1),
+        (vec![0x7f, 0x41, b'a', 0xff], CHUNK, 1),
+        (vec![0x5f, 0x41, 0x00, 0x5f, 0xff, 0xff], CHUNK, 3),
+        (vec![0x5f, 0x00, 0xff], CHUNK, 1),
+        (vec![0x5f, 0x5c, 0xff], RESERVED, 1),
+        // Text is UTF-8, each chunk whole.
+        (vec![0x7f, 0x61, b'a', 0x62, 0xc3, 0x28, 0xff], "text is not UTF-8", 3),
+        (vec![0x7f, 0x61, 0xc3, 0x61, 0xa9, 0xff], "text is not UTF-8", 1),
+        // Floats and simple values other than false, true and null.
+        (vec![0x9f, 0xf9, 0x3c, 0x00, 0xff], "a float or simple value", 1),
+        (vec![0xbf, 0x01, 0xf7, 0xff], "a float or simple value", 2),
+        // Truncation, and no chunk longer than what is left.
+        (vec![0x9f, 0x01], "truncated", 2),
+        (vec![0xbf, 0x01], "truncated", 2),
+        (vec![0x5f, 0x41, 0x00], "truncated", 3),
+        (vec![0x5f, 0x43, 0x00, 0xff], "a length runs past the end", 1),
+        (vec![0x5f, 0x5a, 0xff, 0xff, 0xff, 0xff, 0xff], "a length runs past the end", 1),
+        // Nesting: 16 levels below the top, indefinite or not, and no deeper.
+        ([vec![0x9f; 17], vec![0x00], vec![0xff; 17]].concat(), "nested too deep", 17),
+        ([[0xbf, 0x00].repeat(17), vec![0x00], vec![0xff; 17]].concat(), "nested too deep", 33),
+    ];
+    for (bytes, reason, at) in &cases {
+        assert_eq!(refusal(bytes), not_cbor(reason, *at, bytes), "{bytes:02x?}");
+    }
+    // Reserved additional information stays reserved on every major type.
+    for info in 28..=30u8 {
+        for major in 0..=6u8 {
+            let bytes = [0x82, 0x00, major << 5 | info, 0x00];
+            assert_eq!(refusal(&bytes), not_cbor(RESERVED, 2, &bytes), "major {major}, info {info}");
+        }
+    }
+    // As deep as allowed, it decodes (and is then not a COSE_Sign1).
+    let deepest = [vec![0x9f; 16], vec![0x00], vec![0xff; 16]].concat();
+    assert_eq!(refusal(&deepest), "malformed attestation document");
+
+    // In a signed payload: a key twice in the indefinite map, a break in
+    // place of a value, the break missing.
+    let seal = Seal::new();
+    let payload = indefinite(&Value::Map(seal.fields()));
+    let end = payload.len() - 1;
+    let payload_refusal = |payload: &[u8]| {
+        check_nitro_document(&seal.authority.sign_payload(payload), &seal.authority.fingerprint(), NOW).unwrap_err()
+    };
+    let in_payload = |reason: &str, at: usize, length: usize| {
+        format!("malformed attestation document: the payload is not CBOR: {reason} at byte {at} of {length}")
+    };
+    let twice = [&payload[..end], &cbor(&Value::Text("nonce".into())), &[0xf6, 0xff]].concat();
+    assert_eq!(payload_refusal(&twice), in_payload("a map key appears twice", end, twice.len()));
+    let stray = [&payload[..end], &cbor(&Value::Text("extra".into())), &[0xff]].concat();
+    assert_eq!(payload_refusal(&stray), in_payload(STRAY, stray.len() - 1, stray.len()));
+    assert_eq!(payload_refusal(&payload[..end]), in_payload("truncated", end, end));
 }
 
 #[test]

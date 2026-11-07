@@ -944,14 +944,19 @@ mod der {
     }
 }
 
-/// A small CBOR (RFC 8949) reader and writer for attestation documents:
-/// definite lengths only, no floats, simple values limited to false, true
-/// and null, nesting at most 16 deep, no duplicate map keys. The writer
-/// always uses the shortest heads.
+/// A small CBOR (RFC 8949) reader and writer for attestation documents: no
+/// floats, simple values limited to false, true and null, nesting at most 16
+/// deep, no duplicate map keys. The reader takes indefinite-length strings,
+/// arrays and maps (the NSM writes them) as well as definite ones; the
+/// writer always uses definite lengths and the shortest heads.
 mod cbor {
     use core::fmt;
 
     const MAX_DEPTH: usize = 16;
+    /// The additional information of an indefinite-length head.
+    const INDEFINITE: u8 = 31;
+    /// The "break" that ends an indefinite-length item.
+    const BREAK: u8 = 0xff;
 
     /// A CBOR value.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1102,6 +1107,68 @@ mod cbor {
             Ok(n as usize)
         }
 
+        /// At the next item's place inside an indefinite-length item: true
+        /// (the break taken) at a break, false (nothing taken) otherwise.
+        fn at_break(&mut self) -> Result<bool, CborError> {
+            self.item = self.at;
+            match self.bytes.get(self.at) {
+                None => Err(self.error("truncated")),
+                Some(&BREAK) => {
+                    self.at += 1;
+                    Ok(true)
+                }
+                Some(_) => Ok(false),
+            }
+        }
+
+        /// The chunks of an indefinite-length string of `major` (2 or 3),
+        /// after its head, joined: each a definite-length string of the
+        /// same major type (text each valid UTF-8), up to the break. The
+        /// whole is never longer than the chunks read, so never longer than
+        /// the input.
+        fn chunks(&mut self, major: u8) -> Result<Vec<u8>, CborError> {
+            let mut joined = Vec::new();
+            while !self.at_break()? {
+                let initial = self.fixed::<1>()?[0];
+                if initial >> 5 != major || initial & 0x1f == INDEFINITE {
+                    return Err(self.error("a chunk is not a definite-length string of its string's type"));
+                }
+                let n = self.length(initial & 0x1f)?;
+                let error = self.error("text is not UTF-8");
+                let chunk = self.take(n)?;
+                if major == 3 && core::str::from_utf8(chunk).is_err() {
+                    return Err(error);
+                }
+                joined.extend_from_slice(chunk);
+            }
+            Ok(joined)
+        }
+
+        /// The fields of a map up to `n` of them, or (for `None`, an
+        /// indefinite-length map) up to a break where a key would start.
+        fn fields(&mut self, n: Option<usize>, depth: usize) -> Result<Vec<(Value, Value)>, CborError> {
+            let mut fields: Vec<(Value, Value)> = Vec::with_capacity(n.unwrap_or(0));
+            loop {
+                match n {
+                    Some(n) if fields.len() == n => break,
+                    None if self.at_break()? => break,
+                    _ => {}
+                }
+                let key_at = self.at;
+                let key = self.value(depth + 1)?;
+                if fields.iter().any(|(k, _)| *k == key) {
+                    // At the second key's head (a key may hold items, or
+                    // end in a break).
+                    self.item = key_at;
+                    return Err(self.error("a map key appears twice"));
+                }
+                // A break here, in place of the value, is a stray break.
+                let value = self.value(depth + 1)?;
+                fields.push((key, value));
+            }
+            Ok(fields)
+        }
+
         fn value(&mut self, depth: usize) -> Result<Value, CborError> {
             self.item = self.at;
             if depth > MAX_DEPTH {
@@ -1109,6 +1176,27 @@ mod cbor {
             }
             let initial = self.fixed::<1>()?[0];
             let (major, info) = (initial >> 5, initial & 0x1f);
+            if info == INDEFINITE {
+                return Ok(match major {
+                    2 => Value::Bytes(self.chunks(2)?),
+                    3 => {
+                        let error = self.error("text is not UTF-8");
+                        // Each chunk is UTF-8, so the whole is too.
+                        Value::Text(String::from_utf8(self.chunks(3)?).map_err(|_| error)?)
+                    }
+                    4 => {
+                        let mut items = Vec::new();
+                        while !self.at_break()? {
+                            items.push(self.value(depth + 1)?);
+                        }
+                        Value::Array(items)
+                    }
+                    5 => Value::Map(self.fields(None, depth)?),
+                    7 => return Err(self.error("a break outside an indefinite-length item")),
+                    // Integers and tags have no indefinite form.
+                    _ => return Err(self.error("indefinite or reserved length")),
+                });
+            }
             Ok(match major {
                 0 => Value::Unsigned(self.argument(info)?),
                 1 => Value::Negative(self.argument(info)?),
@@ -1132,17 +1220,7 @@ mod cbor {
                 }
                 5 => {
                     let n = self.length(info)?;
-                    let mut fields: Vec<(Value, Value)> = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        let key = self.value(depth + 1)?;
-                        if fields.iter().any(|(k, _)| *k == key) {
-                            // At the second key: the item just read.
-                            return Err(self.error("a map key appears twice"));
-                        }
-                        let value = self.value(depth + 1)?;
-                        fields.push((key, value));
-                    }
-                    Value::Map(fields)
+                    Value::Map(self.fields(Some(n), depth)?)
                 }
                 6 => {
                     let tag = self.argument(info)?;

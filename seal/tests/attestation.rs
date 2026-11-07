@@ -305,7 +305,14 @@ fn cbor_round_trips_and_refuses_what_it_does_not_take() {
         (key("list"), Value::Array(vec![Value::Bool(true), Value::Null, Value::Tag(18, Box::new(Value::Bool(false)))])),
     ]);
     assert_eq!(cbor::decode(&cbor::encode(&value)).unwrap(), value);
-    assert!(cbor::decode(&[0x5f, 0x40, 0xff]).is_err(), "indefinite length");
+    // An indefinite-length byte string of one empty chunk is the empty string.
+    assert_eq!(cbor::decode(&[0x5f, 0x40, 0xff]), Ok(Value::Bytes(Vec::new())));
+    // A reserved length (additional information 28) is not.
+    let error = cbor::decode(&[0x82, 0x00, 0x5c, 0x00]).unwrap_err();
+    assert_eq!((error.reason, error.at), ("indefinite or reserved length", 2), "a reserved length");
+    // Nor is a break with nothing to end.
+    let error = cbor::decode(&[0x82, 0x00, 0xff]).unwrap_err();
+    assert_eq!((error.reason, error.at), ("a break outside an indefinite-length item", 2), "a stray break");
     assert!(cbor::decode(&[0xf9, 0x3c, 0x00]).is_err(), "a float");
     assert!(cbor::decode(&[0xa2, 0x01, 0x01, 0x01, 0x02]).is_err(), "a duplicate key");
     assert!(cbor::decode(&[0x5a, 0xff, 0xff, 0xff, 0xff]).is_err(), "a length past the end");
