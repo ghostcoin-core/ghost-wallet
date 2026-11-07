@@ -80,8 +80,8 @@ describe('enclave/deploy/seal-stack.template.json', () => {
       const [family, size] = value.split('.');
       expect([value, ENCLAVE_FAMILIES.includes(family)]).toEqual([value, true]);
       expect(value).not.toMatch(/^t\d/);
-      // Room for the enclave's two vCPUs and the host's own.
-      expect(size).toMatch(/^\d*xlarge$/);
+      // Room for at least the enclave's one vCPU and the host's own.
+      expect(size).toMatch(/^(large|\d*xlarge)$/);
     }
     // arm64 hosts for the arm64 enclave program.
     expect(buildSetting('SEAL_TARGET')).toBe('aarch64-unknown-linux-gnu');
@@ -138,7 +138,7 @@ describe('enclave/deploy/seal-stack.template.json', () => {
     expect(script).toContain('nitro-enclaves-allocator.service');
     expect(script).toMatch(/nitro-cli run-enclave .*--cpu-count \$\{EnclaveCpuCount\} --memory \$\{EnclaveMemoryMiB\}/);
     expect(script).not.toContain('--debug-mode');
-    expect(template.Parameters.EnclaveCpuCount.MinValue).toBeGreaterThanOrEqual(2);
+    expect(template.Parameters.EnclaveCpuCount.MinValue).toBeGreaterThanOrEqual(1);
     expect(template.Parameters.EnclaveMemoryMiB.MinValue).toBeGreaterThanOrEqual(1024);
   });
 

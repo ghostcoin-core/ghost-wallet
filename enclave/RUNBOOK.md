@@ -28,7 +28,24 @@ Short operating notes for the Seal on AWS Nitro Enclaves. The design is in
 
 An AWS account (Nathan's step), the aws CLI and jq for `deploy.sh`, and a
 Nitro-capable arm64 builder (Amazon Linux 2023, docker, `aws-nitro-enclaves-cli`,
-jq) for `compute-pcrs.sh`. Expect roughly $200 to $400 a month for 2 to 3 hosts.
+jq) for `compute-pcrs.sh`.
+
+Each region runs one host, a c7g.large by default (`InstanceType` in
+`enclave/deploy/seal-stack.template.json`): 2 vCPU and 4 GiB, with Nitro
+Enclaves support. The enclave takes 1 vCPU and 2048 MiB (`EnclaveCpuCount`,
+`EnclaveMemoryMiB`); the host keeps the other vCPU and about 2 GiB for the
+proxy units. Expect about $160 a month for three c7g.large hosts (about $53
+each in us-east-1), against about $105 each for a c7g.xlarge. The template
+also takes c6g.large and m7g.large, and the xlarge and 2xlarge sizes.
+
+A larger size is a redeploy that replaces the host: redeploy one region's
+stack with `InstanceType` set to the new size (for example
+`InstanceType=c7g.xlarge`, and a larger `EnclaveCpuCount` if the enclave
+should get more), the rest of its parameters unchanged. The new host joins M
+from a running region and restores its journal from a peer, as in "Replace a
+lost region". Replace one region at a time, and only once the one before
+serves again. A stack keeps its size when `deploy.sh` redeploys it, since
+`deploy.sh` does not set `InstanceType`.
 
 ## Release key (once, before the first image)
 
