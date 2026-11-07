@@ -97,40 +97,10 @@ fn list_with(change: impl Fn(String) -> String) -> String {
 }
 
 #[test]
-fn the_published_list_holds_the_live_builds_and_refuses_any_other() {
+fn the_published_list_holds_no_build_yet_and_refuses_every_seal() {
     let published = MeasurementList::parse(PUBLISHED).expect("enclave/measurements.json parses");
-    let live = [
-        (
-            "seal-2026-11-07c-us-east-1",
-            "1912432154f1c0afeb0ab5f3cec6483ef9f8fc194207e572b0d4593110159c8e589ca1e73091538fad1ce427acfcc752",
-            "144fbf212cf269355f5965e726c5c147adf9a5aee67c2ffcb6eb7e5aa51439444cbf2a53ae6a3aed928f9829152e04a7",
-        ),
-        (
-            "seal-2026-11-07c-eu-central-1",
-            "ebc96b54e23b88062170a7a6b028a969a1e28759e095d2b289b9c2ae816d68fcc24063f77aaffb994110eb88821ef67b",
-            "6a04b33dfd0ddf1bc872f4449f034060aeb913fe4bd8741e507edec4c60403fe3ff1b6e9fed9c9a3a1c3e958eabff470",
-        ),
-        (
-            "seal-2026-11-07c-ap-southeast-1",
-            "8c4c1fc47d821753a1a5881b404842f3556ab5a5beb16ea47a02591f4e23d95521c97276d91dddf727962756c2ac5c00",
-            "e5b838beabfd3127e5c567db0afa0460a3c7d890ffe822905a049391e7ef3fd98c9fa8fc3788e035cbe81688bb7bb8c8",
-        ),
-    ];
-    let pcr1 = "3b4a7e1b5f13c5a1000b3ed32ef8995ee13e9876329f9bc72650b918329ef9cf4e2e4d1e1e37375dab0ba56ba0974d03";
-    let builds = published.builds();
-    assert_eq!(builds.len(), live.len());
-    for (build, (name, pcr0, pcr2)) in builds.iter().zip(live) {
-        let expected = Pcrs {
-            pcr0: parse_pcr(pcr0).unwrap(),
-            pcr1: parse_pcr(pcr1).unwrap(),
-            pcr2: parse_pcr(pcr2).unwrap(),
-        };
-        assert_eq!(build.name, name);
-        assert_eq!(build.released, "2026-11-07");
-        assert_eq!(build.status, BuildStatus::Allowed);
-        assert_eq!(build.pcrs, expected);
-        assert_eq!(published.check(&expected).expect("a live build is accepted").name, name);
-    }
+    assert!(published.is_empty());
+    assert_eq!(published, MeasurementList::empty());
     assert_eq!(published.check(&pcrs(0xa1, 0xb1, 0xc1)), Err(MeasurementRefused::NotListed));
 }
 
