@@ -61,7 +61,7 @@ function cargoMetadataLocked(manifest: string) {
 }
 
 if (unavailable) {
-  console.warn(`Skipping the tools' lock file checks: ${unavailable}`);
+  console.warn(`Not running the tools' lock file checks: ${unavailable}`);
 }
 const withCargo = unavailable ? it.skip : it;
 
