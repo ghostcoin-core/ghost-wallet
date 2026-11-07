@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "about": "The home region of a card: of the ordered region list, the region id whose SHA3-256(label || region id || UID) is the greatest, compared as big-endian bytes (on a tie, the earlier region). The region ids are their ASCII bytes, the UID its 7 bytes. Every other region refuses the card with the reason wrong-region, naming this one.",
+  "label": "ghost-seal/v1/home-region",
+  "regions": ["us-east-1", "eu-central-1", "ap-southeast-1"],
+  "cards": [
+    { "uid": "04102233445566", "home": "us-east-1" },
+    { "uid": "04132230445569", "home": "us-east-1" },
+    { "uid": "0414223744556a", "home": "eu-central-1" },
+    { "uid": "04518dfaa96180", "home": "eu-central-1" },
+    { "uid": "04112232445567", "home": "ap-southeast-1" },
+    { "uid": "0415223644556b", "home": "ap-southeast-1" }
+  ]
+}

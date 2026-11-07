@@ -289,4 +289,37 @@ describe('enclave/scripts/deploy.sh', () => {
     expect(deploy).toMatch(/for value in [^\n]*"\$ghost_node" "\$ghost_node_2"; do/);
     expect(deploy).toContain('[ "$ghost_node" != "$ghost_node_2" ]');
   });
+
+  it('gives every stack the two other regions as journal anchor peers, for ports 5006 and 5007', () => {
+    for (const parameter of [
+      '"AnchorPeerRegion=${others[0]}"',
+      '"AnchorPeerRegion2=${others[1]}"',
+      '"AnchorPeerAddress=$anchor"',
+      '"AnchorPeerAddress2=$anchor_2"',
+    ]) {
+      expect(deploy).toContain(parameter);
+    }
+    // The other regions, in the list's order, this region left out.
+    expect(deploy).toContain(`for other in $(jq -r '.regions[].region' "$regions"); do`);
+    expect(deploy).toContain('[ "$other" = "$region" ] || others+=("$other")');
+    expect(deploy).toMatch(/journal anchored in \$\{others\[0\]\} \(5006\) and \$\{others\[1\]\} \(5007\)/);
+    // Each template parameter deploy.sh sets is one the template takes.
+    const set = [...deploy.matchAll(/^ {4}"([A-Za-z0-9]+)=/gm)].map((m) => m[1]);
+    expect(set).toEqual(expect.arrayContaining(['AnchorPeerRegion', 'AnchorPeerRegion2', 'AnchorPeerAddress', 'AnchorPeerAddress2']));
+    for (const name of set) {
+      expect([name, name in template.Parameters]).toEqual([name, true]);
+    }
+  });
+
+  it('deploys a region again once every peer exists, and refuses a region list the image does not have', () => {
+    expect(deploy).toContain('missing+=("$index")');
+    expect(deploy).toMatch(/for index in "\$\{again\[@\]\}"; do\n {4}deploy_region "\$index"\n {2}done/);
+    expect(deploy).toContain('seal/src/journal_anchor.rs');
+    expect(deploy).toContain('if [ "$compiled" != "$listed" ]; then');
+    const anchor = read('seal', 'src', 'journal_anchor.rs');
+    const compiled = /pub const RELEASE_REGIONS: \[&str; \d+\] = \[([^\]]*)\];/.exec(anchor)?.[1] ?? '';
+    expect([...compiled.matchAll(/"([a-z0-9-]+)"/g)].map((m) => m[1])).toEqual(
+      (regions.regions as { region: string }[]).map((r) => r.region),
+    );
+  });
 });

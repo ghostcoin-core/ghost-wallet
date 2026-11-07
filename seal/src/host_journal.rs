@@ -27,6 +27,15 @@
 //! frame [`ANSWER_RECORD`] || counter || record per record, in order, then
 //! [`ANSWER_OK`] || the number of records (u64).
 //!
+//! **Peer logs.** The host also keeps, for each other region, the copy of
+//! that region's log its enclave holds as a peer (`journal_anchor`): one
+//! file per origin region (`/var/lib/seal/peer-<region>.log`,
+//! [`peer_log_file`]), the same store and the same checks, ciphertext only
+//! ([`HostStores`]). A request about one is [`REQUEST_PEER`] || origin
+//! length (1) || origin || an append or read-all request as above, answered
+//! the same way; a request about a region the host was not given a file
+//! for is refused.
+//!
 //! The store and its file format build with the `nitro` or the
 //! `test-server` feature (the test server keeps its log in such a file, in
 //! its own process); the vsock server and the enclave's client
@@ -55,6 +64,22 @@ pub const REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 pub const REQUEST_APPEND: u8 = 1;
 /// A request: read every record.
 pub const REQUEST_READ_ALL: u8 = 2;
+/// A request about the log kept for a peer region: origin length (1) ||
+/// origin || an append or read-all request.
+pub const REQUEST_PEER: u8 = 3;
+/// Where the parent keeps its peer logs.
+pub const PEER_LOG_DIR: &str = "/var/lib/seal";
+
+/// The file the parent keeps the log of peer region `origin` in.
+pub fn peer_log_file(origin: &str) -> String {
+    format!("{PEER_LOG_DIR}/peer-{origin}.log")
+}
+
+/// The request about the log kept for peer region `origin` that carries
+/// `request` (an append or read-all request).
+pub fn peer_request(origin: &str, request: &[u8]) -> Vec<u8> {
+    [&[REQUEST_PEER, origin.len() as u8][..], origin.as_bytes(), request].concat()
+}
 /// An answer: done (after a read, the number of records follows).
 pub const ANSWER_OK: u8 = 0;
 /// An answer: refused, why follows.
@@ -301,6 +326,73 @@ impl<F: RecordFile> HostStore<F> {
     }
 }
 
+/// What answers the host's request frames: one store, or the journal and
+/// the peer logs ([`HostStores`]).
+pub trait StoreAnswer: Send {
+    /// The answer frames to one request frame.
+    fn answer(&mut self, request: &[u8]) -> Vec<Vec<u8>>;
+}
+
+impl<F: RecordFile> StoreAnswer for HostStore<F> {
+    fn answer(&mut self, request: &[u8]) -> Vec<Vec<u8>> {
+        HostStore::answer(self, request)
+    }
+}
+
+/// Everything the host keeps for its enclave: its journal, and the log of
+/// each peer region it was given a file for.
+pub struct HostStores<F: RecordFile = DiskFile> {
+    journal: HostStore<F>,
+    peers: Vec<(String, HostStore<F>)>,
+}
+
+impl<F: RecordFile> HostStores<F> {
+    /// The `journal` and the `peers`' logs, each named by its origin region
+    /// (a region named twice keeps its first store).
+    pub fn new(journal: HostStore<F>, peers: Vec<(String, HostStore<F>)>) -> HostStores<F> {
+        let mut kept: Vec<(String, HostStore<F>)> = Vec::new();
+        for (origin, store) in peers {
+            if !kept.iter().any(|(seen, _)| *seen == origin) {
+                kept.push((origin, store));
+            }
+        }
+        HostStores { journal, peers: kept }
+    }
+
+    /// The journal.
+    pub fn journal(&self) -> &HostStore<F> {
+        &self.journal
+    }
+
+    /// The log kept for peer region `origin`, if any.
+    pub fn peer(&self, origin: &str) -> Option<&HostStore<F>> {
+        self.peers.iter().find(|(name, _)| name == origin).map(|(_, store)| store)
+    }
+
+    /// The origin regions of the peer logs, in the order given.
+    pub fn origins(&self) -> Vec<&str> {
+        self.peers.iter().map(|(name, _)| name.as_str()).collect()
+    }
+}
+
+impl<F: RecordFile> StoreAnswer for HostStores<F> {
+    fn answer(&mut self, request: &[u8]) -> Vec<Vec<u8>> {
+        let Some((&REQUEST_PEER, rest)) = request.split_first() else {
+            return self.journal.answer(request);
+        };
+        let refused = |why: &str| vec![[&[ANSWER_REFUSED][..], why.as_bytes()].concat()];
+        let Some((&length, rest)) = rest.split_first() else { return refused("unknown request") };
+        let length = usize::from(length);
+        let Some(origin) = rest.get(..length).and_then(|name| std::str::from_utf8(name).ok()) else {
+            return refused("unknown request");
+        };
+        match self.peers.iter_mut().find(|(name, _)| name == origin) {
+            Some((_, store)) => store.answer(&rest[length..]),
+            None => refused("no peer log of that region"),
+        }
+    }
+}
+
 /// The store in the same process (the test server's): an append is `Ok`
 /// only once it is on disk.
 impl<F: RecordFile> LogStore for HostStore<F> {
@@ -323,8 +415,8 @@ mod nitro {
     use std::time::{Duration, Instant};
 
     use super::{
-        ANSWER_OK, ANSWER_RECORD, HostStore, JOURNAL_PORT, PARENT_CID, REQUEST_APPEND, REQUEST_DEADLINE,
-        REQUEST_READ_ALL, RecordFile,
+        ANSWER_OK, ANSWER_RECORD, JOURNAL_PORT, PARENT_CID, REQUEST_APPEND, REQUEST_DEADLINE, REQUEST_READ_ALL,
+        StoreAnswer, peer_request,
     };
     use crate::error::SealError;
     use crate::journal_log::LogStore;
@@ -333,7 +425,7 @@ mod nitro {
 
     /// Answers request frames on `stream` until it closes or fails, taking
     /// the store's lock for each request only.
-    pub fn serve_connection<F: RecordFile, S: Read + Write>(store: &Mutex<HostStore<F>>, stream: &mut S) {
+    pub fn serve_connection<A: StoreAnswer, S: Read + Write>(store: &Mutex<A>, stream: &mut S) {
         while let Ok(request) = read_frame(stream) {
             let frames = store.lock().unwrap_or_else(|e| e.into_inner()).answer(&request);
             for frame in frames {
@@ -344,11 +436,12 @@ mod nitro {
         }
     }
 
-    /// Serves `store` on `listener` (vsock port [`JOURNAL_PORT`] on the
+    /// Serves `store` (a `HostStore`, or the journal and the peer logs,
+    /// `HostStores`) on `listener` (vsock port [`JOURNAL_PORT`] on the
     /// parent): two workers, each connection limited to `connection_time`.
-    pub fn serve<L: ProxyListener, F: RecordFile + 'static>(
+    pub fn serve<L: ProxyListener, A: StoreAnswer + 'static>(
         listener: L,
-        store: HostStore<F>,
+        store: A,
         connection_time: Duration,
     ) -> io::Result<()> {
         let store = Arc::new(Mutex::new(store));
@@ -363,6 +456,8 @@ mod nitro {
     pub struct HostJournal<C: Connector = VsockConnector> {
         connector: C,
         deadline: Duration,
+        /// The peer region whose log this is (none: the enclave's journal).
+        origin: Option<String>,
     }
 
     impl HostJournal<VsockConnector> {
@@ -371,19 +466,35 @@ mod nitro {
         pub fn parent() -> HostJournal<VsockConnector> {
             HostJournal::new(VsockConnector { cid: PARENT_CID, port: JOURNAL_PORT }, REQUEST_DEADLINE)
         }
+
+        /// The log the parent keeps for peer region `origin`, on the same
+        /// port.
+        pub fn parent_peer(origin: &str) -> HostJournal<VsockConnector> {
+            HostJournal::parent().peer_log(origin)
+        }
     }
 
     impl<C: Connector> HostJournal<C> {
         /// The store `connector` reaches, each request limited to `deadline`.
         pub fn new(connector: C, deadline: Duration) -> HostJournal<C> {
-            HostJournal { connector, deadline }
+            HostJournal { connector, deadline, origin: None }
+        }
+
+        /// The same host's log of peer region `origin` instead of its
+        /// journal.
+        pub fn peer_log(self, origin: &str) -> HostJournal<C> {
+            HostJournal { origin: Some(origin.to_owned()), ..self }
         }
 
         fn send(&self, request: &[u8]) -> Result<DeadlineStream<C::Stream>, SealError> {
             let unreachable = SealError::Journal("the host journal cannot be reached");
             let stream = self.connector.connect_stream().map_err(|_| unreachable.clone())?;
             let mut stream = DeadlineStream::new(stream, Instant::now() + self.deadline);
-            write_frame(&mut stream, request).map_err(|_| unreachable)?;
+            let request = match &self.origin {
+                Some(origin) => peer_request(origin, request),
+                None => request.to_vec(),
+            };
+            write_frame(&mut stream, &request).map_err(|_| unreachable)?;
             Ok(stream)
         }
     }

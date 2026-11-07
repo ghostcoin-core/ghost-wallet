@@ -197,6 +197,8 @@ pub fn deps(chain: bool, registry: bool, journal: bool) -> (ServiceDeps, Fakes) 
         registry: registry.then(|| Arc::new(TestRegistry(vec![UID])) as Arc<dyn RegistrySource>),
         journal: journal.then(|| Arc::new(TestJournal(fakes.journal.clone())) as Arc<dyn DurableJournal>),
         key_maker: Some(Arc::new(TestKeyMaker(fakes.maker.clone()))),
+        regions: None,
+        peer_logs: None,
     };
     (deps, fakes)
 }

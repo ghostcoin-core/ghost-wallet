@@ -15,7 +15,10 @@
 //! journal's durable layer is an append-only log of records sealed under M
 //! and chained by counter and tag (`journal_log`), kept by a store the Seal
 //! does not trust: the parent host's file (`host_journal`, features `nitro`
-//! and `test-server`).
+//! and `test-server`). Its head is anchored in the other regions, which keep
+//! a copy of each region's log (ciphertext only) and restore a cut or lost
+//! one, and each card is served by its home region only
+//! (`journal_anchor`).
 //!
 //! The design, the record layout, the frame and answer formats and the
 //! labels of every key derivation are in `docs/sealed-card.md`.
@@ -62,6 +65,7 @@ pub mod flows;
 #[cfg(any(feature = "nitro", feature = "test-server"))]
 pub mod host_journal;
 pub mod journal;
+pub mod journal_anchor;
 pub mod journal_log;
 pub mod key_maker;
 #[cfg(feature = "nitro")]
@@ -99,7 +103,8 @@ pub use chain_check::{
 pub use error::SealError;
 pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest, Seal, SealConfig};
 pub use journal::{EntryKind, Journal, MemoryJournal};
-pub use journal_log::{JournalLog, LogStore, MemoryLogStore, SharedLog};
+pub use journal_anchor::{Anchor, Peer, PeerLink, PeerLogs, Regions};
+pub use journal_log::{HeadAnchor, JournalLog, LogStore, MemoryLogStore, SharedLog};
 pub use key_maker::CoreKeyMaker;
 pub use record::CardState;
 pub use node_list::{NodeEntry, NodeList};
