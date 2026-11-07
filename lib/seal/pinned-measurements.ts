@@ -8,8 +8,8 @@
 //     "pcr0": 96 hex, "pcr1": 96 hex, "pcr2": 96 hex, "status": "allowed" | "revoked"}]}
 //
 // A Seal is accepted only when its PCR0, PCR1 and PCR2 all equal one allowed
-// build's. A revoked build is never accepted. The list is empty until the
-// first build is published, and an empty list refuses every Seal.
+// build's. A revoked build is never accepted, and an empty list refuses every
+// Seal.
 //
 // The published file may also carry "signature": the release key's ML-DSA-65
 // signature over its builds (6618 lowercase hex digits), which the enclaves
@@ -327,11 +327,36 @@ export function checkMeasurements(list: MeasurementList, measured: Measurements)
 }
 
 /**
- * The builds this app accepts. Empty until the first Seal build is published
- * (its PCRs come from a Nitro-capable builder): until then every Seal is
- * refused. Each entry must also be in `enclave/measurements.json`.
+ * The builds this app accepts: the live Seal's release seal-2026-11-07c, one
+ * build per region, copied from the signed `enclave/measurements.json`. Each
+ * entry must also be in that list, with the same PCRs.
  */
 export const PINNED_MEASUREMENTS: MeasurementList = parseMeasurementList(`{
   "version": 1,
-  "builds": []
+  "builds": [
+    {
+      "name": "seal-2026-11-07c-us-east-1",
+      "released": "2026-11-07",
+      "pcr0": "1912432154f1c0afeb0ab5f3cec6483ef9f8fc194207e572b0d4593110159c8e589ca1e73091538fad1ce427acfcc752",
+      "pcr1": "3b4a7e1b5f13c5a1000b3ed32ef8995ee13e9876329f9bc72650b918329ef9cf4e2e4d1e1e37375dab0ba56ba0974d03",
+      "pcr2": "144fbf212cf269355f5965e726c5c147adf9a5aee67c2ffcb6eb7e5aa51439444cbf2a53ae6a3aed928f9829152e04a7",
+      "status": "allowed"
+    },
+    {
+      "name": "seal-2026-11-07c-eu-central-1",
+      "released": "2026-11-07",
+      "pcr0": "ebc96b54e23b88062170a7a6b028a969a1e28759e095d2b289b9c2ae816d68fcc24063f77aaffb994110eb88821ef67b",
+      "pcr1": "3b4a7e1b5f13c5a1000b3ed32ef8995ee13e9876329f9bc72650b918329ef9cf4e2e4d1e1e37375dab0ba56ba0974d03",
+      "pcr2": "6a04b33dfd0ddf1bc872f4449f034060aeb913fe4bd8741e507edec4c60403fe3ff1b6e9fed9c9a3a1c3e958eabff470",
+      "status": "allowed"
+    },
+    {
+      "name": "seal-2026-11-07c-ap-southeast-1",
+      "released": "2026-11-07",
+      "pcr0": "8c4c1fc47d821753a1a5881b404842f3556ab5a5beb16ea47a02591f4e23d95521c97276d91dddf727962756c2ac5c00",
+      "pcr1": "3b4a7e1b5f13c5a1000b3ed32ef8995ee13e9876329f9bc72650b918329ef9cf4e2e4d1e1e37375dab0ba56ba0974d03",
+      "pcr2": "e5b838beabfd3127e5c567db0afa0460a3c7d890ffe822905a049391e7ef3fd98c9fa8fc3788e035cbe81688bb7bb8c8",
+      "status": "allowed"
+    }
+  ]
 }`);
