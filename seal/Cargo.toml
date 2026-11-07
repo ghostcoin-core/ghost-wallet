@@ -111,6 +111,11 @@ path = "tests/key_share.rs"
 required-features = ["nitro"]
 
 [[test]]
+name = "real_nitro_documents"
+path = "tests/real_nitro_documents.rs"
+required-features = ["nitro"]
+
+[[test]]
 name = "proxy"
 path = "tests/proxy.rs"
 required-features = ["nitro"]

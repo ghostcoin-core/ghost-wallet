@@ -23,9 +23,15 @@
 //! allowed age. Whether its PCRs are a published build is the caller's
 //! check ([`crate::measurements::MeasurementList::check`]).
 //!
+//! A document that is not CBOR says why: the refusal carries the decoder's
+//! reason and the byte it stopped at (`the payload is not CBOR: truncated at
+//! byte 4012 of 4385`). The text names a position and a rule only, never any
+//! of the document's bytes.
+//!
 //! This module only verifies AWS's signatures; it never signs.
 
 use core::fmt;
+use std::borrow::Cow;
 
 use p384::ecdsa::signature::Verifier;
 use p384::ecdsa::{Signature, VerifyingKey};
@@ -85,8 +91,10 @@ pub struct AttestedDocument {
 /// Why a document was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttestationRejected {
-    /// Not CBOR, not COSE_Sign1, or a field of the wrong type or size.
-    Malformed(&'static str),
+    /// Not CBOR, not COSE_Sign1, or a field of the wrong type or size. For
+    /// bytes that are not CBOR, the text has the decoder's reason and the
+    /// byte it stopped at.
+    Malformed(Cow<'static, str>),
     /// A field the format requires is absent.
     MissingField(&'static str),
     /// A field the format does not have.
@@ -122,6 +130,19 @@ impl fmt::Display for AttestationRejected {
 }
 
 impl std::error::Error for AttestationRejected {}
+
+impl AttestationRejected {
+    /// [`AttestationRejected::Malformed`] with a fixed text.
+    pub const fn malformed(what: &'static str) -> AttestationRejected {
+        AttestationRejected::Malformed(Cow::Borrowed(what))
+    }
+
+    /// [`AttestationRejected::Malformed`] for `part`, which did not decode:
+    /// `<part>: <reason> at byte N of LENGTH`.
+    pub fn not_cbor(part: &'static str, error: cbor::CborError) -> AttestationRejected {
+        AttestationRejected::Malformed(Cow::Owned(format!("{part}: {error}")))
+    }
+}
 
 /// Checks attestation documents.
 pub trait AttestationVerifier {
@@ -160,7 +181,7 @@ impl AttestationVerifier for NitroVerifier {
         let cose = CoseSign1::parse(document)?;
         let payload = Payload::parse(&cose.payload)?;
         if cose.signature.len() != 96 {
-            return Err(AttestationRejected::Malformed("an ES384 signature is 96 bytes"));
+            return Err(AttestationRejected::malformed("an ES384 signature is 96 bytes"));
         }
 
         // The chain: root (pinned), intermediates, then the document's certificate.
@@ -241,35 +262,36 @@ struct CoseSign1 {
 impl CoseSign1 {
     fn parse(document: &[u8]) -> Result<CoseSign1, AttestationRejected> {
         if document.len() > MAX_DOCUMENT_BYTES {
-            return Err(AttestationRejected::Malformed("the document is too long"));
+            return Err(AttestationRejected::malformed("the document is too long"));
         }
-        let value = cbor::decode(document).map_err(|_| AttestationRejected::Malformed("not CBOR"))?;
+        let value = cbor::decode(document).map_err(|e| AttestationRejected::not_cbor("the document is not CBOR", e))?;
         let value = match value {
             cbor::Value::Tag(18, inner) => *inner,
-            cbor::Value::Tag(..) => return Err(AttestationRejected::Malformed("not a COSE_Sign1 tag")),
+            cbor::Value::Tag(..) => return Err(AttestationRejected::malformed("not a COSE_Sign1 tag")),
             other => other,
         };
         let cbor::Value::Array(items) = value else {
-            return Err(AttestationRejected::Malformed("COSE_Sign1 is not an array"));
+            return Err(AttestationRejected::malformed("COSE_Sign1 is not an array"));
         };
         let [protected, unprotected, payload, signature]: [cbor::Value; 4] =
-            items.try_into().map_err(|_| AttestationRejected::Malformed("COSE_Sign1 has four parts"))?;
+            items.try_into().map_err(|_| AttestationRejected::malformed("COSE_Sign1 has four parts"))?;
         let cbor::Value::Bytes(protected) = protected else {
-            return Err(AttestationRejected::Malformed("the protected header is not bytes"));
+            return Err(AttestationRejected::malformed("the protected header is not bytes"));
         };
-        let header = cbor::decode(&protected).map_err(|_| AttestationRejected::Malformed("the protected header"))?;
+        let header = cbor::decode(&protected)
+            .map_err(|e| AttestationRejected::not_cbor("the protected header is not CBOR", e))?;
         // {1: -35}: alg ES384, and nothing else.
         if header != cbor::Value::Map(vec![(cbor::Value::Unsigned(1), cbor::Value::Negative(34))]) {
-            return Err(AttestationRejected::Malformed("the algorithm is not ES384"));
+            return Err(AttestationRejected::malformed("the algorithm is not ES384"));
         }
         if unprotected != cbor::Value::Map(Vec::new()) {
-            return Err(AttestationRejected::Malformed("the unprotected header is not empty"));
+            return Err(AttestationRejected::malformed("the unprotected header is not empty"));
         }
         let cbor::Value::Bytes(payload) = payload else {
-            return Err(AttestationRejected::Malformed("the payload is not bytes"));
+            return Err(AttestationRejected::malformed("the payload is not bytes"));
         };
         let cbor::Value::Bytes(signature) = signature else {
-            return Err(AttestationRejected::Malformed("the signature is not bytes"));
+            return Err(AttestationRejected::malformed("the signature is not bytes"));
         };
         Ok(CoseSign1 { protected, payload, signature })
     }
@@ -312,9 +334,9 @@ const PAYLOAD_FIELDS: [&str; 9] =
 
 impl Payload {
     fn parse(bytes: &[u8]) -> Result<Payload, AttestationRejected> {
-        let value = cbor::decode(bytes).map_err(|_| AttestationRejected::Malformed("the payload is not CBOR"))?;
+        let value = cbor::decode(bytes).map_err(|e| AttestationRejected::not_cbor("the payload is not CBOR", e))?;
         let cbor::Value::Map(fields) = value else {
-            return Err(AttestationRejected::Malformed("the payload is not a map"));
+            return Err(AttestationRejected::malformed("the payload is not a map"));
         };
         for (key, _) in &fields {
             match key {
@@ -329,37 +351,37 @@ impl Payload {
 
         let module_id = match need("module_id")? {
             cbor::Value::Text(text) if !text.is_empty() => text.clone(),
-            _ => return Err(AttestationRejected::Malformed("module_id is not a non-empty text")),
+            _ => return Err(AttestationRejected::malformed("module_id is not a non-empty text")),
         };
         match need("digest")? {
             cbor::Value::Text(text) if text == "SHA384" => {}
             cbor::Value::Text(_) => return Err(AttestationRejected::WrongDigest),
-            _ => return Err(AttestationRejected::Malformed("digest is not text")),
+            _ => return Err(AttestationRejected::malformed("digest is not text")),
         }
         let timestamp_ms = match need("timestamp")? {
             cbor::Value::Unsigned(n) if *n > 0 => *n,
-            _ => return Err(AttestationRejected::Malformed("timestamp is not a positive integer")),
+            _ => return Err(AttestationRejected::malformed("timestamp is not a positive integer")),
         };
         let cbor::Value::Map(pcr_map) = need("pcrs")? else {
-            return Err(AttestationRejected::Malformed("pcrs is not a map"));
+            return Err(AttestationRejected::malformed("pcrs is not a map"));
         };
         if pcr_map.is_empty() || pcr_map.len() > 32 {
-            return Err(AttestationRejected::Malformed("pcrs has 1 to 32 entries"));
+            return Err(AttestationRejected::malformed("pcrs has 1 to 32 entries"));
         }
         let mut pcrs: [Option<Pcr>; 3] = [None; 3];
         for (index, value) in pcr_map {
             let cbor::Value::Unsigned(index) = index else {
-                return Err(AttestationRejected::Malformed("a PCR index is not an integer"));
+                return Err(AttestationRejected::malformed("a PCR index is not an integer"));
             };
             if *index >= 32 {
-                return Err(AttestationRejected::Malformed("a PCR index is 0 to 31"));
+                return Err(AttestationRejected::malformed("a PCR index is 0 to 31"));
             }
             let pcr: Pcr = match value {
                 cbor::Value::Bytes(bytes) => bytes
                     .as_slice()
                     .try_into()
-                    .map_err(|_| AttestationRejected::Malformed("a SHA384 PCR is 48 bytes"))?,
-                _ => return Err(AttestationRejected::Malformed("a PCR is not bytes")),
+                    .map_err(|_| AttestationRejected::malformed("a SHA384 PCR is 48 bytes"))?,
+                _ => return Err(AttestationRejected::malformed("a PCR is not bytes")),
             };
             if let Some(slot) = pcrs.get_mut(*index as usize) {
                 *slot = Some(pcr);
@@ -370,26 +392,26 @@ impl Payload {
         };
         let certificate = match need("certificate")? {
             cbor::Value::Bytes(der) if (1..=MAX_CERTIFICATE_BYTES).contains(&der.len()) => der.clone(),
-            _ => return Err(AttestationRejected::Malformed("certificate is not 1 to 1024 bytes")),
+            _ => return Err(AttestationRejected::malformed("certificate is not 1 to 1024 bytes")),
         };
         let cbor::Value::Array(bundle) = need("cabundle")? else {
-            return Err(AttestationRejected::Malformed("cabundle is not an array"));
+            return Err(AttestationRejected::malformed("cabundle is not an array"));
         };
         if bundle.is_empty() || bundle.len() > 8 {
-            return Err(AttestationRejected::Malformed("cabundle has 1 to 8 certificates"));
+            return Err(AttestationRejected::malformed("cabundle has 1 to 8 certificates"));
         }
         let mut cabundle = Vec::with_capacity(bundle.len());
         for der in bundle {
             match der {
                 cbor::Value::Bytes(der) if (1..=MAX_CERTIFICATE_BYTES).contains(&der.len()) => cabundle.push(der.clone()),
-                _ => return Err(AttestationRejected::Malformed("a cabundle certificate is not 1 to 1024 bytes")),
+                _ => return Err(AttestationRejected::malformed("a cabundle certificate is not 1 to 1024 bytes")),
             }
         }
         let optional = |name: &'static str| -> Result<Option<Vec<u8>>, AttestationRejected> {
             match get(name) {
                 None | Some(cbor::Value::Null) => Ok(None),
                 Some(cbor::Value::Bytes(bytes)) if bytes.len() <= MAX_USER_DATA_BYTES => Ok(Some(bytes.clone())),
-                Some(_) => Err(AttestationRejected::Malformed("public_key, user_data or nonce is not up to 1024 bytes")),
+                Some(_) => Err(AttestationRejected::malformed("public_key, user_data or nonce is not up to 1024 bytes")),
             }
         };
         Ok(Payload {
@@ -468,8 +490,16 @@ pub enum AttestationError {
     TooLong,
     /// The NSM device could not be reached or refused the call.
     Device(String),
-    /// The NSM answered something that is not an attestation.
-    BadResponse(&'static str),
+    /// The NSM answered something that is not an attestation; for an answer
+    /// that is not CBOR, with the decoder's reason and the byte it stopped at.
+    BadResponse(Cow<'static, str>),
+}
+
+impl AttestationError {
+    /// [`AttestationError::BadResponse`] with a fixed text.
+    pub const fn bad_response(what: &'static str) -> AttestationError {
+        AttestationError::BadResponse(Cow::Borrowed(what))
+    }
 }
 
 impl fmt::Display for AttestationError {
@@ -524,27 +554,40 @@ impl<D: NsmDevice> NsmSource<D> {
     }
 
     /// Reads the NSM's answer: `{"Attestation": {"document": bytes}}`, or
-    /// `{"Error": text}`.
+    /// `{"Error": text}`. The document is a byte string as the NSM writes it;
+    /// written as an array of unsigned integers each below 256 (how a CBOR
+    /// writer that does not know the bytes are bytes would write them) it is
+    /// taken too, the same bytes either way.
     pub fn read_response(response: &[u8]) -> Result<Vec<u8>, AttestationError> {
-        let value = cbor::decode(response).map_err(|_| AttestationError::BadResponse("not CBOR"))?;
+        let value = cbor::decode(response)
+            .map_err(|e| AttestationError::BadResponse(Cow::Owned(format!("not CBOR: {e}"))))?;
         let cbor::Value::Map(mut fields) = value else {
-            return Err(AttestationError::BadResponse("not a map"));
+            return Err(AttestationError::bad_response("not a map"));
         };
         if fields.len() != 1 {
-            return Err(AttestationError::BadResponse("not one answer"));
+            return Err(AttestationError::bad_response("not one answer"));
         }
         match fields.remove(0) {
             (cbor::Value::Text(kind), cbor::Value::Map(inner)) if kind == "Attestation" => {
                 match inner.into_iter().find(|(k, _)| matches!(k, cbor::Value::Text(t) if t == "document")) {
                     Some((_, cbor::Value::Bytes(document))) => Ok(document),
-                    _ => Err(AttestationError::BadResponse("no document")),
+                    Some((_, cbor::Value::Array(items))) => items
+                        .into_iter()
+                        .map(|item| match item {
+                            cbor::Value::Unsigned(byte) => u8::try_from(byte).ok(),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<u8>>>()
+                        .ok_or(AttestationError::bad_response("a document array holds more than bytes")),
+                    Some(_) => Err(AttestationError::bad_response("the document is not bytes")),
+                    None => Err(AttestationError::bad_response("no document")),
                 }
             }
             (cbor::Value::Text(kind), cbor::Value::Text(error)) if kind == "Error" => {
                 Err(AttestationError::Device(error))
             }
-            (cbor::Value::Text(kind), _) if kind == "Error" => Err(AttestationError::BadResponse("an unreadable error")),
-            _ => Err(AttestationError::BadResponse("not an attestation")),
+            (cbor::Value::Text(kind), _) if kind == "Error" => Err(AttestationError::bad_response("an unreadable error")),
+            _ => Err(AttestationError::bad_response("not an attestation")),
         }
     }
 }
@@ -1029,13 +1072,23 @@ pub mod cbor {
         Null,
     }
 
-    /// Bytes that are not CBOR this reader takes.
+    /// Bytes that are not CBOR this reader takes: which rule they break, and
+    /// where.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct CborError(pub &'static str);
+    pub struct CborError {
+        /// The rule broken.
+        pub reason: &'static str,
+        /// The offset of the item that broke it (of the head byte, for an
+        /// item whose length or content is wrong), from the start of the
+        /// bytes decoded.
+        pub at: usize,
+        /// How many bytes were decoded.
+        pub length: usize,
+    }
 
     impl fmt::Display for CborError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "CBOR: {}", self.0)
+            write!(f, "{} at byte {} of {}", self.reason, self.at, self.length)
         }
     }
 
@@ -1105,10 +1158,11 @@ pub mod cbor {
 
     /// Decodes exactly one value from all of `bytes`.
     pub fn decode(bytes: &[u8]) -> Result<Value, CborError> {
-        let mut reader = Reader { bytes, at: 0 };
+        let mut reader = Reader { bytes, at: 0, item: 0 };
         let value = reader.value(0)?;
         if reader.at != bytes.len() {
-            return Err(CborError("data after the value"));
+            reader.item = reader.at;
+            return Err(reader.error("data after the value"));
         }
         Ok(value)
     }
@@ -1116,12 +1170,18 @@ pub mod cbor {
     struct Reader<'a> {
         bytes: &'a [u8],
         at: usize,
+        /// Where the item being read starts.
+        item: usize,
     }
 
     impl Reader<'_> {
+        fn error(&self, reason: &'static str) -> CborError {
+            CborError { reason, at: self.item, length: self.bytes.len() }
+        }
+
         fn take(&mut self, n: usize) -> Result<&[u8], CborError> {
-            let end = self.at.checked_add(n).ok_or(CborError("too long"))?;
-            let out = self.bytes.get(self.at..end).ok_or(CborError("truncated"))?;
+            let end = self.at.checked_add(n).ok_or(self.error("too long"))?;
+            let out = self.bytes.get(self.at..end).ok_or(self.error("truncated"))?;
             self.at = end;
             Ok(out)
         }
@@ -1133,7 +1193,7 @@ pub mod cbor {
                 25 => u64::from(u16::from_be_bytes(self.take(2)?.try_into().expect("2 bytes"))),
                 26 => u64::from(u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes"))),
                 27 => u64::from_be_bytes(self.take(8)?.try_into().expect("8 bytes")),
-                _ => return Err(CborError("indefinite or reserved length")),
+                _ => return Err(self.error("indefinite or reserved length")),
             })
         }
 
@@ -1141,14 +1201,15 @@ pub mod cbor {
             let n = self.argument(info)?;
             // No item can be longer than what is left of the input.
             if n > (self.bytes.len() - self.at) as u64 {
-                return Err(CborError("a length runs past the end"));
+                return Err(self.error("a length runs past the end"));
             }
             Ok(n as usize)
         }
 
         fn value(&mut self, depth: usize) -> Result<Value, CborError> {
+            self.item = self.at;
             if depth > MAX_DEPTH {
-                return Err(CborError("nested too deep"));
+                return Err(self.error("nested too deep"));
             }
             let initial = self.take(1)?[0];
             let (major, info) = (initial >> 5, initial & 0x1f);
@@ -1161,7 +1222,8 @@ pub mod cbor {
                 }
                 3 => {
                     let n = self.length(info)?;
-                    let text = core::str::from_utf8(self.take(n)?).map_err(|_| CborError("text is not UTF-8"))?;
+                    let error = self.error("text is not UTF-8");
+                    let text = core::str::from_utf8(self.take(n)?).map_err(|_| error)?;
                     Value::Text(text.to_owned())
                 }
                 4 => {
@@ -1178,7 +1240,8 @@ pub mod cbor {
                     for _ in 0..n {
                         let key = self.value(depth + 1)?;
                         if fields.iter().any(|(k, _)| *k == key) {
-                            return Err(CborError("a map key appears twice"));
+                            // At the second key: the item just read.
+                            return Err(self.error("a map key appears twice"));
                         }
                         let value = self.value(depth + 1)?;
                         fields.push((key, value));
@@ -1193,7 +1256,7 @@ pub mod cbor {
                     20 => Value::Bool(false),
                     21 => Value::Bool(true),
                     22 => Value::Null,
-                    _ => return Err(CborError("a float or simple value")),
+                    _ => return Err(self.error("a float or simple value")),
                 },
             })
         }
