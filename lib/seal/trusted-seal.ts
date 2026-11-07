@@ -56,7 +56,9 @@ export type TrustedSealsDeps = Omit<AttestationParts, 'native'> & {
 
 /** The app's regions, core, clock and pinned list. */
 export function trustedSealsDeps(): TrustedSealsDeps {
-  return { ...appAttestationParts(), regions: SEAL_REGIONS };
+  // No `native`: the app's module is used for the fetch, the pin and the region list.
+  const { core, now, list } = appAttestationParts();
+  return { core, now, list, regions: SEAL_REGIONS };
 }
 
 type Entry = { url: string; seal: TrustedSeal | null; until: number };
