@@ -7,6 +7,7 @@
 //! seal_proxy start <enclave CID> genesis|join <measurements list file>
 //! seal_proxy list <enclave CID> <signed measurements list file>
 //! seal_proxy registry <enclave CID> <registry file>
+//! seal_proxy journal <vsock port> <journal file>
 //! ```
 //!
 //! `inbound` takes TCP connections from the internet (phones, and other
@@ -23,11 +24,19 @@
 //! after the start: the whole file each time, so a card set up since is
 //! added. The enclave refuses a file that leaves out or changes a card it
 //! already holds.
+//! `journal` keeps the enclave's journal store (`ghost_seal::host_journal`)
+//! in one file (`/var/lib/seal/journal.log`, created mode 0600) and serves
+//! it to the enclave on a vsock port (5005): it appends only the next
+//! counter, flushes the file and its directory to disk before it answers,
+//! and drops a torn last record when it opens the file. It sees only
+//! counters and records the enclave sealed; the enclave checks them.
 
 use std::net::TcpListener;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ghost_seal::host_journal::{self, HostStore};
 use ghost_seal::key_share::{
     CONTROL_GENESIS, CONTROL_JOIN, CONTROL_REGISTRY, CONTROL_SIGNED_LIST, read_frame, write_control_frame,
 };
@@ -46,7 +55,22 @@ impl ProxyLog for StderrLog {
     }
 }
 
-const USAGE: &str = "usage:\n  seal_proxy inbound <listen address:port> <enclave CID> <enclave port> [--max-connections N] [--idle-secs N]\n  seal_proxy outbound <vsock port> <upstream host:port> [--max-connections N] [--idle-secs N]\n  seal_proxy start <enclave CID> genesis|join <measurements list file>\n  seal_proxy list <enclave CID> <signed measurements list file>\n  seal_proxy registry <enclave CID> <registry file>";
+const USAGE: &str = "usage:\n  seal_proxy inbound <listen address:port> <enclave CID> <enclave port> [--max-connections N] [--idle-secs N]\n  seal_proxy outbound <vsock port> <upstream host:port> [--max-connections N] [--idle-secs N]\n  seal_proxy start <enclave CID> genesis|join <measurements list file>\n  seal_proxy list <enclave CID> <signed measurements list file>\n  seal_proxy registry <enclave CID> <registry file>\n  seal_proxy journal <vsock port> <journal file>";
+
+/// How long one journal connection may last.
+const JOURNAL_CONNECTION_TIME: Duration = Duration::from_secs(30);
+
+/// Keeps the journal store in `file` and serves it on vsock `port`.
+fn journal(port: u32, file: &str) -> std::io::Result<()> {
+    let store = HostStore::open(Path::new(file)).unwrap_or_else(|e| fail(&format!("cannot open {file}: {e}")));
+    if store.dropped_torn_record() {
+        eprintln!("seal_proxy: dropped a torn last record of {file}");
+    }
+    eprintln!("seal_proxy: serving the journal store {file} ({} records) on vsock port {port}", store.records().len());
+    let listener = VsockListener::bind_with_cid_port(VMADDR_CID_ANY, port)
+        .unwrap_or_else(|e| fail(&format!("cannot listen on vsock port {port}: {e}")));
+    host_journal::serve(listener, store, JOURNAL_CONNECTION_TIME)
+}
 
 /// Sends one control frame and returns the enclave's answer.
 fn control(cid: u32, frame: &[u8]) -> String {
@@ -148,6 +172,7 @@ fn main() {
         ["registry", cid, registry_file] => {
             registry(number(Some(&cid.to_string()), "the enclave CID"), registry_file)
         }
+        ["journal", port, file] => journal(number(Some(&port.to_string()), "the vsock port"), file),
         _ => fail("unknown command"),
     };
     if let Err(error) = result {

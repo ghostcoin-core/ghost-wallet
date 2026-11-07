@@ -9,7 +9,11 @@
 //! status check and the card registry (`registry`): no Seal answers Sealed
 //! unchecked or serves an unregistered card. The release node list the
 //! chain check asks is compiled in (`node_list`); the real node, JSON-RPC
-//! over TLS 1.3, is `node_rpc` (features `nitro` and `test-server`).
+//! over TLS 1.3, is `node_rpc` (features `nitro` and `test-server`). The
+//! journal's durable layer is an append-only log of records sealed under M
+//! and chained by counter and tag (`journal_log`), kept by a store the Seal
+//! does not trust: the parent host's file (`host_journal`, features `nitro`
+//! and `test-server`).
 //!
 //! The design, the record layout, the frame and answer formats and the
 //! labels of every key derivation are in `docs/sealed-card.md`.
@@ -53,7 +57,10 @@ pub mod enclave_serve;
 pub mod enclave_tls;
 pub mod error;
 pub mod flows;
+#[cfg(any(feature = "nitro", feature = "test-server"))]
+pub mod host_journal;
 pub mod journal;
+pub mod journal_log;
 #[cfg(feature = "nitro")]
 pub mod key_share;
 pub mod link;
@@ -89,6 +96,7 @@ pub use chain_check::{
 pub use error::SealError;
 pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest, Seal, SealConfig};
 pub use journal::{EntryKind, Journal, MemoryJournal};
+pub use journal_log::{JournalLog, LogStore, MemoryLogStore, SharedLog};
 pub use record::CardState;
 pub use node_list::{NodeEntry, NodeList};
 pub use registry::{CardRegistry, FileRegistry, LoadedRegistry, MemoryRegistry, RegistryEntry};

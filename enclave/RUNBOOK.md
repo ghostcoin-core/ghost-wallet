@@ -114,6 +114,48 @@ chain check ("can't check right now"). The first region in
 the peer listed for it. Check each host's `/ghost-seal/<stack>` log group for
 `ok: made M (genesis)` and `ok: received M from a running enclave`.
 
+## The journal store
+
+The enclave keeps its journal (what it writes before it changes a card, so
+a Fill or an Open cut off is finished, never lost or replayed) as a log of
+records it encrypts and MACs under keys derived from M. The host keeps that
+log and sees counters and ciphertext only: no UID, card data, key or M.
+
+- The stack runs it as the unit `seal-journal`:
+  `/opt/seal/seal_proxy journal 5005 /var/lib/seal/journal.log`, the same
+  `seal_proxy` binary, serving the enclave on vsock port 5005.
+  `StateDirectory=seal` gives it `/var/lib/seal`; the file is created mode
+  0600. It starts before the enclave, which reads the whole log as soon as
+  it holds M.
+- On a host by hand, before `seal_proxy start`:
+  `systemctl enable --now seal-journal`, then check
+  `/var/log/seal/seal-journal.log` for
+  `serving the journal store /var/lib/seal/journal.log (N records) on vsock port 5005`.
+- If the enclave logs `the durable journal was refused`, it answers every
+  card `unavailable`. Either the store was not reachable (start
+  `seal-journal`; the enclave tries again every minute and at each registry
+  load) or the log failed the enclave's checks: a record changed, dropped,
+  repeated or reordered, or a log of another M. Do not edit, cut or copy
+  records into the file; the enclave refuses it.
+- Never delete or truncate `/var/lib/seal/journal.log` while cards are being
+  filled or opened. Never compact it by hand.
+
+What it survives and what it does not:
+
+- It survives the enclave restarting and the host restarting: the file stays
+  in `/var/lib/seal`.
+- It does **not** survive the host instance being replaced (a redeploy of
+  the stack, an upgrade, "Replace a lost region"): the new host starts with
+  an empty journal. Before replacing a host, let every Fill and Open on that
+  region finish, and know that the region's new enclave holds no Fill entry
+  for cards sealed before: it refuses to answer them Sealed until a journal
+  that survives a replaced host (kept in more than one region) exists. Each
+  region keeps its own log for now.
+- A host that cuts the end off the log while the enclave is stopped is not
+  caught when the enclave starts again: the shorter log is still valid. A
+  cut made while the enclave runs is caught and refused. Keeping the log's
+  head where the host cannot reach it is not done yet.
+
 ## Load the card registry
 
 After each enclave has started (genesis or join), and again whenever cards
@@ -155,4 +197,5 @@ older signed list can bring it back.
 
 Redeploy its stack: the new host starts in join mode from its peer (or from
 any running region: change its `peer` in `regions.json`). Then load the card
-registry into it (above).
+registry into it (above). Its journal starts empty: a replaced host instance
+keeps no journal (see "The journal store").

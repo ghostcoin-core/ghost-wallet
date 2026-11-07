@@ -150,6 +150,11 @@ describe('enclave/deploy/seal-stack.template.json', () => {
     expect(script).toContain("unit seal-node 'outbound 5003 ${GhostNodeAddress}'");
     expect(script).toContain("unit seal-node-2 'outbound 5004 ${GhostNodeAddress2}'");
     expect(script).toMatch(/systemctl enable --now seal-inbound seal-node seal-node-2\n/);
+    // The journal store is the host's one other unit: on the enclave's
+    // vsock port 5005, never on the network.
+    expect(script).toContain('ExecStart=/opt/seal/seal_proxy journal 5005 /var/lib/seal/journal.log');
+    expect(script).toMatch(/systemctl enable --now seal-journal\n/);
+    expect(script).not.toMatch(/(inbound|outbound) [^']*5005/);
     // The vsock ports are the node list's.
     const nodeList = read('seal', 'src', 'node_list.rs');
     const ports = [...nodeList.matchAll(/^node \S+ \S+ 443 \/ghost-rpc (\d+)$/gm)].map((m) => Number(m[1]));
@@ -170,6 +175,9 @@ describe('enclave/deploy/seal-stack.template.json', () => {
       expect(template.Parameters[url].AllowedPattern).toBe('^https://.+');
     }
     expect(script).toContain('sha256sum -c -');
+    // The journal store runs the same checked proxy binary: no new artifact.
+    expect(script).not.toMatch(/fetch '\$\{[A-Za-z]*Journal[A-Za-z]*\}'/);
+    expect(Object.keys(template.Parameters).filter((name) => /journal/i.test(name))).toEqual([]);
     expect(script).toContain("--proto '=https'");
     expect(script).toMatch(/seal_proxy start \$\{EnclaveCid\} \$\{StartMode\} \/opt\/seal\/measurements\.json/);
     expect(template.Parameters.StartMode.AllowedValues).toEqual(['genesis', 'join']);

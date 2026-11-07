@@ -4,8 +4,10 @@
 //! trip by round trip, until the Seal's signed answer. Its Seal is built
 //! with the chain check over two fake nodes and a registry, handed in
 //! through `TestSealServer::start_with`, so no test needs the network. It
-//! refuses an unregistered card, and refuses to start without a registry or
-//! with fewer than two nodes.
+//! refuses an unregistered card, and refuses to start without a registry,
+//! with fewer than two nodes or without a journal file; its journal file
+//! (mode 0600) keeps a Fill cut off before a restart, which it finishes
+//! after one.
 
 mod support;
 
@@ -13,11 +15,15 @@ use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ghost_seal::answer::{AnswerKind, AnswerVerifier};
 use ghost_seal::card_keys::{card_keys, key_version};
+use ghost_seal::chain_check::safe_depth;
+use ghost_seal::host_journal::HostStore;
+use ghost_seal::{CoinQuery, SealError};
 use ghost_seal::flows::record_file_settings;
 use ghost_seal::primitives::sha3_256;
 use ghost_seal::relay::{RelayLimits, to_hex};
@@ -48,9 +54,24 @@ fn registry_file(name: &str, uids: &[CardUid]) -> PathBuf {
     path
 }
 
+/// A journal file of its own, not there yet, in the temporary directory:
+/// each server that runs at the same time as others gets its own.
+fn journal_file(name: &str) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::SeqCst);
+    let path = std::env::temp_dir().join(format!("ghost-seal-relay-server-{}-{name}-{n}.journal", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
 /// The command line with the development flag, a loopback address, a
-/// registry and two nodes, then `extra`.
+/// registry, two nodes and a fresh journal file, then `extra`.
 fn args(extra: &[&str]) -> Vec<String> {
+    args_with_journal(&journal_file("args"), extra)
+}
+
+/// [`args`] with the journal file `journal`.
+fn args_with_journal(journal: &std::path::Path, extra: &[&str]) -> Vec<String> {
     let registry = registry_file("args", &[UID]);
     let mut args: Vec<String> = ["--dev-test-seal", "--listen", "127.0.0.1:0", "--registry"]
         .iter()
@@ -58,6 +79,8 @@ fn args(extra: &[&str]) -> Vec<String> {
         .collect();
     args.push(registry.display().to_string());
     args.extend(NODE_ARGS.iter().map(|s| s.to_string()));
+    args.push("--journal".to_owned());
+    args.push(journal.display().to_string());
     args.extend(extra.iter().map(|s| s.to_string()));
     args
 }
@@ -65,7 +88,12 @@ fn args(extra: &[&str]) -> Vec<String> {
 /// The fakes the server's Seals are built with: two nodes over a fake chain
 /// that agree, and a registry holding `uids`.
 fn installed(uids: &[CardUid]) -> Installed {
-    let chain = Arc::new(Mutex::new(FakeChain::new()));
+    installed_on(&Arc::new(Mutex::new(FakeChain::new())), uids)
+}
+
+/// [`installed`] over `chain`, which the test can pay into.
+fn installed_on(chain: &Arc<Mutex<FakeChain>>, uids: &[CardUid]) -> Installed {
+    let chain = Arc::clone(chain);
     let uids = uids.to_vec();
     Installed {
         network: NETWORK,
@@ -321,9 +349,11 @@ fn the_server_refuses_to_start_without_a_registry_or_two_nodes() {
     // Plain HTTP to a node only on loopback.
     let remote = ["--registry", registry, "--node", "http://192.0.2.1:8545/", "--node", "http://127.0.0.1:9/a"];
     assert!(matches!(with(&remote), Err(StartError::Usage(_))));
+    let journal_path = journal_file("refusals").display().to_string();
     let mut both = vec!["--registry", registry];
     both.extend(NODE_ARGS);
-    let options = with(&both).expect("a registry and two nodes");
+    both.extend(["--journal", journal_path.as_str()]);
+    let options = with(&both).expect("a registry, two nodes and a journal");
     assert_eq!(options.nodes().len(), 2);
     assert_eq!(options.network(), ghost_seal::NodeList::release().network);
 
@@ -337,6 +367,7 @@ fn the_server_refuses_to_start_without_a_registry_or_two_nodes() {
     // And a registry file that is not there.
     let mut gone = vec!["--registry", "/nonexistent/ghost-seal/registry"];
     gone.extend(NODE_ARGS);
+    gone.extend(["--journal", journal_path.as_str()]);
     assert!(matches!(TestSealServer::start(&with(&gone).unwrap()), Err(StartError::Missing(_))));
 
     // The binary says so in one plain line and exits 2.
@@ -353,6 +384,115 @@ fn the_server_refuses_to_start_without_a_registry_or_two_nodes() {
         assert_eq!(stderr.trim_end().lines().count(), 1, "{stderr}");
         assert!(stderr.starts_with("test_seal_server: refusing to start:"), "{stderr}");
     }
+}
+
+#[test]
+fn the_test_server_refuses_to_start_without_a_journal() {
+    let registry = registry_file("no-journal", &[UID]).display().to_string();
+    let mut no_journal: Vec<String> =
+        ["--dev-test-seal", "--listen", "127.0.0.1:0", "--registry", registry.as_str()].iter().map(|s| s.to_string()).collect();
+    no_journal.extend(NODE_ARGS.iter().map(|s| s.to_string()));
+    match Options::from_args(&no_journal, Some("1")) {
+        Err(StartError::Missing(why)) => assert!(why.contains("--journal"), "{why}"),
+        other => panic!("started without a journal: {other:?}"),
+    }
+    // The binary says so in one plain line and exits 2.
+    let output = Command::new(env!("CARGO_BIN_EXE_test_seal_server"))
+        .args(&no_journal)
+        .env("GHOST_DEV_TEST_SEAL", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.trim_end().lines().count(), 1, "{stderr}");
+    assert!(stderr.starts_with("test_seal_server: refusing to start: --journal FILE is missing"), "{stderr}");
+}
+
+#[test]
+fn the_journal_file_is_made_mode_0600_and_one_that_fails_its_checks_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let journal = journal_file("mode");
+    let options = Options::from_args(&args_with_journal(&journal, &[]), Some("1")).unwrap();
+    assert_eq!(options.journal(), journal.as_path());
+    let server = TestSealServer::start_with(&options, installed(&[UID])).expect("server");
+    assert_eq!(std::fs::metadata(&journal).unwrap().permissions().mode() & 0o777, 0o600);
+    server.stop();
+
+    // A file whose records are sound on disk but were not sealed by the
+    // test Seal (a record of noise): refused, in one line from the binary.
+    let forged = journal_file("forged");
+    HostStore::open(&forged).unwrap().append(1, &[0x55; 64]).unwrap();
+    let options = Options::from_args(&args_with_journal(&forged, &[]), Some("1")).unwrap();
+    assert!(matches!(TestSealServer::start_with(&options, installed(&[UID])), Err(StartError::Journal(_))));
+    let output = Command::new(env!("CARGO_BIN_EXE_test_seal_server"))
+        .args(args_with_journal(&forged, &[]))
+        .env("GHOST_DEV_TEST_SEAL", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.lines().any(|line| line.starts_with("test_seal_server: refusing to start: the journal file")), "{stderr}");
+    let _ = std::fs::remove_file(&journal);
+    let _ = std::fs::remove_file(&forged);
+}
+
+fn fill_request() -> FillRequest {
+    FillRequest { uid: UID, challenge: [0x41; 32], amount_wei: AMOUNT, pin: None }
+}
+
+#[test]
+fn after_a_restart_on_the_same_file_a_fill_that_was_cut_off_is_finished() {
+    let chain = Arc::new(Mutex::new(FakeChain::new()));
+    // How many commands a whole Fill takes (on a card and a journal of its
+    // own).
+    let commands = {
+        let options = Options::from_args(&args(&[]), Some("1")).unwrap();
+        let server = TestSealServer::start_with(&options, installed_on(&chain, &[UID])).unwrap();
+        let mut card = dev_card(UID);
+        server.seal().fill(&mut card, &fill_request(), &mut StubMaker::default()).expect("a whole Fill");
+        card.sent
+    };
+
+    let journal = journal_file("restart");
+    let options = Options::from_args(&args_with_journal(&journal, &[]), Some("1")).unwrap();
+    let mut card = dev_card(UID);
+    let mut maker = StubMaker::default();
+    {
+        let server = TestSealServer::start_with(&options, installed_on(&chain, &[UID])).unwrap();
+        // The Fill's last command runs on the card; its answer is lost, and
+        // the server stops.
+        card.drop_from(commands - 1, DropStyle::AfterCard);
+        assert_eq!(server.seal().fill(&mut card, &fill_request(), &mut maker).err(), Some(SealError::Dropped));
+        card.reconnect();
+        server.stop();
+    }
+    assert_eq!(maker.made.borrow().len(), 1);
+
+    // Started again on the same file: the Fill hands back the same coin.
+    let server = TestSealServer::start_with(&options, installed_on(&chain, &[UID])).unwrap();
+    let filled = server.seal().fill(&mut card, &fill_request(), &mut maker).expect("finished after the restart");
+    assert_eq!(maker.made.borrow().len(), 1, "no new key");
+    assert_eq!(filled.commit_data, maker.made.borrow()[0].1, "the same coin");
+
+    // Paid and confirmed, the server's own Check answers Sealed, after one
+    // more restart too: its chain check finds the coin from the journal.
+    let key = maker.key_for(&filled.commit_data);
+    let coin = CoinQuery { commit_data: filled.commit_data.clone(), amount_wei: AMOUNT, spend_marker: support::stub_spend_marker(&key) };
+    chain.lock().unwrap().pay(&coin, safe_depth(AMOUNT));
+    let paid = StubChain::default();
+    paid.pay(&filled.commit_data, AMOUNT);
+    let sealed = server.seal().confirm_fill(&mut card, &CheckRequest { uid: UID, challenge: [0x42; 32] }, &paid).unwrap();
+    assert_eq!(sealed.body.state, CardState::Sealed);
+    server.stop();
+    let server = TestSealServer::start_with(&options, installed_on(&chain, &[UID])).unwrap();
+    let challenge = [0x43u8; 32];
+    let Relayed::Done { answer, signature, .. } = relay_check(server.addr(), &mut card, UID, challenge) else {
+        panic!("the Check of the card filled across a restart did not finish");
+    };
+    let body = verifier().verify(&answer, &signature, &challenge, &UID, now()).expect("a verified answer");
+    assert_eq!((body.state, body.amount_wei), (CardState::Sealed, AMOUNT));
+    server.stop();
+    let _ = std::fs::remove_file(&journal);
 }
 
 #[test]
@@ -525,10 +665,13 @@ fn the_dev_flags_are_required() {
     assert!(WARNING.contains("never for real money"));
 }
 
-/// `--registry` (a registry file holding [`UID`]) and two `--node`s.
+/// `--registry` (a registry file holding [`UID`]), two `--node`s and a
+/// fresh `--journal` file.
 fn required(name: &str) -> Vec<String> {
     let mut args = vec!["--registry".to_owned(), registry_file(name, &[UID]).display().to_string()];
     args.extend(NODE_ARGS.iter().map(|s| s.to_string()));
+    args.push("--journal".to_owned());
+    args.push(journal_file(name).display().to_string());
     args
 }
 

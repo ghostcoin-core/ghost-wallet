@@ -43,9 +43,25 @@
 //!   empty until the first control frame 4, after the start; later frames
 //!   add cards and may never drop or change one. No flow is served until
 //!   the first load.
-//! - It installs no durable journal yet, so it still answers every Check,
-//!   Fill, Fill confirmation and Open `unavailable` and sends no card
-//!   traffic. Nor a `KeyMakerSource`, which a Fill needs.
+//! - It installs the durable journal: the append-only log of records it
+//!   seals and MACs under keys derived from M (`ghost_seal::journal_log`),
+//!   kept by the parent's store (`seal_proxy journal 5005
+//!   /var/lib/seal/journal.log`), reached over a vsock stream to the parent
+//!   (CID 3) port 5005, one connection and 10 seconds per
+//!   request (`ghost_seal::host_journal::HostJournal`). The parent sees
+//!   counters and ciphertext only. Once M is installed it reads the whole
+//!   log and checks every counter and tag; a log that cannot be read or
+//!   fails a check leaves every flow `unavailable` and logs a fixed event,
+//!   and it is tried again every [`JOURNAL_RETRY`] and at each registry
+//!   load. With the chain check, the loaded registry and the journal, Check,
+//!   Fill confirmation and Open are served.
+//! - It installs no `KeyMakerSource` yet, which a Fill needs: a Fill is
+//!   still answered `unavailable`.
+//! - The journal does not see a host that cuts the tail of the log while
+//!   the enclave is stopped: the shorter log is still valid at the next
+//!   start. Keeping the log's head where the host cannot reach it is not
+//!   done yet (`docs/sealed-card.md`, "Next"). A cut made while it runs is
+//!   seen at the next session and refused.
 //!
 //! It never writes M anywhere, and no frame it sends carries M except a
 //! key-share package, encrypted to the receiving enclave.
@@ -70,11 +86,13 @@ use ghost_seal::attestation::{
     AttestationError, AttestationSource, AttestationVerifier, NitroVerifier, NsmDevice, NsmSource,
 };
 use ghost_seal::enclave_serve::{
-    ANSWER_OK, ANSWER_REFUSED, ChainStatus, EnclaveAttestation, EnclaveService, KIND_KEY_SHARE, NodeChainStatus,
-    RegistrySource, ServiceConfig, ServiceDeps, ServiceEvent, ServiceLog,
+    ANSWER_OK, ANSWER_REFUSED, ChainStatus, DurableJournal, EnclaveAttestation, EnclaveService, KIND_KEY_SHARE,
+    NodeChainStatus, RegistrySource, ServiceConfig, ServiceDeps, ServiceEvent, ServiceLog,
 };
 use ghost_seal::enclave_tls::EnclaveTls;
 use ghost_seal::flows::ANSWER_LIFETIME_SECS;
+use ghost_seal::host_journal::HostJournal;
+use ghost_seal::journal_log::SharedLog;
 use ghost_seal::key_share::{ControlFrame, Receiver, read_control_frame, read_frame, write_frame};
 use ghost_seal::measurements::{ReleaseKey, TrustedList};
 use ghost_seal::node_list::NodeList;
@@ -102,6 +120,8 @@ const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long the control port waits for a frame.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often a journal that could not be opened is tried again.
+const JOURNAL_RETRY: Duration = Duration::from_secs(60);
 
 /// `/dev/nsm`'s one ioctl: `_IOWR(0x0A, 0, struct nsm_message)`, the message
 /// being two `struct iovec` (32 bytes).
@@ -231,12 +251,13 @@ fn main() {
     };
     // The card registry, empty until the host loads it.
     let registry = LoadedRegistry::new();
-    // No durable journal is installed yet: every Check, Fill, Fill
-    // confirmation and Open is still refused `unavailable` until it is.
+    // The durable journal: the sealed, chained log kept by the parent's
+    // store (vsock port 5005), opened and verified once M is installed.
+    let journal = SharedLog::new(Box::new(HostJournal::parent()));
     let deps = ServiceDeps {
         chain: Some(Arc::new(chain) as Arc<dyn ChainStatus>),
         registry: Some(Arc::new(registry.clone()) as Arc<dyn RegistrySource>),
-        journal: None,
+        journal: Some(Arc::new(journal) as Arc<dyn DurableJournal>),
         key_maker: None,
     };
     let config = ServiceConfig {
@@ -258,6 +279,12 @@ fn main() {
     let served = service.clone();
     if let Err(error) = thread::Builder::new().name("service".into()).spawn(move || serve_port(served)) {
         status(&format!("no thread for the service port: {error}"));
+        std::process::exit(1);
+    }
+    // A journal the host could not serve when M arrived is tried again.
+    let retried = service.clone();
+    if let Err(error) = thread::Builder::new().name("journal-retry".into()).spawn(move || retry_flows(&retried)) {
+        status(&format!("no thread for the journal retry: {error}"));
         std::process::exit(1);
     }
 
@@ -301,6 +328,20 @@ fn serve_port(service: Arc<EnclaveService>) {
     let handler = move |stream: &mut DeadlineStream<VsockStream>| service.serve_connection(stream);
     if let Err(error) = BoundedService::new(listener, limits).serve(handler, None) {
         status(&format!("service port stopped: {error}"));
+    }
+}
+
+/// Every [`JOURNAL_RETRY`], while M is held, the registry loaded and the
+/// flows still not served (the journal could not be read or verified),
+/// tries to start them again.
+fn retry_flows(service: &EnclaveService) {
+    loop {
+        thread::sleep(JOURNAL_RETRY);
+        // One lock at a time: the state's guard ends with this statement.
+        let holds_master = service.state().master.is_some();
+        if holds_master && !service.serves_flows() && service.refresh_flows() {
+            status("the durable journal is open; serves the flows");
+        }
     }
 }
 

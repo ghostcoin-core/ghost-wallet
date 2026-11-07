@@ -6,13 +6,16 @@
 //!
 //! ```text
 //! GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-test-seal --registry FILE
-//!     --node URL --node URL [--node URL ...] [--network CHAIN_ID:GENESIS_HEX]
-//!     [--listen ADDR:PORT] [--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N]
+//!     --node URL --node URL [--node URL ...] --journal FILE
+//!     [--network CHAIN_ID:GENESIS_HEX] [--listen ADDR:PORT]
+//!     [--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N]
 //!     [--total-ms N] [--max-sessions N] [--body-ms N]
 //! ```
 //!
-//! Without the registry or with fewer than two nodes it refuses to start,
-//! with one line.
+//! Without the registry, with fewer than two nodes or without the journal
+//! file it refuses to start, with one line; so it does for a journal file
+//! that fails its checks. The journal file (created mode 0600) keeps the
+//! test Seal's journal across restarts.
 
 use ghost_seal::test_server::{DEV_ENV, Options, StartError, TestSealServer, USAGE, WARNING};
 
@@ -21,7 +24,7 @@ fn main() {
     let dev_env = std::env::var(DEV_ENV).ok();
     let options = Options::from_args(&args, dev_env.as_deref()).unwrap_or_else(|error| {
         match error {
-            // No registry or too few nodes: one plain line.
+            // No registry, too few nodes or no journal: one plain line.
             StartError::Missing(_) => eprintln!("test_seal_server: {error}"),
             _ => eprintln!("test_seal_server: {error}\n{USAGE}"),
         }

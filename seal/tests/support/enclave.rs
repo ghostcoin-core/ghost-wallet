@@ -25,8 +25,8 @@ use ghost_seal::journal::Journal;
 use ghost_seal::measurements::{Pcrs, TrustedList};
 use ghost_seal::proxy::{BoundedService, ServiceLimits};
 use ghost_seal::{
-    CardRegistry, CardUid, ChainCheck, CoinQuery, CoinStatusCheck, LoadedRegistry, MemoryRegistry, NodeChainCheck,
-    PhantomKeyMaker, RegistryEntry, RelayLimits,
+    CardRegistry, CardUid, ChainCheck, CoinQuery, CoinStatusCheck, LoadedRegistry, MasterKey, MemoryRegistry,
+    NodeChainCheck, PhantomKeyMaker, RegistryEntry, RelayLimits, SealError,
 };
 
 use crate::authority::{Authority, AuthoritySource, NOW};
@@ -141,9 +141,17 @@ pub fn deps_with_loaded(registry: &LoadedRegistry) -> (ServiceDeps, Fakes) {
 pub struct TestJournal(pub SharedJournal);
 
 impl DurableJournal for TestJournal {
-    fn journal(&self) -> Box<dyn Journal> {
-        Box::new(self.0.clone())
+    fn journal(&self, _master: &MasterKey) -> Result<Box<dyn Journal>, SealError> {
+        Ok(Box::new(self.0.clone()))
     }
+}
+
+/// Deps with the fake chain check, the registry (holding [`UID`]), the key
+/// maker and `journal` as the durable journal.
+pub fn deps_with_journal(journal: Arc<dyn DurableJournal>) -> (ServiceDeps, Fakes) {
+    let (mut deps, fakes) = deps(true, true, true);
+    deps.journal = Some(journal);
+    (deps, fakes)
 }
 
 /// The Phantom Key maker.

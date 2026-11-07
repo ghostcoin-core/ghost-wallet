@@ -3,7 +3,11 @@
 //! installed (with any one missing every flow is refused and no card
 //! traffic is sent), then a good Check, Fill, Fill confirmation and Open
 //! with the fakes installed through the `ChainStatus` and `RegistrySource`
-//! traits; the real chain status check over `RpcNode`s needs two nodes and
+//! traits; the same with the sealed log (`journal_log`) installed as the
+//! durable journal through `DurableJournal::journal(&master)`, a log that
+//! fails to verify leaving every flow 503, an enclave built from a reopened
+//! log finishing the Open the first began, and a rollback while it runs
+//! refused; the real chain status check over `RpcNode`s needs two nodes and
 //! never seals without them; the attestation route with the tests'
 //! authority; and no answer, log line or error text carrying M or the PIN.
 
@@ -20,9 +24,11 @@ use std::sync::Arc;
 use authority::{Authority, AuthoritySource, NOW, allowed_new, allowed_old, revoked, unlisted};
 use ghost_seal::attestation::AttestationRejected;
 use ghost_seal::enclave_serve::{
-    ChainStatus, EnclaveService, KIND_KEY_SHARE, KIND_PHONE_ATTESTATION, MemoryServiceLog, NodeChainStatus,
-    ServiceDeps, ServiceEvent,
+    ChainStatus, DurableJournal, EnclaveService, KIND_KEY_SHARE, KIND_PHONE_ATTESTATION, MemoryServiceLog,
+    NodeChainStatus, ServiceDeps, ServiceEvent,
 };
+use ghost_seal::journal_log::{JournalLog, MemoryLogStore, SharedLog};
+use ghost_seal::{EntryKind, Journal};
 use ghost_seal::key_share::Receiver;
 use ghost_seal::measurements::{MeasurementList, MeasurementRefused};
 use ghost_seal::node_rpc::{NodeAddress, RpcNode, TcpTransport, VsockTransport};
@@ -156,8 +162,8 @@ fn with_any_of_the_three_missing_every_flow_is_refused_and_no_card_traffic_is_se
 
 #[test]
 fn a_registry_installed_but_not_loaded_is_not_ready() {
-    // What the enclave program installs: a chain check and a registry the
-    // host has not loaded yet (and, today, no journal).
+    // What the enclave program installs: a chain check, a durable journal
+    // and a registry the host has not loaded yet.
     let registry = LoadedRegistry::new();
     let (deps, fakes) = enclave::deps_with_loaded(&registry);
     assert!(!deps.ready());
@@ -439,6 +445,214 @@ fn no_answer_log_line_or_error_text_carries_m_or_the_pin() {
     for entry in fakes.journal.sealed_entries() {
         assert!(!support::contains(&entry, PIN.as_bytes()));
     }
+}
+
+/// A service whose durable journal is the sealed log over `store` (the
+/// host's store, here in memory), with the fakes for the rest, holding M.
+fn log_service(store: &MemoryLogStore) -> (EnclaveService, enclave::Fakes, Arc<MemoryServiceLog>) {
+    let journal = SharedLog::new(Box::new(store.clone()));
+    let (deps, fakes) = enclave::deps_with_journal(Arc::new(journal) as Arc<dyn DurableJournal>);
+    assert!(deps.ready());
+    let log = Arc::new(MemoryServiceLog::default());
+    let service = enclave::service(deps, allowed_old(), log.clone());
+    service.install_master(support::master());
+    (service, fakes, log)
+}
+
+/// The log as a restarted enclave reads it from `store`.
+fn reread(store: &MemoryLogStore) -> JournalLog {
+    JournalLog::open(&support::master(), Box::new(store.clone())).expect("the log verifies")
+}
+
+/// Fills card `card` through `service` and has the fake chain pay and the
+/// confirmation seal it; the commit data.
+fn fill_and_seal(service: &EnclaveService, fakes: &enclave::Fakes, card: &mut SimCard, seen: &mut Vec<Value>) -> Vec<u8> {
+    let key = answer_key(&support::master());
+    let fill = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x52; 32]), "amountWei": AMOUNT.to_string() });
+    let done = carry(service, card, post(service, "/v1/fill/start", &fill), seen);
+    verified(&key, &done.1, [0x52; 32], &UID);
+    let commit_data = from_hex(done.1["commitData"].as_str().unwrap()).unwrap();
+    fakes.chain.pay(CoinQuery { commit_data: commit_data.clone(), amount_wei: AMOUNT, spend_marker: fakes.maker.marker_for(&commit_data) });
+    let confirm = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x53; 32]) });
+    let done = carry(service, card, post(service, "/v1/fill/confirm", &confirm), seen);
+    assert_eq!(verified(&key, &done.1, [0x53; 32], &UID).state, CardState::Sealed);
+    commit_data
+}
+
+#[test]
+fn with_the_sealed_log_installed_check_fill_confirm_and_open_are_served() {
+    let store = MemoryLogStore::new();
+    let (service, fakes, log) = log_service(&store);
+    assert!(service.serves_flows());
+    assert_eq!(*log.0.lock().unwrap(), vec![ServiceEvent::MasterInstalled { serves_flows: true }]);
+    let key = answer_key(&support::master());
+    let mut seen = Vec::new();
+    let mut card = SimCard::set_up(UID);
+
+    let check = |challenge: [u8; 32], card: &mut SimCard, seen: &mut Vec<Value>| {
+        let start = post(&service, "/v1/check/start", &json!({ "uid": uid_hex(&UID), "challenge": to_hex(&challenge) }));
+        let done = carry(&service, card, start, seen);
+        verified(&key, &done.1, challenge, &UID)
+    };
+    assert_eq!(check([0x51; 32], &mut card, &mut seen).state, CardState::Empty);
+    let commit_data = fill_and_seal(&service, &fakes, &mut card, &mut seen);
+    assert!(store.records().len() >= 1, "the Fill went to the host's store");
+    assert!(reread(&store).load(&UID, EntryKind::Fill).is_some());
+    assert_eq!(check([0x54; 32], &mut card, &mut seen).state, CardState::Sealed);
+
+    let phone = support::phone(0x56);
+    let open = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x55; 32]), "phoneKey": to_hex(&phone.public_key()) });
+    let done = carry(&service, &mut card, post(&service, "/v1/open/start", &open), &mut seen);
+    let body = verified(&key, &done.1, [0x55; 32], &UID);
+    assert_eq!(body.state, CardState::Opened);
+    let release = from_hex(done.1["release"].as_str().unwrap()).unwrap();
+    assert_eq!(phone.open(&release, &UID, 1).unwrap().expose_secret(), &fakes.maker.key_for(&commit_data)[..]);
+    assert!(reread(&store).load(&UID, EntryKind::Open).is_some());
+    // The host holds counters and ciphertext: no UID, no commit data.
+    let bytes = store.bytes();
+    assert!(!support::contains(&bytes, &UID.0));
+    assert!(!support::contains(&bytes, &commit_data[..32]));
+    // Nor does the in-memory test journal get anything: the log is the
+    // journal.
+    assert!(fakes.journal.sealed_entries().is_empty());
+}
+
+#[test]
+fn a_log_that_fails_to_verify_leaves_every_flow_503() {
+    // A good log of a few records, then one record changed by the host.
+    let store = MemoryLogStore::new();
+    {
+        let (service, fakes, _) = log_service(&store);
+        fill_and_seal(&service, &fakes, &mut SimCard::set_up(UID), &mut Vec::new());
+    }
+    // Two more records, written by the log as the enclave writes them.
+    let mut more = reread(&store);
+    more.save(&STRANGER, EntryKind::Fill, b"a second entry".to_vec()).unwrap();
+    more.save(&STRANGER, EntryKind::Open, b"a third entry".to_vec()).unwrap();
+    let good = store.records();
+    assert_eq!(good.len(), 3);
+    let mut tampered = good.clone();
+    tampered[0].1[18] ^= 0x01;
+    let mut swapped = good.clone();
+    swapped.swap(0, 1);
+    let mut cut = good.clone();
+    cut.remove(0);
+    for (what, records) in [("a changed record", tampered), ("a reorder", swapped), ("a gap", cut)] {
+        store.set_records(records);
+        let (service, fakes, log) = log_service(&store);
+        assert!(!service.serves_flows(), "{what}");
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            vec![ServiceEvent::JournalRefused, ServiceEvent::MasterInstalled { serves_flows: false }],
+            "{what}"
+        );
+        for (path, body) in flow_requests(&UID) {
+            let answer = post(&service, path, &body);
+            assert_unavailable(&answer);
+            assert!(answer.1.get("apdu").is_none(), "{what}: no card traffic");
+        }
+        assert!(fakes.maker.made.lock().unwrap().is_empty());
+        // The attestation route still works.
+        attest(&service, [0x57; 32]);
+        // Once the host's log is sound again, the next refresh serves.
+        store.set_records(good.clone());
+        assert!(service.refresh_flows(), "{what}");
+        assert!(service.serves_flows());
+    }
+
+    // A log sealed under another M is refused the same way.
+    store.set_records(good);
+    let (deps, _) = enclave::deps_with_journal(Arc::new(SharedLog::new(Box::new(store.clone()))) as Arc<dyn DurableJournal>);
+    let log = Arc::new(MemoryServiceLog::default());
+    let service = enclave::service(deps, allowed_old(), log.clone());
+    let mut other = [0x5au8; 32];
+    service.install_master(ghost_seal::MasterKey::take(&mut other));
+    assert!(!service.serves_flows());
+    assert!(log.0.lock().unwrap().contains(&ServiceEvent::JournalRefused));
+    for (path, body) in flow_requests(&UID) {
+        assert_unavailable(&post(&service, path, &body));
+    }
+}
+
+/// Carries a flow until it ends or the card leaves the field (then the
+/// phone aborts the session).
+fn carry_or_drop(service: &EnclaveService, card: &mut SimCard, mut answer: (u16, Value)) -> Option<(u16, Value)> {
+    while answer.0 == 200 && answer.1["status"] == "apdu" {
+        let apdu = from_hex(answer.1["apdu"].as_str().unwrap()).unwrap();
+        let session = answer.1["session"].clone();
+        let Ok(card_answer) = card.transceive(&apdu) else {
+            post(service, "/v1/relay/abort", &json!({ "session": session }));
+            return None;
+        };
+        answer = post(service, "/v1/relay/step", &json!({ "session": session, "answer": to_hex(&card_answer) }));
+    }
+    Some(answer)
+}
+
+#[test]
+fn the_enclave_built_from_a_reopened_log_serves_an_open_the_first_one_began() {
+    let store = MemoryLogStore::new();
+    let mut card = SimCard::set_up(UID);
+    let phone = support::phone(0x58);
+    let open = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x59; 32]), "phoneKey": to_hex(&phone.public_key()) });
+    let (commit_data, first_fakes) = {
+        let (service, fakes, _) = log_service(&store);
+        let commit_data = fill_and_seal(&service, &fakes, &mut card, &mut Vec::new());
+        // The Open is cut off at the first command after it was journaled.
+        let mut step = 0;
+        loop {
+            card.drop_from(step, support::DropStyle::AfterCard);
+            let ended = carry_or_drop(&service, &mut card, post(&service, "/v1/open/start", &open));
+            card.reconnect();
+            assert!(ended.is_none() || ended.as_ref().is_some_and(|a| a.0 != 200), "step {step}: cut off");
+            if reread(&store).load(&UID, EntryKind::Open).is_some() {
+                break;
+            }
+            step += 1;
+            assert!(step < 64, "the Open was never journaled");
+        }
+        (commit_data, fakes)
+        // The enclave stops here.
+    };
+
+    // A new enclave on the same host's log.
+    let (service, _, log) = log_service(&store);
+    assert!(service.serves_flows());
+    assert_eq!(*log.0.lock().unwrap(), vec![ServiceEvent::MasterInstalled { serves_flows: true }]);
+    let key = answer_key(&support::master());
+    let done = carry(&service, &mut card, post(&service, "/v1/open/start", &open), &mut Vec::new());
+    let body = verified(&key, &done.1, [0x59; 32], &UID);
+    assert_eq!(body.state, CardState::Opened);
+    let release = from_hex(done.1["release"].as_str().unwrap()).unwrap();
+    assert_eq!(phone.open(&release, &UID, 1).unwrap().expose_secret(), &first_fakes.maker.key_for(&commit_data)[..]);
+    // Another phone cannot take it over.
+    let other = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x5a; 32]), "phoneKey": to_hex(&support::phone(0x5b).public_key()) });
+    let refused = carry(&service, &mut card, post(&service, "/v1/open/start", &other), &mut Vec::new());
+    assert_eq!(refused.0, 422, "{}", refused.1);
+}
+
+#[test]
+fn a_host_that_rolls_the_log_back_while_the_enclave_runs_is_refused() {
+    let store = MemoryLogStore::new();
+    let (service, fakes, log) = log_service(&store);
+    let mut card = SimCard::set_up(UID);
+    fill_and_seal(&service, &fakes, &mut card, &mut Vec::new());
+    let records = store.records();
+    // The host drops the last record.
+    store.set_records(records[..records.len() - 1].to_vec());
+    let (file, keys) = (card.file.clone(), card.keys);
+    let phone = support::phone(0x5c);
+    let open = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x5d; 32]), "phoneKey": to_hex(&phone.public_key()) });
+    let answer = carry(&service, &mut card, post(&service, "/v1/open/start", &open), &mut Vec::new());
+    assert_eq!(answer.0, 422, "{}", answer.1);
+    assert!(answer.1.get("release").is_none());
+    assert_eq!((card.file.clone(), card.keys), (file, keys), "the card is unchanged");
+    assert!(log.0.lock().unwrap().contains(&ServiceEvent::JournalRefused));
+    // Refused for good: the host putting the record back changes nothing.
+    store.set_records(records.clone());
+    let again = carry(&service, &mut card, post(&service, "/v1/open/start", &open), &mut Vec::new());
+    assert_eq!(again.0, 422, "{}", again.1);
+    assert_eq!(store.records(), records, "nothing more was appended");
 }
 
 /// A deterministic random source (test only).
