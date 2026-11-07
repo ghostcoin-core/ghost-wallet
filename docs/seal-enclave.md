@@ -502,7 +502,8 @@ other two (`docs/sealed-card.md`, "Journal", has the formats):
   as agreement: a region's own restore takes heads only when every peer
   holds one, and opens an empty log only when its host's store is empty and
   every peer answered that its copy is restored and empty (a log never
-  written). A store with records that no peer holds is refused. A peer log's
+  written). A store with records that no peer holds is refused, except a
+  log still in the previous format (below). A peer log's
   restore with no head anywhere keeps the copy it holds, but refuses it when
   another holder says the log is empty, and waits while it is empty and
   another holder has records not confirmed yet. So when regions are
@@ -512,6 +513,23 @@ other two (`docs/sealed-card.md`, "Journal", has the formats):
 - A peer request needs M only, not the peer's own flows, so regions that
   start together anchor each other; a region answers about its own log from
   its host's store once that log is open.
+- **A log written before the anchor.** The previous release's records carry
+  no origin under their tag. When the host's own log holds such records,
+  the enclave checks every one once with the previous rule (a record that
+  fails it, or a log mixing the two formats, is a refusal), rewrites each
+  with the same counter, IV and ciphertext under the current, origin-bound
+  tag as this region's record, and has every peer take the rewritten log
+  first: each peer must answer, with its copy restored (empty, as no peer
+  can hold a log never anchored, or with a part of it left by a try that
+  failed half way), and is sent what it lacks. Only then is the host's file
+  replaced at once (the whole log written to `journal.log.new`, flushed,
+  renamed over `journal.log`, the directory flushed; request 4 || counter
+  || record stages each record, 5 || count replaces) and read back, before
+  any flow. Until then the file keeps the previous format, and the region
+  answers its peers about it as about an empty store (*no copy*, not
+  restored), so their copies restore empty and the upgrade can begin. Fill
+  and Open entries are kept as they were. Peer logs are always in the
+  current format and are never rewritten.
 
 **Who may answer.** M alone does not prove which enclave answers: an
 approved build of another region's image can join M through the key share
@@ -543,7 +561,10 @@ replacement serving before the next begins, which restores from its peers
   and seeded with an old copy of the log, are taken as the two peers. The
   instance PCR binds an answer to an instance, not to the deployed stack;
   the AWS account (who may start instances in it, and the routes of the
-  peer ports) stays trusted for this.
+  peer ports) stays trusted for this. Closing it needs the answering
+  instances bound to the deployed stacks, by a membership list of the
+  regions' instances signed with the release key; that is a later change,
+  not this one.
 - every region lost at once, or the hosts of every region cutting the log at
   once.
 

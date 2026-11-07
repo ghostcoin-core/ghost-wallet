@@ -178,6 +178,10 @@ impl LogStore for SharedStore {
     fn read_all(&mut self) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).read_all()
     }
+
+    fn replace_all(&mut self, records: &[(u64, Vec<u8>)]) -> Result<(), SealError> {
+        LogStore::replace_all(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner), records)
+    }
 }
 
 /// The test M's bytes. Public by design: SHA3-256 of

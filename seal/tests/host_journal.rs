@@ -4,7 +4,9 @@
 //! last record dropped at open, the file's mode, no answer before the
 //! flush, a slow or silent host timing out, and both ends restarted; and the
 //! logs a host keeps for the peer regions (one file per origin region, on
-//! the same port, ciphertext only), as a peer enclave fills and reads them.
+//! the same port, ciphertext only), as a peer enclave fills and reads them;
+//! and a file the previous release wrote, replaced at once by its upgrade
+//! (a peer log never).
 
 mod support;
 
@@ -19,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use ghost_seal::host_journal::{
     self, ANSWER_OK, ANSWER_RECORD, ANSWER_REFUSED, HostJournal, HostStore, HostStores, JOURNAL_FILE, JOURNAL_PORT,
-    PARENT_CID, REQUEST_APPEND, REQUEST_DEADLINE, REQUEST_PEER, REQUEST_READ_ALL, RecordFile, StoreRefused,
-    peer_log_file, peer_request,
+    PARENT_CID, REQUEST_APPEND, REQUEST_DEADLINE, REQUEST_PEER, REQUEST_READ_ALL, REQUEST_REPLACE, REQUEST_STAGE,
+    RecordFile, StoreRefused, peer_log_file, peer_request,
 };
 use ghost_seal::journal_anchor::{Anchor, FakeAttester, NO_COPY, Peer, PeerLink, PeerLogs, Peers};
 use ghost_seal::journal_log::{JournalLog, LogStore, MAX_RECORD_BYTES, MemoryLogStore, SharedLog};
@@ -28,6 +30,7 @@ use ghost_seal::key_share::{read_frame, write_frame};
 use ghost_seal::proxy::{TcpConnector, UnixConnector};
 use ghost_seal::{CardUid, EntryKind, Journal, SealError};
 use support::UID;
+use support::previous_log::PreviousLog;
 
 const OTHER: CardUid = CardUid([0x04, 0x10, 0x20, 0x30, 0x40, 0x50, 0x61]);
 
@@ -244,6 +247,17 @@ impl RecordFile for FakeFile {
         self.state.lock().unwrap().bytes.truncate(length as usize);
         Ok(())
     }
+
+    /// Whole or not at all: a failing write leaves the old bytes.
+    fn replace(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.fail_write || state.fail_sync {
+            return Err(std::io::Error::other("the new file could not be written"));
+        }
+        state.bytes = bytes.to_vec();
+        state.syncs += 1;
+        Ok(())
+    }
 }
 
 #[test]
@@ -394,6 +408,84 @@ fn a_restart_of_both_ends_gives_the_same_entries() {
     for clear in [&b"a fill entry"[..], b"an open entry", b"another card", &UID.0, &OTHER.0] {
         assert!(!support::contains(&bytes, clear));
     }
+}
+
+#[test]
+fn a_journal_file_the_previous_release_wrote_is_replaced_at_once_by_its_upgrade() {
+    assert_eq!((REQUEST_STAGE, REQUEST_REPLACE), (4, 5));
+    let dir = scratch("upgrade");
+    let path = dir.join("journal.log");
+    // The previous release writes three saves to the host's file.
+    {
+        let store = Box::new(HostStore::open(&path).unwrap());
+        let mut log = PreviousLog::new(&support::master_bytes(), store, Box::new(ghost_seal::SystemRandom));
+        log.save(&UID, EntryKind::Fill, b"a fill entry".to_vec()).unwrap();
+        log.save(&UID, EntryKind::Open, b"an open entry".to_vec()).unwrap();
+        log.save(&OTHER, EntryKind::Fill, b"another card".to_vec()).unwrap();
+    }
+    let written = HostStore::open(&path).unwrap().records().to_vec();
+    assert_eq!(written.len(), 3);
+
+    // The new enclave opens it through the host's socket: upgraded, the
+    // file replaced, the entries kept.
+    let socket = serve_with_peers(&dir, "s", &[EU]);
+    let shared = SharedLog::new(Box::new(client(&socket)));
+    let mut log = shared.journal(&support::master()).expect("the previous format is upgraded");
+    assert_eq!(log.load(&UID, EntryKind::Fill), Some(b"a fill entry".to_vec()));
+    assert_eq!(log.load(&UID, EntryKind::Open), Some(b"an open entry".to_vec()));
+    assert_eq!(log.load(&OTHER, EntryKind::Fill), Some(b"another card".to_vec()));
+    let upgraded = HostStore::open(&path).unwrap().records().to_vec();
+    assert_eq!(upgraded.len(), 3);
+    for ((old_counter, old), (new_counter, new)) in written.iter().zip(&upgraded) {
+        assert_eq!(old_counter, new_counter);
+        assert_eq!(old[..old.len() - 32], new[..new.len() - 32]);
+        assert_ne!(old, new);
+    }
+    assert!(!host_journal::staging_file(&path).exists(), "the staging file was renamed over the journal");
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    // The host goes on appending to the new file, which reopens whole.
+    log.save(&UID, EntryKind::Open, b"after the upgrade".to_vec()).unwrap();
+    assert_eq!(HostStore::open(&path).unwrap().records().len(), 4);
+    assert_eq!(shared.journal(&support::master()).unwrap().counter(), 4);
+
+    // A peer log is never replaced, and a replacement whose count is not
+    // the number staged is refused, the journal unchanged.
+    let mut peer_log = client(&socket).peer_log(EU);
+    assert!(matches!(peer_log.replace_all(&upgraded), Err(SealError::Journal(_))));
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    for request in [
+        [&[REQUEST_STAGE][..], &1u64.to_be_bytes(), b"one staged"].concat(),
+        [&[REQUEST_REPLACE][..], &2u64.to_be_bytes()].concat(),
+    ] {
+        write_frame(&mut stream, &peer_request(EU, &request)).unwrap();
+        assert_eq!(read_frame(&mut stream).unwrap()[0], ANSWER_REFUSED);
+    }
+    write_frame(&mut stream, &[&[REQUEST_STAGE][..], &1u64.to_be_bytes(), b"one staged"].concat()).unwrap();
+    assert_eq!(read_frame(&mut stream).unwrap(), vec![ANSWER_OK]);
+    write_frame(&mut stream, &[&[REQUEST_STAGE][..], &3u64.to_be_bytes(), b"out of turn"].concat()).unwrap();
+    assert_eq!(read_frame(&mut stream).unwrap()[0], ANSWER_REFUSED);
+    write_frame(&mut stream, &[&[REQUEST_REPLACE][..], &2u64.to_be_bytes()].concat()).unwrap();
+    assert_eq!(read_frame(&mut stream).unwrap()[0], ANSWER_REFUSED);
+    assert_eq!(HostStore::open(&path).unwrap().records().len(), 4);
+    assert!(HostStore::open(&dir.join("peer-eu-central-1.log")).unwrap().records().is_empty());
+
+    // A replacement the disk fails is not taken: the file keeps the old
+    // records whole.
+    let fake = FakeFile::default();
+    let mut store = HostStore::with_file(fake.clone()).unwrap();
+    for (counter, record) in &written {
+        store.append(*counter, record).unwrap();
+    }
+    let before = fake.state.lock().unwrap().bytes.clone();
+    fake.state.lock().unwrap().fail_write = true;
+    assert_eq!(store.replace(&upgraded), Err(StoreRefused::Disk));
+    assert_eq!(store.records(), &written[..]);
+    assert_eq!(fake.state.lock().unwrap().bytes, before);
+    fake.state.lock().unwrap().fail_write = false;
+    assert_eq!(store.replace(&upgraded[..1]), Ok(()));
+    assert_eq!(HostStore::with_file(fake).unwrap().records(), &upgraded[..1]);
+    assert_eq!(store.replace(&[(2, b"not from 1".to_vec())]), Err(StoreRefused::WrongCounter));
 }
 
 const US: &str = "us-east-1";

@@ -243,7 +243,18 @@ What it survives, what it costs and what it does not cover:
   account itself: approved enclaves on two new instances (each with a PCR4
   of its own), one led to each peer port, are taken as the two peers. Keep
   the right to launch instances, and to change the peer ports' routes, to
-  the few who deploy.
+  the few who deploy. A membership list of the regions' instances signed
+  with the release key is the later change that closes this.
+- A journal written by the release before the anchor (its records carry no
+  origin) is upgraded in place the first time the new enclave opens it on
+  that host: each record is checked with the previous rule and rewritten for
+  this region with the same counters and entries, both peers take the
+  rewritten log, and the file is replaced at once (`journal.log.new` is
+  written, flushed and renamed over `journal.log`). Until both other regions
+  run the new release and have started, it waits, the file unchanged. A log
+  mixing the two formats, or a record failing the previous check, is refused
+  (`the durable journal was refused`): keep the file as it is and ask the
+  release owner. A leftover `journal.log.new` is harmless and is overwritten.
 
 Each card is served by its home region only (`docs/sealed-card.md`, "Home
 region"); every other region refuses it `wrong-region`, naming the home, and

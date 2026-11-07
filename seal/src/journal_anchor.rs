@@ -45,7 +45,8 @@
 //! - an origin's own restore takes heads only when every peer answered a
 //!   head; with no head at all it opens an empty log only when its own store
 //!   is empty and every peer answered [`NO_COPY_EMPTY`] (a log never
-//!   written). A store with records that no peer holds is refused;
+//!   written). A store with records that no peer holds is refused, but for
+//!   a log upgraded from the previous format (below);
 //! - a peer log's restore with no head at all keeps the copy it holds (checked
 //!   with M), but refuses an empty copy while another holder still has
 //!   records it has not confirmed, and a copy with records that another
@@ -83,8 +84,20 @@
 //!
 //! What this still does not cover: an attacker who can start new EC2
 //! instances in the AWS account itself (each has its own PCR4) and route the
-//! peer ports to approved enclaves on them; every region lost at once; the
-//! hosts of every region cutting the log at once.
+//! peer ports to approved enclaves on them, joined to M and seeded with an
+//! older copy of the log (binding the answering instances to the deployed
+//! stacks, by a membership list signed with the release key, is a later
+//! change); every region lost at once; the hosts of every region cutting the
+//! log at once.
+//!
+//! **Upgrade.** A log the previous release wrote (before the anchor, no
+//! origin under its tags) is upgraded when its region opens it
+//! (`journal_log`), and was never anchored: until it is, its region answers
+//! about it as about an empty store ([`NO_COPY_NOT_RESTORED`]), so its peers
+//! restore empty copies. Its own restore ([`Anchor`]'s `restore_upgraded`)
+//! then takes the rewritten records when every peer answers a head or an
+//! empty restored copy ([`NO_COPY_EMPTY`]), heads checked and restored as at
+//! any start, and sends every peer what it lacks before the log is used.
 //!
 //! Requests (the body of service request kind [`SERVICE_KIND`]):
 //!
@@ -116,7 +129,9 @@ use zeroize::Zeroizing;
 
 use crate::card_keys::CardUid;
 use crate::error::SealError;
-use crate::journal_log::{Chain, HeadAnchor, LogStore, MAX_RECORD_BYTES, SharedLog, TAG_BYTES, record_tag};
+use crate::journal_log::{
+    Chain, HeadAnchor, LogStore, MAX_RECORD_BYTES, SharedLog, TAG_BYTES, is_previous_format, record_tag,
+};
 use crate::primitives::{ct_eq, hkdf_sha3_256, hmac_sha3_256, sha3_256};
 use crate::secrets::MasterKey;
 use crate::traits::{SealRandom, SystemRandom};
@@ -1087,7 +1102,11 @@ impl PeerLogs {
                     Some((counter, tag)) => Held::Copy(counter, tag),
                     None => {
                         let records = lock(&own.store).read_all().map_err(|_| "this region's log cannot be read")?;
-                        Held::NoCopy(if records.is_empty() { NO_COPY_NOT_RESTORED } else { NO_COPY_UNCONFIRMED })
+                        // A log still in the previous format was never
+                        // anchored: no peer can hold records of it to confirm,
+                        // as with an empty store.
+                        let unanchored = records.is_empty() || is_previous_format(master, &self.own, &records);
+                        Held::NoCopy(if unanchored { NO_COPY_NOT_RESTORED } else { NO_COPY_UNCONFIRMED })
                     }
                 };
                 Ok(held.encode())
@@ -1168,6 +1187,33 @@ impl Anchor {
     pub fn peers(&self) -> Vec<&str> {
         self.peers.regions()
     }
+
+    /// Has every peer of `answers` hold the whole log (`records` and the
+    /// `restored` records after them) before it is used: each is sent what
+    /// it lacks past its head (an empty copy: everything). Then the log is
+    /// anchored with `key`; the restored records.
+    fn settle(
+        &mut self,
+        key: HeadKey,
+        round: &mut Round,
+        origin: &str,
+        records: &[(u64, Vec<u8>)],
+        restored: Vec<(u64, Vec<u8>)>,
+        answers: &[(usize, Held)],
+    ) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
+        let log: Vec<(u64, Vec<u8>)> = records.iter().cloned().chain(restored.iter().cloned()).collect();
+        for (index, held) in answers {
+            let counter = match held {
+                Held::Copy(counter, _) => *counter,
+                Held::NoCopy(_) => 0,
+            };
+            if counter < log.len() as u64 {
+                self.peers.catch_up(&key, round, *index, origin, counter, &log)?;
+            }
+        }
+        self.key = Some(key);
+        Ok(restored)
+    }
 }
 
 impl HeadAnchor for Anchor {
@@ -1197,15 +1243,32 @@ impl HeadAnchor for Anchor {
             return Err(NO_COPY);
         }
         let restored = self.peers.extend(&key, &mut round, master, &origin, records, &heads)?;
-        let log: Vec<(u64, Vec<u8>)> = records.iter().cloned().chain(restored.iter().cloned()).collect();
-        // Every peer holds the whole log before it is used.
-        for (index, counter, _) in heads {
-            if counter < log.len() as u64 {
-                self.peers.catch_up(&key, &mut round, index, &origin, counter, &log)?;
-            }
+        self.settle(key, &mut round, &origin, records, restored, &answers)
+    }
+
+    /// A log upgraded from the previous format was never anchored: its
+    /// peers hold no copy, or (a try that failed half way) a copy of part of
+    /// it. Every peer must answer, each with a head or with an empty copy
+    /// it has restored ([`NO_COPY_EMPTY`]); a peer whose copy is not
+    /// restored yet is waited for. Heads are taken as in a restore (a fork
+    /// or a bad restore is refused, a head ahead is restored), and every
+    /// peer is then sent what it lacks, the empty ones the whole log, before
+    /// the log is used.
+    fn restore_upgraded(
+        &mut self,
+        master: &MasterKey,
+        records: &[(u64, Vec<u8>)],
+    ) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
+        let key = HeadKey::derive(master);
+        let origin = self.peers.own().to_owned();
+        let mut round = Round::new(self.peers.peers.len());
+        let answers = self.peers.heads(&key, &mut round, &origin)?;
+        if answers.iter().any(|(_, held)| matches!(held, Held::NoCopy(reason) if *reason != NO_COPY_EMPTY)) {
+            return Err(NO_COPY);
         }
-        self.key = Some(key);
-        Ok(restored)
+        let heads = copies(&answers);
+        let restored = self.peers.extend(&key, &mut round, master, &origin, records, &heads)?;
+        self.settle(key, &mut round, &origin, records, restored, &answers)
     }
 
     fn anchor(&mut self, counter: u64, record: &[u8], store: &mut dyn LogStore) -> Result<(), SealError> {
