@@ -971,6 +971,14 @@ fn as_one_region_of_several_the_test_server_refuses_a_card_that_is_not_its_own()
         assert!(HostStore::open(&dir.join("journal.log")).unwrap().records().is_empty(), "{name}: nothing journaled");
     }
 
+    // Every region restores its copies of the others' logs from its start
+    // (each answer under a stand-in attestation of its own instance).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !regions.iter().all(|(_, _, server)| server.peer_logs_restored()) {
+        assert!(Instant::now() < deadline, "every region restores its peer logs");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     // Its home serves it: a Check round trip, and a Fill on its journal,
     // which reaches the other two regions' peer logs (ciphertext only).
     let mut card = dev_card(UID);

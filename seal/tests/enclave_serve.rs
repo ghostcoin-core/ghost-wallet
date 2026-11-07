@@ -19,8 +19,11 @@
 //! region's log, the card or the service log (an Open begun at home
 //! included), over TLS too; and the journal anchored in peer enclaves over
 //! the service port (kind 3): every record reaches both peers' host stores,
-//! ciphertext only, a replaced host restores from them, and with no peer
-//! answering every flow is 503 with a fixed event.
+//! ciphertext only, a replaced host restores from them, and with a peer not
+//! answering, or an approved enclave on the asker's own host (its PCR4) or
+//! of another region answering on a peer's port, every flow is 503 with a
+//! fixed event; each answer carries the responder's fresh attestation with
+//! the asker's nonce and its PCR4.
 
 #[path = "fixtures/nitro_authority.rs"]
 mod authority;
@@ -36,13 +39,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use authority::{Authority, AuthoritySource, NOW, allowed_new, allowed_old, revoked, unlisted};
-use ghost_seal::attestation::AttestationRejected;
+use ghost_seal::attestation::{AttestationRejected, AttestationVerifier};
 use ghost_seal::enclave_serve::{
     ChainStatus, DurableJournal, EnclaveService, KIND_JOURNAL_HEAD, KIND_KEY_SHARE, KIND_PHONE_ATTESTATION,
     MemoryServiceLog, NodeChainStatus, PINNED_PATHS, ServiceDeps, ServiceEvent, ServicePeer,
 };
 use ghost_seal::journal_anchor::{
-    Anchor, PEER_PORTS, Peer, PeerLink, PeerLogs, RELEASE_REGIONS, Regions, WRONG_REGION_MESSAGE, home_region,
+    Anchor, PEER_PORTS, Peer, PeerLink, PeerLogs, Peers, RELEASE_REGIONS, Regions, WRONG_REGION_MESSAGE, home_region,
 };
 use ghost_seal::MasterKey;
 use ghost_seal::journal_log::{HeadAnchor, LogStore};
@@ -969,35 +972,52 @@ fn over_tls_a_card_of_another_region_is_refused_before_the_relay_routes() {
     tls_client::post(&mut tls, "/v1/relay/abort", &json!({ "session": started.1["session"].clone() }));
 }
 
-/// A peer region's enclave: it holds M, keeps the logs of the other regions
-/// in `stores` and serves its service port on a local socket.
-fn peer_enclave(own: &str, stores: &[(&str, &MemoryLogStore)]) -> (Arc<EnclaveService>, std::net::SocketAddr) {
+/// The parent instance (PCR4) of each test enclave's host.
+const HOME_HOST: [u8; 48] = [0x51; 48];
+const US_HOST: [u8; 48] = [0x52; 48];
+const AP_HOST: [u8; 48] = [0x53; 48];
+const NEW_HOME_HOST: [u8; 48] = [0x54; 48];
+
+/// A peer region's enclave on the instance `pcr4`: it holds M, keeps the
+/// logs of the other regions in `stores` (restored at its start, with no
+/// other holder to ask, as they are) and serves its service port on a local
+/// socket.
+fn peer_enclave(own: &str, stores: &[(&str, &MemoryLogStore)], pcr4: [u8; 48]) -> (Arc<EnclaveService>, std::net::SocketAddr) {
     let (mut deps, _) = enclave::deps(true, true, true);
     deps.regions = Some(Regions::release(own).unwrap());
     let stores = stores.iter().map(|(region, store)| (region.to_string(), Box::new((*store).clone()) as Box<dyn LogStore>));
-    deps.peer_logs = Some(Arc::new(PeerLogs::new(own, stores.collect())));
-    let (service, addr, _) = served(deps);
+    deps.peer_logs = Some(Arc::new(PeerLogs::new(Arc::new(Peers::new(own, Vec::new())), stores.collect())));
+    let log = Arc::new(MemoryServiceLog::default());
+    let service = Arc::new(enclave::service_on_instance(deps, allowed_old(), pcr4, log));
+    service.install_master(support::master());
+    assert!(service.serves_flows());
+    let addr = enclave::serve(service.clone(), Duration::from_secs(60));
     (service, addr)
 }
 
-/// The home region's service, its journal the sealed log over `store`
-/// anchored in the enclaves at `peers` over their service ports.
+/// The home region's service on the instance `pcr4`, its journal the sealed
+/// log over `store` anchored in the enclaves at `peers` over their service
+/// ports, every answer checked with its own attestation and trusted list.
 fn anchored_service(
     store: &MemoryLogStore,
     peers: &[(&str, std::net::SocketAddr)],
+    pcr4: [u8; 48],
 ) -> (EnclaveService, enclave::Fakes, Arc<MemoryServiceLog>) {
-    let peers = peers
+    let links = peers
         .iter()
         .map(|(region, addr)| Peer {
             region: region.to_string(),
             link: Arc::new(ServicePeer::new(TcpConnector(addr.to_string()), Duration::from_secs(5))) as Arc<dyn PeerLink>,
         })
         .collect();
-    let journal = SharedLog::anchored(Box::new(store.clone()), Box::new(Anchor::new(HOME, peers)));
+    let peers = Arc::new(Peers::new(HOME, links));
+    let journal = SharedLog::anchored(Box::new(store.clone()), Box::new(Anchor::new(Arc::clone(&peers))));
     let (mut deps, fakes) = enclave::deps_with_journal(Arc::new(journal) as Arc<dyn DurableJournal>);
     deps.regions = Some(Regions::release(HOME).unwrap());
+    // Its own copies of the other regions' logs are not under test here.
+    deps.peer_logs = Some(Arc::new(PeerLogs::new(peers, Vec::new())));
     let log = Arc::new(MemoryServiceLog::default());
-    let service = enclave::service(deps, allowed_old(), log.clone());
+    let service = enclave::service_on_instance(deps, allowed_old(), pcr4, log.clone());
     service.install_master(support::master());
     (service, fakes, log)
 }
@@ -1007,8 +1027,8 @@ fn the_journal_is_anchored_in_the_peer_enclaves_over_the_service_port() {
     assert_eq!((PEER_PORTS, KIND_JOURNAL_HEAD), ([5006, 5007], 3));
     // us-east-1 and ap-southeast-1 keep eu-central-1's log, each on its host.
     let (us_copy, ap_copy) = (MemoryLogStore::new(), MemoryLogStore::new());
-    let (_us, us_addr) = peer_enclave("us-east-1", &[(HOME, &us_copy), ("ap-southeast-1", &MemoryLogStore::new())]);
-    let (_ap, ap_addr) = peer_enclave("ap-southeast-1", &[("us-east-1", &MemoryLogStore::new()), (HOME, &ap_copy)]);
+    let (_us, us_addr) = peer_enclave("us-east-1", &[(HOME, &us_copy), ("ap-southeast-1", &MemoryLogStore::new())], US_HOST);
+    let (_ap, ap_addr) = peer_enclave("ap-southeast-1", &[("us-east-1", &MemoryLogStore::new()), (HOME, &ap_copy)], AP_HOST);
     let peers = [("us-east-1", us_addr), ("ap-southeast-1", ap_addr)];
 
     // The home region fills and seals the card and begins an Open; every
@@ -1018,7 +1038,7 @@ fn the_journal_is_anchored_in_the_peer_enclaves_over_the_service_port() {
     let phone = support::phone(0x78);
     let open = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x79; 32]), "phoneKey": to_hex(&phone.public_key()) });
     let (commit_data, first_fakes) = {
-        let (service, fakes, log) = anchored_service(&store, &peers);
+        let (service, fakes, log) = anchored_service(&store, &peers, HOME_HOST);
         assert!(service.serves_flows());
         assert_eq!(*log.0.lock().unwrap(), vec![ServiceEvent::MasterInstalled { serves_flows: true }]);
         let commit_data = fill_and_seal(&service, &fakes, &mut card, &mut Vec::new());
@@ -1040,7 +1060,7 @@ fn the_journal_is_anchored_in_the_peer_enclaves_over_the_service_port() {
     // log from its peers before it serves, and finishes the Open it never
     // saw with the key of the Fill.
     let replaced = MemoryLogStore::new();
-    let (service, _, log) = anchored_service(&replaced, &peers);
+    let (service, _, log) = anchored_service(&replaced, &peers, NEW_HOME_HOST);
     assert!(service.serves_flows());
     assert_eq!(*log.0.lock().unwrap(), vec![ServiceEvent::MasterInstalled { serves_flows: true }]);
     assert_eq!(replaced.records(), store.records(), "restored, ciphertext as it was");
@@ -1053,23 +1073,41 @@ fn the_journal_is_anchored_in_the_peer_enclaves_over_the_service_port() {
     assert_eq!(ap_copy.records(), replaced.records());
 
     // A tail the host cut while the enclave was stopped, with no peer
-    // reachable: every flow 503, a fixed event, nothing appended.
+    // reachable, or one: every flow 503, a fixed event, nothing appended.
     let gone = |region| (region, std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap());
     let cut = MemoryLogStore::new();
     cut.set_records(store.records()[..1].to_vec());
-    let (service, fakes, log) = anchored_service(&cut, &[gone("us-east-1"), gone("ap-southeast-1")]);
-    assert!(!service.serves_flows());
-    assert_eq!(
-        *log.0.lock().unwrap(),
-        vec![ServiceEvent::JournalUnanchored, ServiceEvent::MasterInstalled { serves_flows: false }]
-    );
-    for (path, body) in flow_requests(&UID) {
-        assert_unavailable(&post(&service, path, &body));
+    for down in [vec![gone("us-east-1"), gone("ap-southeast-1")], vec![peers[0], gone("ap-southeast-1")]] {
+        let (service, fakes, log) = anchored_service(&cut, &down, NEW_HOME_HOST);
+        assert!(!service.serves_flows());
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            vec![ServiceEvent::JournalUnanchored, ServiceEvent::MasterInstalled { serves_flows: false }]
+        );
+        for (path, body) in flow_requests(&UID) {
+            assert_unavailable(&post(&service, path, &body));
+        }
+        assert_eq!(cut.records(), store.records()[..1].to_vec());
+        assert!(fakes.maker.made.lock().unwrap().is_empty());
     }
+
+    // An approved us-east-1 enclave started on the home's own host (its
+    // PCR4), holding M and the cut copy, on us-east-1's port: its attested
+    // answers are refused, and nothing is restored or served.
+    let impostor_copy = MemoryLogStore::new();
+    impostor_copy.set_records(cut.records());
+    let (_impostor, impostor_addr) =
+        peer_enclave("us-east-1", &[(HOME, &impostor_copy), ("ap-southeast-1", &MemoryLogStore::new())], NEW_HOME_HOST);
+    let (service, _, log) = anchored_service(&cut, &[("us-east-1", impostor_addr), peers[1]], NEW_HOME_HOST);
+    assert!(!service.serves_flows());
+    assert_eq!(log.0.lock().unwrap()[0], ServiceEvent::JournalUnanchored);
     assert_eq!(cut.records(), store.records()[..1].to_vec());
-    assert!(fakes.maker.made.lock().unwrap().is_empty());
-    // The same cut with the peers reachable is restored and served.
-    let (service, _, _) = anchored_service(&cut, &peers);
+    // ap-southeast-1's enclave answering on us-east-1's port: refused too.
+    let (service, _, _) = anchored_service(&cut, &[("us-east-1", ap_addr), peers[1]], NEW_HOME_HOST);
+    assert!(!service.serves_flows());
+    // The same cut with the established peers reachable is restored and
+    // served.
+    let (service, _, _) = anchored_service(&cut, &peers, NEW_HOME_HOST);
     assert!(service.serves_flows());
     assert_eq!(cut.records(), us_copy.records());
 
@@ -1079,9 +1117,28 @@ fn the_journal_is_anchored_in_the_peer_enclaves_over_the_service_port() {
     bare.install_master(support::master());
     assert!(bare.answer_frame(&[KIND_JOURNAL_HEAD, 2, 0]).unwrap_err().contains("no peer logs"));
     let (mut deps, _) = enclave::deps(true, true, true);
-    deps.peer_logs = Some(Arc::new(PeerLogs::new("us-east-1", Vec::new())));
+    deps.peer_logs = Some(Arc::new(PeerLogs::new(Arc::new(Peers::new("us-east-1", Vec::new())), Vec::new())));
     let early = enclave::service(deps, allowed_old(), Arc::new(MemoryServiceLog::default()));
     assert!(early.answer_frame(&[KIND_JOURNAL_HEAD, 2, 0]).unwrap_err().contains("no M"));
+}
+
+#[test]
+fn a_peer_answer_carries_a_fresh_attestation_with_the_askers_nonce_and_the_responders_pcr4() {
+    let copy = MemoryLogStore::new();
+    let (peer, _) = peer_enclave("us-east-1", &[(HOME, &copy), ("ap-southeast-1", &MemoryLogStore::new())], US_HOST);
+    let mut request = vec![KIND_JOURNAL_HEAD, 2, HOME.len() as u8];
+    request.extend_from_slice(HOME.as_bytes());
+    request.extend_from_slice(&[0x5a; 32]);
+    let answer = peer.answer_frame(&request).expect("a head of an empty copy: no copy");
+    let responder = usize::from(answer[0]);
+    assert_eq!(&answer[1..1 + responder], b"us-east-1");
+    let length = usize::from(u16::from_be_bytes([answer[1 + responder], answer[2 + responder]]));
+    let document = &answer[3 + responder..3 + responder + length];
+    let checked = Authority::new(enclave::AUTHORITY_SEED).verifier().verify(document, NOW).expect("the AWS-format document");
+    assert_eq!(checked.nonce, Some(vec![0x5a; 32]), "the asker's nonce");
+    assert_eq!(checked.pcrs, allowed_old());
+    assert_eq!(ghost_seal::enclave_serve::document_pcr4(document), Some(US_HOST));
+    assert_eq!(&answer[3 + responder + length + 32..], [0, 1], "no copy of an empty log, never a zero head");
 }
 
 /// A deterministic random source (test only).

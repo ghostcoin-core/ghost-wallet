@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use ghost_seal::attestation::{AttestationSource, AttestationVerifier};
+use ghost_seal::attestation::cbor::Value;
+use ghost_seal::attestation::{AttestationError, AttestationSource, AttestationVerifier};
 use ghost_seal::chain_check::safe_depth;
 use ghost_seal::enclave_serve::{
     ChainStatus, CoreKeyMakerSource, DurableJournal, EnclaveAttestation, EnclaveService, KeyMakerSource,
@@ -41,15 +42,49 @@ pub const FIXTURE: &str = include_str!("../fixtures/measurements.json");
 /// The seed of the tests' attestation authority.
 pub const AUTHORITY_SEED: u8 = 0x21;
 
-/// The tests' NSM: documents from the tests' authority with `pcrs`.
+/// The parent-instance PCR (PCR4) the tests' authority writes by default.
+pub const DEFAULT_PCR4: [u8; 48] = [0x44; 48];
+
+/// The tests' NSM: documents from the tests' authority with `pcrs`, on the
+/// parent instance `pcr4`.
 pub struct TestAttestation {
     pub seed: u8,
     pub pcrs: Pcrs,
+    pub pcr4: [u8; 48],
+}
+
+/// A test enclave's NSM on the instance `pcr4`: the authority's documents,
+/// their PCR4 set (test only).
+pub struct InstanceSource {
+    pub authority: Rc<Authority>,
+    pub pcrs: Pcrs,
+    pub pcr4: [u8; 48],
+}
+
+impl AttestationSource for InstanceSource {
+    fn attest(&mut self, user_data: &[u8], nonce: &[u8]) -> Result<Vec<u8>, AttestationError> {
+        let mut fields = self.authority.fields(&self.pcrs, user_data, nonce, self.authority.now * 1000);
+        for (key, value) in fields.iter_mut() {
+            if let (Value::Text(name), Value::Map(pcrs)) = (&*key, value)
+                && name == "pcrs"
+            {
+                for (index, pcr) in pcrs.iter_mut() {
+                    if *index == Value::Unsigned(4) {
+                        *pcr = Value::Bytes(self.pcr4.to_vec());
+                    }
+                }
+            }
+        }
+        Ok(self.authority.sign_fields(fields))
+    }
 }
 
 impl EnclaveAttestation for TestAttestation {
     fn source(&self) -> Result<Box<dyn AttestationSource>, String> {
-        Ok(Box::new(AuthoritySource::new(Rc::new(Authority::new(self.seed)), self.pcrs)))
+        if self.pcr4 == DEFAULT_PCR4 {
+            return Ok(Box::new(AuthoritySource::new(Rc::new(Authority::new(self.seed)), self.pcrs)));
+        }
+        Ok(Box::new(InstanceSource { authority: Rc::new(Authority::new(self.seed)), pcrs: self.pcrs, pcr4: self.pcr4 }))
     }
 
     fn verifier(&self) -> Box<dyn AttestationVerifier> {
@@ -220,11 +255,16 @@ pub fn kem_key() -> Vec<u8> {
 
 /// A service measuring as `pcrs` with `deps`, holding no M yet.
 pub fn service(deps: ServiceDeps, pcrs: Pcrs, log: Arc<MemoryServiceLog>) -> EnclaveService {
+    service_on_instance(deps, pcrs, DEFAULT_PCR4, log)
+}
+
+/// [`service`] on the parent instance `pcr4` (its documents' PCR4).
+pub fn service_on_instance(deps: ServiceDeps, pcrs: Pcrs, pcr4: [u8; 48], log: Arc<MemoryServiceLog>) -> EnclaveService {
     EnclaveService::new(
         EnclaveTls::generate().expect("a fresh certificate"),
         kem_key(),
         trusted_fixture(),
-        Arc::new(TestAttestation { seed: AUTHORITY_SEED, pcrs }),
+        Arc::new(TestAttestation { seed: AUTHORITY_SEED, pcrs, pcr4 }),
         deps,
         config(),
         log,

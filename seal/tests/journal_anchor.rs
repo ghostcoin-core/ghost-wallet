@@ -1,12 +1,18 @@
 //! The journal log's head anchored in the peer regions, with in-memory
-//! stores and peers in this process: every save reaches every peer before it
-//! is `Ok`; a tail the host cut while the enclave was stopped is caught and
-//! restored from a peer, and with no peer reachable the log is refused; a
-//! replaced host (an empty log) restores the whole log from a peer and then
-//! finishes an Open it never saw; a peer answering an old head with an old
-//! nonce is not taken; a forked head is refused; a restored record changed
-//! in transit is refused; a save with one peer silent fails and leaves the
-//! card unchanged; peers see ciphertext only; and the home rule agrees across
+//! stores, peers in this process and a stand-in attestation whose PCR4 the
+//! test sets: every save reaches every peer before it is `Ok`; a tail the
+//! host cut while the enclave was stopped is caught and restored, and with a
+//! peer unreachable the log is refused (every peer must answer at a
+//! restart); a replaced host (an empty log) restores the whole log and then
+//! finishes an Open it never saw; regions replaced one after another, with
+//! no write between, keep the last region's log; an empty or unrestored
+//! peer log answers no copy, which never counts as a head; a peer answering
+//! an old head with an old nonce is not taken; a forked head is refused; a
+//! restored record changed in transit or on a peer's host is refused; an
+//! answer from an enclave on the asker's own host, from one instance for two
+//! peers, from another region than the port's or the asker's own region is
+//! refused; a save with one peer silent fails and leaves the card
+//! unchanged; peers see ciphertext only; and the home rule agrees across
 //! regions and matches its fixed vectors (`tests/vectors/home-region.json`).
 
 mod support;
@@ -16,8 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ghost_seal::journal_anchor::{
-    Anchor, BAD_RESTORE, FORKED, HOME_REGION_LABEL, NO_PEER, NOT_ACKNOWLEDGED, OP_APPEND, OP_FETCH, OP_HEAD, PEER_PORTS,
-    Peer, PeerLink, PeerLogs, RELEASE_REGIONS, Regions, RegionsRefused, home_region, is_anchor_error, valid_region,
+    Anchor, AnswerAttester, BAD_RESTORE, FORKED, FakeAttester, HOME_REGION_LABEL, NO_COPY, NO_COPY_EMPTY,
+    NO_COPY_NOT_RESTORED, NO_COPY_UNCONFIRMED, NO_PEER, NOT_ACKNOWLEDGED, OP_APPEND, OP_FETCH, OP_HEAD, PEER_PORTS, Peer,
+    PeerLink, PeerLogs, Peers, RELEASE_REGIONS, Regions, RegionsRefused, UNATTESTED, home_region, is_anchor_error,
+    valid_region,
 };
 use ghost_seal::journal_log::{Chain, HeadAnchor, JournalLog, LogStore, MemoryLogStore, SharedLog};
 use ghost_seal::primitives::sha3_256;
@@ -34,6 +42,38 @@ const OTHER: CardUid = CardUid([0x04, 0x10, 0x20, 0x30, 0x40, 0x50, 0x62]);
 
 const VECTORS: &str = include_str!("vectors/home-region.json");
 
+/// The stand-in attestation's test key.
+const KEY: [u8; 32] = [0x5e; 32];
+
+/// The build of each region's image (one image per region).
+fn build_of(region: &str) -> [u8; 48] {
+    [match region {
+        US => 0xb1,
+        EU => 0xb2,
+        AP => 0xb3,
+        _ => 0xbf,
+    }; 48]
+}
+
+/// The instance (PCR4) region `region`'s host runs on, its `generation`-th
+/// host.
+fn instance(region: &str, generation: u8) -> [u8; 48] {
+    let mut pcr4 = [match region {
+        US => 0x11,
+        EU => 0x12,
+        AP => 0x13,
+        _ => 0x1f,
+    }; 48];
+    pcr4[47] = generation;
+    pcr4
+}
+
+/// The stand-in attester of an enclave of `region`'s image on instance
+/// `pcr4`, approving the three regions' builds.
+fn attester(region: &str, pcr4: [u8; 48]) -> Arc<FakeAttester> {
+    Arc::new(FakeAttester::new(KEY, build_of(region), pcr4, RELEASE_REGIONS.iter().map(|r| build_of(r)).collect()))
+}
+
 /// A deterministic random source an anchor or a log can hold (test only).
 struct Random(u64);
 
@@ -47,7 +87,7 @@ impl SealRandom for Random {
     }
 }
 
-/// How a test makes a peer misbehave.
+/// How a test makes a link misbehave.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Honest,
@@ -57,31 +97,97 @@ enum Mode {
     TamperFetch,
 }
 
-/// A peer region in this process: its logs of the other regions, each over
-/// an in-memory store of its host.
+/// What the test controls on the way to one region, and what crossed it.
+struct Control {
+    silent: AtomicBool,
+    mode: Mutex<Mode>,
+    first_head: Mutex<Option<Vec<u8>>>,
+    /// Every request and answer that crossed the link.
+    seen: Mutex<Vec<Vec<u8>>>,
+}
+
+impl Control {
+    fn new() -> Arc<Control> {
+        Arc::new(Control {
+            silent: AtomicBool::new(false),
+            mode: Mutex::new(Mode::Honest),
+            first_head: Mutex::new(None),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+/// Where a link leads: a region's enclave, as long as it runs.
+type Slot = Arc<Mutex<Option<Arc<PeerLogs>>>>;
+
+/// The way to a peer's enclave: straight to its answers, as the test has
+/// the link behave.
+struct Link {
+    target: Slot,
+    control: Arc<Control>,
+}
+
+/// Where the body of an answer starts, past its envelope.
+fn body_start(answer: &[u8]) -> usize {
+    let responder = usize::from(answer[0]);
+    let document = usize::from(u16::from_be_bytes([answer[1 + responder], answer[2 + responder]]));
+    1 + responder + 2 + document + 32
+}
+
+impl PeerLink for Link {
+    fn exchange(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        if self.control.silent.load(Ordering::SeqCst) {
+            return Err("unreachable".into());
+        }
+        self.control.seen.lock().unwrap().push(request.to_vec());
+        let logs = self.target.lock().unwrap().clone().ok_or("unreachable")?;
+        let mut answer = logs.answer(&support::master(), request)?;
+        let mode = *self.control.mode.lock().unwrap();
+        if mode == Mode::ReplayHeads && request[0] == OP_HEAD {
+            let mut first = self.control.first_head.lock().unwrap();
+            match first.as_ref() {
+                Some(old) => answer = old.clone(),
+                None => *first = Some(answer.clone()),
+            }
+        }
+        let at = body_start(&answer) + 12 + 20;
+        if mode == Mode::TamperFetch && request[0] == OP_FETCH && answer.len() > at {
+            answer[at] ^= 0x01;
+        }
+        self.control.seen.lock().unwrap().push(answer.clone());
+        Ok(answer)
+    }
+}
+
+/// A peer region in this process whose copies are taken as they are (it
+/// has no one to ask): its logs of the other regions, each over an
+/// in-memory store of its host.
 struct Region {
     logs: Arc<PeerLogs>,
     stores: BTreeMap<String, MemoryLogStore>,
-    silent: Arc<AtomicBool>,
-    mode: Arc<Mutex<Mode>>,
-    first_head: Arc<Mutex<Option<Vec<u8>>>>,
-    /// Every request and answer that crossed the link.
-    seen: Arc<Mutex<Vec<Vec<u8>>>>,
+    slot: Slot,
+    control: Arc<Control>,
 }
 
 impl Region {
+    /// Region `name`'s enclave on its own instance, its copies empty.
     fn new(name: &str) -> Region {
+        Region::on(name, attester(name, instance(name, 0)), &[])
+    }
+
+    /// Region `name`'s enclave attesting with `attester`, its copy of each
+    /// origin in `held` holding those records (the others empty).
+    fn on(name: &str, attester: Arc<FakeAttester>, held: &[(&str, Vec<(u64, Vec<u8>)>)]) -> Region {
         let stores: BTreeMap<String, MemoryLogStore> =
             RELEASE_REGIONS.iter().filter(|r| **r != name).map(|r| (r.to_string(), MemoryLogStore::new())).collect();
-        let boxed = stores.iter().map(|(r, s)| (r.clone(), Box::new(s.clone()) as Box<dyn LogStore>)).collect();
-        Region {
-            logs: Arc::new(PeerLogs::new(name, boxed)),
-            stores,
-            silent: Arc::new(AtomicBool::new(false)),
-            mode: Arc::new(Mutex::new(Mode::Honest)),
-            first_head: Arc::new(Mutex::new(None)),
-            seen: Arc::new(Mutex::new(Vec::new())),
+        for (origin, records) in held {
+            stores[*origin].set_records(records.clone());
         }
+        let boxed = stores.iter().map(|(r, s)| (r.clone(), Box::new(s.clone()) as Box<dyn LogStore>)).collect();
+        let peers = Arc::new(Peers::new(name, Vec::new()).with_attester(attester));
+        let logs = Arc::new(PeerLogs::new(peers, boxed));
+        logs.restore(&support::master()).expect("with no holder to ask, each copy is kept as it is");
+        Region { slot: Arc::new(Mutex::new(Some(Arc::clone(&logs)))), logs, stores, control: Control::new() }
     }
 
     /// Its log of `origin`.
@@ -90,54 +196,15 @@ impl Region {
     }
 
     fn silence(&self, silent: bool) {
-        self.silent.store(silent, Ordering::SeqCst);
+        self.control.silent.store(silent, Ordering::SeqCst);
     }
 
     fn set_mode(&self, mode: Mode) {
-        *self.mode.lock().unwrap() = mode;
+        *self.control.mode.lock().unwrap() = mode;
     }
 
     fn link(&self) -> Arc<dyn PeerLink> {
-        Arc::new(Link {
-            logs: Arc::clone(&self.logs),
-            silent: Arc::clone(&self.silent),
-            mode: Arc::clone(&self.mode),
-            first_head: Arc::clone(&self.first_head),
-            seen: Arc::clone(&self.seen),
-        })
-    }
-}
-
-/// The origin's way to a peer: straight to its answers, as the test has the
-/// peer behave.
-struct Link {
-    logs: Arc<PeerLogs>,
-    silent: Arc<AtomicBool>,
-    mode: Arc<Mutex<Mode>>,
-    first_head: Arc<Mutex<Option<Vec<u8>>>>,
-    seen: Arc<Mutex<Vec<Vec<u8>>>>,
-}
-
-impl PeerLink for Link {
-    fn exchange(&self, request: &[u8]) -> Result<Vec<u8>, String> {
-        if self.silent.load(Ordering::SeqCst) {
-            return Err("unreachable".into());
-        }
-        self.seen.lock().unwrap().push(request.to_vec());
-        let mut answer = self.logs.answer(&support::master(), request)?;
-        let mode = *self.mode.lock().unwrap();
-        if mode == Mode::ReplayHeads && request[0] == OP_HEAD {
-            let mut first = self.first_head.lock().unwrap();
-            match first.as_ref() {
-                Some(old) => answer = old.clone(),
-                None => *first = Some(answer.clone()),
-            }
-        }
-        if mode == Mode::TamperFetch && request[0] == OP_FETCH && answer.len() > 40 {
-            answer[40] ^= 0x01;
-        }
-        self.seen.lock().unwrap().push(answer.clone());
-        Ok(answer)
+        Arc::new(Link { target: Arc::clone(&self.slot), control: Arc::clone(&self.control) })
     }
 }
 
@@ -179,37 +246,56 @@ fn append(origin: &str, counter: u64, record: &[u8]) -> Vec<u8> {
     request(OP_APPEND, origin, 0x42, &[&counter.to_be_bytes()[..], record].concat())
 }
 
-/// The counter of a head answer.
-fn head_counter(answer: &[u8]) -> u64 {
-    u64::from_be_bytes(answer[..8].try_into().unwrap())
+/// The body of an answer.
+fn body_of(answer: &[u8]) -> &[u8] {
+    &answer[body_start(answer)..]
 }
 
-/// The two peers of us-east-1.
+/// The counter of a head answer (0 for no copy).
+fn head_counter(answer: &[u8]) -> u64 {
+    let body = body_of(answer);
+    match body[0] {
+        1 => u64::from_be_bytes(body[1..9].try_into().unwrap()),
+        _ => 0,
+    }
+}
+
+/// us-east-1's two peers.
 struct World {
     eu: Region,
     ap: Region,
+    us: Arc<FakeAttester>,
 }
 
 impl World {
     fn new() -> World {
-        World { eu: Region::new(EU), ap: Region::new(AP) }
+        World { eu: Region::new(EU), ap: Region::new(AP), us: attester(US, instance(US, 0)) }
+    }
+
+    /// us-east-1's peers over `links` (eu-central-1's port, then
+    /// ap-southeast-1's).
+    fn peers_on(&self, links: [Arc<dyn PeerLink>; 2], seed: u64) -> Arc<Peers> {
+        let [eu, ap] = links;
+        let peers = vec![Peer { region: EU.into(), link: eu }, Peer { region: AP.into(), link: ap }];
+        Arc::new(Peers::new(US, peers).with_random(Box::new(Random(seed << 40))).with_attester(self.us.clone()))
     }
 
     fn anchor(&self, seed: u64) -> Anchor {
-        let peers = vec![
-            Peer { region: EU.into(), link: self.eu.link() },
-            Peer { region: AP.into(), link: self.ap.link() },
-        ];
-        Anchor::with_random(US, peers, Box::new(Random(seed << 40)))
+        Anchor::new(self.peers_on([self.eu.link(), self.ap.link()], seed))
     }
 
     /// us-east-1's log over `store`, anchored in both peers.
     fn open(&self, store: &MemoryLogStore, seed: u64) -> Result<JournalLog, SealError> {
+        self.open_on(store, seed, [self.eu.link(), self.ap.link()])
+    }
+
+    /// The same, its peer ports leading over `links`.
+    fn open_on(&self, store: &MemoryLogStore, seed: u64, links: [Arc<dyn PeerLink>; 2]) -> Result<JournalLog, SealError> {
         JournalLog::open_anchored(
             &support::master(),
             Box::new(store.clone()),
             Box::new(Random(seed << 20)),
-            Box::new(self.anchor(seed)),
+            Box::new(Anchor::new(self.peers_on(links, seed))),
         )
     }
 }
@@ -255,7 +341,7 @@ fn fill_and_seal(seal: &mut Seal, card: &mut SimCard, maker: &mut StubMaker) -> 
 fn every_save_reaches_every_peer_before_it_is_ok() {
     let world = World::new();
     let store = MemoryLogStore::new();
-    let mut log = world.open(&store, 1).expect("an empty log with both peers answering");
+    let mut log = world.open(&store, 1).expect("an empty log, both peers answering no copy of an empty log");
     save_four(&mut log);
     assert_eq!(store.records().len(), 4);
     // Each peer holds exactly the host's records, in a log of its own for
@@ -267,7 +353,7 @@ fn every_save_reaches_every_peer_before_it_is_ok() {
 }
 
 #[test]
-fn a_tail_cut_while_the_enclave_is_stopped_is_restored_from_a_peer_and_with_no_peer_it_is_refused() {
+fn a_tail_cut_while_the_enclave_is_stopped_is_restored_and_with_a_peer_unreachable_it_is_refused() {
     let world = World::new();
     let store = MemoryLogStore::new();
     let saves = {
@@ -287,10 +373,14 @@ fn a_tail_cut_while_the_enclave_is_stopped_is_restored_from_a_peer_and_with_no_p
     world.ap.silence(true);
     assert_eq!(world.open(&store, 3).err(), Some(NO_PEER));
     assert_eq!(store.records(), whole[..2].to_vec());
-
-    // One peer back: the cut is caught and the records restored.
+    // One peer back is not enough: a restart needs every peer.
     world.ap.silence(false);
-    let log = world.open(&store, 4).expect("restored from ap-southeast-1");
+    assert_eq!(world.open(&store, 4).err(), Some(NO_PEER));
+    assert_eq!(store.records(), whole[..2].to_vec());
+
+    // Both back: the cut is caught and the records restored.
+    world.eu.silence(false);
+    let log = world.open(&store, 5).expect("restored from the peers");
     assert_eq!(log.counter(), 4);
     assert_eq!(store.records(), whole, "the host's store holds the whole log again");
     assert_eq!(log.load(&UID, EntryKind::Fill), Some(saves[3].2.clone()));
@@ -298,24 +388,25 @@ fn a_tail_cut_while_the_enclave_is_stopped_is_restored_from_a_peer_and_with_no_p
 }
 
 #[test]
-fn the_shared_log_refuses_with_no_peer_and_opens_on_a_later_try() {
+fn the_shared_log_refuses_with_a_peer_silent_and_opens_on_a_later_try() {
     let world = World::new();
     let store = MemoryLogStore::new();
     {
-        let mut log = world.open(&store, 5).unwrap();
+        let mut log = world.open(&store, 6).unwrap();
         save_four(&mut log);
     }
     store.set_records(store.records()[..1].to_vec());
     world.eu.silence(true);
-    world.ap.silence(true);
     let shared = SharedLog::anchored_with_random(Box::new(store.clone()), Box::new(Random(6)), Box::new(world.anchor(6)));
-    let refused = shared.journal(&support::master()).err().expect("no peer answered");
+    let refused = shared.journal(&support::master()).err().expect("eu-central-1 did not answer");
     assert!(is_anchor_error(&refused), "{refused}");
     assert!(!shared.is_open());
+    assert_eq!(shared.head(), None, "no head before the log is open");
     world.eu.silence(false);
-    let log = shared.journal(&support::master()).expect("tried again, restored from eu-central-1");
+    let log = shared.journal(&support::master()).expect("tried again, restored");
     assert_eq!(log.counter(), 4);
     assert!(shared.is_open());
+    assert_eq!(shared.head().map(|(counter, _)| counter), Some(4));
 }
 
 /// Fills, seals and begins an Open of `card` on `log`, cut off at the first
@@ -342,7 +433,7 @@ fn begin_open_cut_off(log: &JournalLog, card: &mut SimCard, maker: &mut StubMake
 }
 
 #[test]
-fn a_replaced_host_restores_the_whole_log_from_a_peer_and_finishes_an_open_it_never_saw() {
+fn a_replaced_host_restores_the_whole_log_from_its_peers_and_finishes_an_open_it_never_saw() {
     let world = World::new();
     let first_store = MemoryLogStore::new();
     let mut card = SimCard::set_up(UID);
@@ -353,16 +444,14 @@ fn a_replaced_host_restores_the_whole_log_from_a_peer_and_finishes_an_open_it_ne
         // The host instance is lost here, with its store.
     };
 
-    // A new host: its store is empty. Only eu-central-1 answers at the start.
+    // A new host on a new instance: its store is empty.
     let new_store = MemoryLogStore::new();
-    world.ap.silence(true);
-    let log = world.open(&new_store, 8).expect("restored from eu-central-1");
+    world.us.set_pcr4(instance(US, 1));
+    let log = world.open(&new_store, 8).expect("restored from the peers");
     assert_eq!(new_store.records(), first_store.records(), "the whole log, ciphertext as it was");
     assert!(log.load(&UID, EntryKind::Open).is_some(), "the Open the new host never saw");
 
-    // The Open is finished on the new host, with the same key, once both
-    // peers answer again (each of its saves needs both).
-    world.ap.silence(false);
+    // The Open is finished on the new host, with the same key.
     let clock = TestClock::new();
     let mut seal = seal_on(&log, &clock, 2);
     let opened = seal.open(&mut card, &request).expect("finished on the new host");
@@ -376,22 +465,241 @@ fn a_replaced_host_restores_the_whole_log_from_a_peer_and_finishes_an_open_it_ne
     assert!(seal.open(&mut card, &other).is_err());
 }
 
+/// One region's enclave and host, every log on it, its peer ports leading
+/// to the other regions' enclaves of a [`Net`].
+struct Node {
+    own: MemoryLogStore,
+    copies: BTreeMap<String, MemoryLogStore>,
+    logs: Arc<PeerLogs>,
+    journal: Arc<SharedLog>,
+}
+
+/// Three regions in this process, each a [`Node`] that can be replaced.
+struct Net {
+    slots: BTreeMap<String, Slot>,
+    controls: BTreeMap<String, Arc<Control>>,
+}
+
+impl Net {
+    fn new() -> Net {
+        Net {
+            slots: RELEASE_REGIONS.iter().map(|r| (r.to_string(), Arc::new(Mutex::new(None)))).collect(),
+            controls: RELEASE_REGIONS.iter().map(|r| (r.to_string(), Control::new())).collect(),
+        }
+    }
+
+    fn link(&self, to: &str) -> Arc<dyn PeerLink> {
+        Arc::new(Link { target: Arc::clone(&self.slots[to]), control: Arc::clone(&self.controls[to]) })
+    }
+
+    /// Region `name`'s enclave on a new host (its `generation`-th, every
+    /// store empty), reachable from the others at once; not started yet.
+    fn boot(&self, name: &str, generation: u8) -> Node {
+        let links = RELEASE_REGIONS
+            .iter()
+            .filter(|r| **r != name)
+            .map(|r| Peer { region: r.to_string(), link: self.link(r) })
+            .collect();
+        let peers = Peers::new(name, links)
+            .with_random(Box::new(Random(u64::from(generation) << 48 | u64::from(name.as_bytes()[0]) << 40)))
+            .with_attester(attester(name, instance(name, generation)));
+        let peers = Arc::new(peers);
+        let own = MemoryLogStore::new();
+        let journal = Arc::new(SharedLog::anchored_with_random(
+            Box::new(own.clone()),
+            Box::new(Random(u64::from(generation) << 32)),
+            Box::new(Anchor::new(Arc::clone(&peers))),
+        ));
+        let copies: BTreeMap<String, MemoryLogStore> =
+            RELEASE_REGIONS.iter().filter(|r| **r != name).map(|r| (r.to_string(), MemoryLogStore::new())).collect();
+        let stores = copies.iter().map(|(r, s)| (r.clone(), Box::new(s.clone()) as Box<dyn LogStore>)).collect();
+        let logs = Arc::new(PeerLogs::new(peers, stores).with_own_log(Arc::clone(&journal), Box::new(own.clone())));
+        *self.slots[name].lock().unwrap() = Some(Arc::clone(&logs));
+        Node { own, copies, logs, journal }
+    }
+
+    /// Takes region `name`'s enclave and host away.
+    fn lose(&self, name: &str) {
+        *self.slots[name].lock().unwrap() = None;
+    }
+}
+
+/// What an enclave does once it holds M, before it serves: every peer log
+/// restored, then its own log opened.
+fn start(node: &Node) -> Result<JournalLog, SealError> {
+    node.logs.restore(&support::master())?;
+    node.journal.journal(&support::master())
+}
+
+/// Starts every node, each tried again in turn (as the enclaves retry every
+/// minute) until all are open.
+fn start_in_turns(nodes: &[&Node]) -> Vec<JournalLog> {
+    let mut open: Vec<Option<JournalLog>> = nodes.iter().map(|_| None).collect();
+    for _ in 0..6 {
+        for (node, slot) in nodes.iter().zip(open.iter_mut()) {
+            if slot.is_none() {
+                *slot = start(node).ok();
+            }
+        }
+    }
+    open.into_iter().map(|log| log.expect("every region starts")).collect()
+}
+
+#[test]
+fn regions_replaced_one_after_another_keep_the_last_regions_journal() {
+    let net = Net::new();
+    // A fresh deployment: every store empty, every region started.
+    let (us, eu, ap) = (net.boot(US, 0), net.boot(EU, 0), net.boot(AP, 0));
+    let mut logs = start_in_turns(&[&us, &eu, &ap]);
+    let mut ap_log = logs.pop().unwrap();
+    let mut us_log = logs.remove(0);
+    // ap-southeast-1 journals a Fill and an Open, us-east-1 one Fill.
+    ap_log.save(&UID, EntryKind::Fill, b"ap's fill".to_vec()).unwrap();
+    ap_log.save(&UID, EntryKind::Open, b"ap's open".to_vec()).unwrap();
+    us_log.save(&OTHER, EntryKind::Fill, b"us's fill".to_vec()).unwrap();
+    let ap_records = ap.own.records();
+    let us_records = us.own.records();
+    assert_eq!(ap_records.len(), 2);
+    assert_eq!(us.copies[AP].records(), ap_records);
+    assert_eq!(eu.copies[AP].records(), ap_records);
+    drop((us_log, ap_log));
+
+    // us-east-1 is replaced. Before its start its copies answer no copy,
+    // never a zero head.
+    net.lose(US);
+    drop(us);
+    let us = net.boot(US, 1);
+    for origin in [AP, EU] {
+        let answer = us.logs.answer(&support::master(), &request(OP_HEAD, origin, 0x31, &[])).unwrap();
+        assert_eq!(body_of(&answer), [0, NO_COPY_NOT_RESTORED], "{origin}");
+    }
+    let us_log = start(&us).expect("the replaced us-east-1 restores every log it keeps");
+    assert_eq!(us_log.counter(), 1);
+    assert_eq!(us.own.records(), us_records);
+    assert_eq!(us.copies[AP].records(), ap_records, "us-east-1's copy of ap-southeast-1's log");
+    assert!(us.copies[EU].records().is_empty());
+    assert!(us.logs.all_restored());
+    drop(us_log);
+
+    // eu-central-1 is replaced next, with no write in between.
+    net.lose(EU);
+    drop(eu);
+    let eu = net.boot(EU, 1);
+    start(&eu).expect("the replaced eu-central-1 restores every log it keeps");
+    assert_eq!(eu.copies[AP].records(), ap_records, "eu-central-1's copy of ap-southeast-1's log");
+    assert_eq!(eu.copies[US].records(), us_records);
+
+    // ap-southeast-1 last: both its copies were restored by replaced hosts,
+    // and its journal survives.
+    net.lose(AP);
+    drop(ap);
+    let ap = net.boot(AP, 1);
+    let ap_log = start(&ap).expect("the replaced ap-southeast-1 restores its own log");
+    assert_eq!(ap.own.records(), ap_records);
+    assert_eq!(ap_log.counter(), 2);
+    assert_eq!(ap_log.load(&UID, EntryKind::Open), Some(b"ap's open".to_vec()));
+    assert_eq!(ap.copies[US].records(), us_records);
+}
+
+#[test]
+fn every_region_restarting_at_once_starts_again_and_a_replaced_host_among_them_restores() {
+    let net = Net::new();
+    let (us, eu, ap) = (net.boot(US, 0), net.boot(EU, 0), net.boot(AP, 0));
+    let mut logs = start_in_turns(&[&us, &eu, &ap]);
+    logs[2].save(&UID, EntryKind::Open, b"ap's open".to_vec()).unwrap();
+    let ap_records = ap.own.records();
+    drop(logs);
+    // Every enclave restarts on its host (the stores stay); ap-southeast-1's
+    // host is replaced at the same time.
+    let reboot = |old: Node, name: &str, generation: u8, keep: bool| {
+        let node = net.boot(name, generation);
+        if keep {
+            node.own.set_records(old.own.records());
+            for (origin, store) in &node.copies {
+                store.set_records(old.copies[origin].records());
+            }
+        }
+        node
+    };
+    let (us, eu, ap) = (reboot(us, US, 1, true), reboot(eu, EU, 1, true), reboot(ap, AP, 1, false));
+    let logs = start_in_turns(&[&us, &eu, &ap]);
+    assert_eq!(ap.own.records(), ap_records);
+    assert_eq!(logs[2].load(&UID, EntryKind::Open), Some(b"ap's open".to_vec()));
+}
+
+#[test]
+fn an_empty_or_unrestored_peer_log_answers_no_copy_and_no_copy_never_counts_as_a_head() {
+    let master = support::master();
+    // A copy not restored yet answers no copy, empty or with records.
+    let peers = Arc::new(Peers::new(AP, Vec::new()).with_attester(attester(AP, instance(AP, 0))));
+    let unrestored_store = MemoryLogStore::new();
+    let unrestored = PeerLogs::new(Arc::clone(&peers), vec![(US.to_string(), Box::new(unrestored_store.clone()))]);
+    let answer = unrestored.answer(&master, &request(OP_HEAD, US, 1, &[])).unwrap();
+    assert_eq!(body_of(&answer), [0, NO_COPY_NOT_RESTORED]);
+    assert!(unrestored.answer(&master, &append(US, 1, &[0u8; 64])).is_err(), "it takes no append before its restore");
+    assert!(unrestored.answer(&master, &request(OP_FETCH, US, 1, &1u64.to_be_bytes())).is_err());
+    let world = World::new();
+    let us_store = MemoryLogStore::new();
+    save_four(&mut world.open(&us_store, 50).unwrap());
+    unrestored_store.set_records(us_store.records());
+    let answer = unrestored.answer(&master, &request(OP_HEAD, US, 2, &[])).unwrap();
+    assert_eq!(body_of(&answer), [0, NO_COPY_UNCONFIRMED]);
+    // A copy restored and empty answers no copy too, never a zero head.
+    let answer = Region::new(EU).logs.answer(&master, &request(OP_HEAD, US, 3, &[])).unwrap();
+    assert_eq!(body_of(&answer), [0, NO_COPY_EMPTY]);
+
+    // us-east-1 has records, and no peer holds them: refused, not opened.
+    let lost = World::new();
+    assert_eq!(lost.open(&us_store, 51).err(), Some(NO_COPY));
+    assert_eq!(us_store.records().len(), 4, "nothing dropped");
+    // One peer holds them, the other answers no copy: still refused, with
+    // the store full or empty (a no copy never agrees).
+    let half = Region::on(AP, attester(AP, instance(AP, 0)), &[(US, us_store.records())]);
+    let links = [lost.eu.link(), half.link()];
+    assert_eq!(lost.open_on(&us_store, 52, links.clone()).err(), Some(NO_COPY));
+    let empty = MemoryLogStore::new();
+    assert_eq!(lost.open_on(&empty, 53, links).err(), Some(NO_COPY));
+    assert!(empty.records().is_empty());
+    // Both hold them: restored.
+    let full = Region::on(EU, attester(EU, instance(EU, 0)), &[(US, us_store.records())]);
+    assert_eq!(lost.open_on(&empty, 54, [full.link(), half.link()]).unwrap().counter(), 4);
+
+    // A copy with records whose holders say the log is empty is refused, and
+    // an empty copy while a holder has records not confirmed waits.
+    let asker = |links: Vec<Peer>, store: &MemoryLogStore| {
+        let peers = Arc::new(Peers::new(EU, links).with_attester(attester(EU, instance(EU, 0))));
+        PeerLogs::new(peers, vec![(US.to_string(), Box::new(store.clone()) as Box<dyn LogStore>)])
+    };
+    let says_empty = Region::new(AP);
+    let copy = MemoryLogStore::new();
+    copy.set_records(us_store.records());
+    let refused = asker(vec![Peer { region: AP.into(), link: says_empty.link() }], &copy);
+    assert_eq!(refused.restore(&master).err(), Some(NO_COPY));
+    assert!(!refused.is_restored(US));
+    let waiting = PeerLogs::new(Arc::clone(&peers), vec![(US.to_string(), Box::new(us_store.clone()))]);
+    let waiting = Arc::new(waiting);
+    let to_waiting = Arc::new(Link { target: Arc::new(Mutex::new(Some(waiting))), control: Control::new() });
+    let fresh = MemoryLogStore::new();
+    let waits = asker(vec![Peer { region: AP.into(), link: to_waiting }], &fresh);
+    assert_eq!(waits.restore(&master).err(), Some(NO_COPY));
+    assert!(fresh.records().is_empty());
+}
+
 #[test]
 fn a_peer_answering_an_old_head_with_an_old_nonce_is_not_taken() {
     let world = World::new();
     world.eu.set_mode(Mode::ReplayHeads);
     let store = MemoryLogStore::new();
     {
-        // eu-central-1 answers head 0 here, and keeps that answer.
+        // eu-central-1 answers no copy here, and keeps that answer.
         let mut log = world.open(&store, 9).unwrap();
         save_four(&mut log);
     }
     assert_eq!(world.eu.log_of(US).records().len(), 4, "the appends reached it");
-    // The host empties its store; the only peer it lets through replays its
-    // old answer (counter 0, a MAC over an old nonce).
+    // The host empties its store; eu-central-1's link replays its old answer
+    // (no copy, a MAC and a document over an old nonce).
     store.set_records(Vec::new());
-    world.ap.silence(true);
-    assert_eq!(world.open(&store, 10).err(), Some(NO_PEER), "an old head is never taken");
+    assert_eq!(world.open(&store, 10).err(), Some(UNATTESTED), "an old answer is never taken");
     assert!(store.records().is_empty());
     // An honest answer with this start's own nonce restores the log.
     world.eu.set_mode(Mode::Honest);
@@ -429,7 +737,7 @@ fn a_forked_head_is_refused() {
 }
 
 #[test]
-fn a_restored_record_changed_in_transit_is_refused() {
+fn a_restored_record_changed_in_transit_or_on_a_peers_host_is_refused() {
     let world = World::new();
     let store = MemoryLogStore::new();
     {
@@ -438,12 +746,93 @@ fn a_restored_record_changed_in_transit_is_refused() {
     }
     let whole = store.records();
     store.set_records(whole[..1].to_vec());
-    world.ap.silence(true);
+    // Changed on the way: the answer's MAC no longer verifies.
     world.eu.set_mode(Mode::TamperFetch);
-    assert_eq!(world.open(&store, 16).err(), Some(BAD_RESTORE));
+    assert_eq!(world.open(&store, 16).err(), Some(UNATTESTED));
     assert_eq!(store.records(), whole[..1].to_vec(), "no changed record reached the host's store");
     world.eu.set_mode(Mode::Honest);
-    assert_eq!(world.open(&store, 17).unwrap().counter(), 4);
+    // Changed on eu-central-1's host after its restore: the peer answers it
+    // as it is, and it fails its check on us-east-1's chain.
+    let mut changed = whole.clone();
+    changed[2].1[20] ^= 0x01;
+    world.eu.log_of(US).set_records(changed);
+    assert_eq!(world.open(&store, 17).err(), Some(BAD_RESTORE));
+    assert_eq!(store.records(), whole[..1].to_vec());
+    world.eu.log_of(US).set_records(whole.clone());
+    assert_eq!(world.open(&store, 18).unwrap().counter(), 4);
+}
+
+#[test]
+fn an_approved_enclave_on_the_askers_host_or_one_instance_for_two_peers_is_never_taken() {
+    let master = support::master();
+    let world = World::new();
+    let store = MemoryLogStore::new();
+    let mut card = SimCard::set_up(UID);
+    let mut maker = StubMaker::default();
+    {
+        let log = world.open(&store, 60).unwrap();
+        begin_open_cut_off(&log, &mut card, &mut maker, 0x65);
+    }
+    // The Open is the last record journaled.
+    let whole = store.records();
+    let prefix = whole[..whole.len() - 1].to_vec();
+    // us-east-1's host controller cuts the Open off its store and starts an
+    // approved eu-central-1 enclave on that same host (us-east-1's PCR4),
+    // which joined M; it seeds that enclave's copy with the prefix and
+    // leads both of us-east-1's peer ports to it.
+    let on_own_host = Region::on(EU, attester(EU, world.us.pcr4()), &[(US, prefix.clone())]);
+    store.set_records(prefix.clone());
+    let both = [on_own_host.link(), on_own_host.link()];
+    assert_eq!(world.open_on(&store, 61, both).err(), Some(UNATTESTED));
+    // One port only: still refused (every peer must be taken).
+    assert_eq!(world.open_on(&store, 62, [on_own_host.link(), world.ap.link()]).err(), Some(UNATTESTED));
+    // An eu-central-1 and an ap-southeast-1 enclave, both on one other
+    // instance: the two answers share a PCR4.
+    let elsewhere = instance("sa-east-1", 9);
+    let eu_there = Region::on(EU, attester(EU, elsewhere), &[(US, prefix.clone())]);
+    let ap_there = Region::on(AP, attester(AP, elsewhere), &[(US, prefix.clone())]);
+    assert_eq!(world.open_on(&store, 63, [eu_there.link(), ap_there.link()]).err(), Some(UNATTESTED));
+    // An eu-central-1 enclave answering on ap-southeast-1's port, and an
+    // enclave of us-east-1's own image: not the port's region.
+    let eu_other = Region::on(EU, attester(EU, instance(EU, 7)), &[(US, prefix.clone())]);
+    assert_eq!(world.open_on(&store, 64, [world.eu.link(), eu_other.link()]).err(), Some(UNATTESTED));
+    let us_image = {
+        let own = MemoryLogStore::new();
+        own.set_records(prefix.clone());
+        let shared = Arc::new(SharedLog::anchored(Box::new(own.clone()), Box::new(Detached(US))));
+        shared.journal(&master).unwrap();
+        let peers = Arc::new(Peers::new(US, Vec::new()).with_attester(attester(US, instance(US, 7))));
+        let logs = Arc::new(PeerLogs::new(peers, Vec::new()).with_own_log(shared, Box::new(own)));
+        Arc::new(Link { target: Arc::new(Mutex::new(Some(logs))), control: Control::new() }) as Arc<dyn PeerLink>
+    };
+    assert_eq!(world.open_on(&store, 65, [us_image, world.ap.link()]).err(), Some(UNATTESTED));
+    // A build not on the approved list.
+    let unapproved = Arc::new(FakeAttester::new(KEY, [0xee; 48], instance(EU, 8), vec![[0xee; 48]]));
+    let rogue = Region::on(EU, unapproved, &[(US, prefix.clone())]);
+    assert_eq!(world.open_on(&store, 66, [rogue.link(), world.ap.link()]).err(), Some(UNATTESTED));
+    assert_eq!(store.records(), prefix, "nothing taken from any of them");
+
+    // The established peers, each on its own instance: the Open is restored.
+    let log = world.open(&store, 67).unwrap();
+    assert_eq!(store.records(), whole);
+    assert!(log.load(&UID, EntryKind::Open).is_some());
+    // And a save is never acknowledged by an enclave on this host either.
+    let mut log = world.open_on(&store, 68, [world.eu.link(), world.ap.link()]).unwrap();
+    world.ap.logs.peers().install_attester(attester(AP, world.us.pcr4()));
+    assert_eq!(log.save(&OTHER, EntryKind::Fill, b"after".to_vec()).err(), Some(UNATTESTED));
+    assert_eq!(log.load(&OTHER, EntryKind::Fill), None);
+    world.ap.logs.peers().install_attester(attester(AP, instance(AP, 0)));
+    log.save(&OTHER, EntryKind::Fill, b"after".to_vec()).expect("both peers on instances of their own");
+    // The document in an answer: the asker's nonce, the responder's PCR4;
+    // changed or cut short, it is not taken.
+    let answer = world.eu.logs.answer(&master, &request(OP_HEAD, US, 4, &[])).unwrap();
+    let document = &answer[3 + EU.len()..body_start(&answer) - 32];
+    let checked = world.us.check(document).expect("eu-central-1's document");
+    assert_eq!((checked.pcr4, checked.nonce), (instance(EU, 0), vec![4u8; 32]));
+    let mut changed = document.to_vec();
+    changed[60] ^= 0x01;
+    assert!(world.us.check(&changed).is_err());
+    assert!(world.us.check(&document[..document.len() - 1]).is_err());
 }
 
 #[test]
@@ -526,8 +915,8 @@ fn peers_see_ciphertext_only() {
     let key = maker.key_for(&commit_data);
     let coin = sha3_256(&[&commit_data]);
     let mut texts = vec![world.eu.log_of(US).bytes(), world.ap.log_of(US).bytes()];
-    texts.extend(world.eu.seen.lock().unwrap().iter().cloned());
-    texts.extend(world.ap.seen.lock().unwrap().iter().cloned());
+    texts.extend(world.eu.control.seen.lock().unwrap().iter().cloned());
+    texts.extend(world.ap.control.seen.lock().unwrap().iter().cloned());
     assert!(texts.len() > 4);
     for text in &texts {
         assert!(!contains(text, &UID.0), "a UID crossed to a peer");
@@ -562,12 +951,16 @@ fn a_peer_takes_only_records_chained_under_m_and_only_for_the_other_regions() {
     own.save(&UID, EntryKind::Fill, b"entry".to_vec()).unwrap();
     let taken = peer.logs.answer(&master, &append(US, 1, &own_store.records()[0].1)).expect("us-east-1's record 1");
     assert_eq!(head_counter(&taken), 1);
+    assert_eq!(&taken[1..1 + EU.len()], EU.as_bytes(), "the answer names the responder's region");
     assert_eq!(peer.log_of(US).records(), own_store.records());
     assert!(peer.logs.answer(&master, &append(EU, 1, &record)).is_err(), "its own region");
     assert!(peer.logs.answer(&master, &append("sa-east-1", 1, &record)).is_err(), "a region it keeps no log of");
     assert!(peer.logs.answer(&master, &[2u8, 200, 1, 2]).is_err(), "malformed");
     assert!(peer.logs.answer(&master, &[9u8, 2, b'u', b's']).is_err(), "malformed");
     assert_eq!(peer.logs.origins(), vec![AP.to_string(), US.to_string()]);
+    // An enclave with no attester answers nothing.
+    let mute = PeerLogs::new(Arc::new(Peers::new(EU, Vec::new())), Vec::new());
+    assert!(mute.answer(&master, &request(OP_HEAD, US, 1, &[])).is_err());
 }
 
 #[test]
@@ -591,7 +984,7 @@ fn a_record_of_one_region_is_never_taken_as_another_regions() {
     assert!(refused.is_err(), "a record of us-east-1 taken as ap-southeast-1's");
     assert!(world.eu.log_of(AP).records().is_empty(), "the peer log is unchanged");
     let head = world.eu.logs.answer(&master, &request(OP_HEAD, AP, 0x02, &[])).unwrap();
-    assert_eq!(head_counter(&head), 0, "the peer's head of ap-southeast-1 is still empty");
+    assert_eq!(head_counter(&head), 0, "the peer's copy of ap-southeast-1 is still empty");
     // And us-east-1's own log there is as it was.
     assert_eq!(world.eu.log_of(US).records(), us_records);
 
@@ -599,9 +992,13 @@ fn a_record_of_one_region_is_never_taken_as_another_regions() {
     // written (and anchored in eu-central-1), us-east-1's record 2 is not
     // taken as its counter 2.
     let ap_store = MemoryLogStore::new();
-    let ap_anchor = Anchor::with_random(AP, vec![Peer { region: EU.into(), link: world.eu.link() }], Box::new(Random(41)));
+    let ap_peers = || {
+        let peers = Peers::new(AP, vec![Peer { region: EU.into(), link: world.eu.link() }]);
+        Arc::new(peers.with_random(Box::new(Random(41))).with_attester(attester(AP, instance(AP, 0))))
+    };
     let mut ap_log =
-        JournalLog::open_anchored(&master, Box::new(ap_store.clone()), Box::new(Random(42)), Box::new(ap_anchor)).unwrap();
+        JournalLog::open_anchored(&master, Box::new(ap_store.clone()), Box::new(Random(42)), Box::new(Anchor::new(ap_peers())))
+            .unwrap();
     ap_log.save(&OTHER, EntryKind::Fill, b"ap-southeast-1's own entry".to_vec()).unwrap();
     assert_eq!(world.eu.log_of(AP).records(), ap_store.records());
     let held = world.eu.log_of(AP).records();
@@ -617,8 +1014,8 @@ fn a_record_of_one_region_is_never_taken_as_another_regions() {
     // before any peer is asked.
     let planted = MemoryLogStore::new();
     planted.set_records(us_records.clone());
-    let ap_anchor = Anchor::with_random(AP, vec![Peer { region: EU.into(), link: world.eu.link() }], Box::new(Random(43)));
-    assert!(JournalLog::open_anchored(&master, Box::new(planted.clone()), Box::new(Random(44)), Box::new(ap_anchor)).is_err());
+    let opened = JournalLog::open_anchored(&master, Box::new(planted.clone()), Box::new(Random(44)), Box::new(Anchor::new(ap_peers())));
+    assert!(opened.is_err());
     assert_eq!(planted.records(), us_records);
 }
 

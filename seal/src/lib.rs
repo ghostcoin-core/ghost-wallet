@@ -16,9 +16,10 @@
 //! and chained by counter and tag (`journal_log`), kept by a store the Seal
 //! does not trust: the parent host's file (`host_journal`, features `nitro`
 //! and `test-server`). Its head is anchored in the other regions, which keep
-//! a copy of each region's log (ciphertext only) and restore a cut or lost
-//! one, and each card is served by its home region only
-//! (`journal_anchor`).
+//! a copy of each region's log (ciphertext only), restore their copies at
+//! their own start and restore a cut or lost one; every answer between
+//! regions carries the responder's fresh attestation, and each card is
+//! served by its home region only (`journal_anchor`).
 //!
 //! The design, the record layout, the frame and answer formats and the
 //! labels of every key derivation are in `docs/sealed-card.md`.
@@ -103,7 +104,7 @@ pub use chain_check::{
 pub use error::SealError;
 pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest, Seal, SealConfig};
 pub use journal::{EntryKind, Journal, MemoryJournal};
-pub use journal_anchor::{Anchor, Peer, PeerLink, PeerLogs, Regions};
+pub use journal_anchor::{Anchor, AnswerAttester, Peer, PeerLink, PeerLogs, Peers, Regions};
 pub use journal_log::{HeadAnchor, JournalLog, LogStore, MemoryLogStore, SharedLog};
 pub use key_maker::CoreKeyMaker;
 pub use record::CardState;

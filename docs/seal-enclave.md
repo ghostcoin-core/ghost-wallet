@@ -481,29 +481,80 @@ other two (`docs/sealed-card.md`, "Journal", has the formats):
   region's log never verifies there, whoever sends it), keeps it in its
   host's peer log for that origin, and answers its head MACed under a key
   derived from M (`ghost-seal/v1/journal-head`) over the asker's fresh
-  nonce. The save is `Ok` only once both answered a head holding it, so
-  Fill and Open refuse while a peer is unreachable.
-- At the start, after M is installed and before the log is used, the
-  enclave asks both peers for its log's head. With no peer answering, a
-  peer holding another record at the same counter, or a restored record
-  that fails its check, it serves no flow, logs `the durable journal could
-  not be anchored in a peer region` and tries again every minute. A peer
-  ahead of the host's log has the missing records restored to the host's
-  store, each checked with M: that one path covers a cut tail and a replaced
-  host.
+  nonce and the responder's own region id, with a fresh attestation
+  document (below). The save is `Ok` only once both answered a head holding
+  it, so Fill and Open refuse while a peer is unreachable.
+- At the start, after M is installed and before any flow, the enclave
+  restores **every** log it keeps, not only its own: first its copies of
+  the two other regions' logs (`/var/lib/seal/peer-<region>.log`), each
+  from that region or the other peer that holds it, then its own log from
+  both peers. Every restore asks **every** peer (one answering is not
+  enough); a peer holding more than the host's copy has the missing records
+  restored to the host's store, each checked with M: that one path covers a
+  cut tail and a replaced host. With a peer silent, an answer not taken
+  (below), a peer holding another record at the same counter, or a restored
+  record that fails its check, it serves no flow, logs `the durable journal
+  could not be anchored in a peer region` and tries again every minute.
+- A peer log not restored yet, or empty, answers *no copy* (with why: empty,
+  not restored and nothing stored, or not restored with records not
+  confirmed yet), never a zero head; a region asked for its own log before
+  that log is open answers the same. A *no copy* never counts as a head or
+  as agreement: a region's own restore takes heads only when every peer
+  holds one, and opens an empty log only when its host's store is empty and
+  every peer answered that its copy is restored and empty (a log never
+  written). A store with records that no peer holds is refused. A peer log's
+  restore with no head anywhere keeps the copy it holds, but refuses it when
+  another holder says the log is empty, and waits while it is empty and
+  another holder has records not confirmed yet. So when regions are
+  replaced one after another (a rolling replacement), each replacement
+  restores the other regions' logs before it serves, and the next one still
+  finds every log in two places.
 - A peer request needs M only, not the peer's own flows, so regions that
-  start together anchor each other.
+  start together anchor each other; a region answers about its own log from
+  its host's store once that log is open.
 
-The cost is availability: Fill and Open wait while a peer region is down;
-keep every region running, and replace a lost region by a redeploy, which
-restores from a peer (`enclave/RUNBOOK.md`). What it still does not cover:
-every region lost at once, or the hosts of every region cutting the log at
-once.
+**Who may answer.** M alone does not prove which enclave answers: an
+approved build of another region's image can join M through the key share
+(which authorizes by build), and a host controller could start one on its own
+instance and lead the peer ports to it. So every head, *no copy* and fetch
+answer carries a fresh Nitro attestation document from the answering
+enclave's NSM, whose `nonce` is the asker's fresh nonce and whose `user_data`
+binds the answer's MAC. The asker checks it with the existing attestation
+verifier (the pinned AWS root) and against its trusted list (the approved
+builds), and takes the answer only when:
+
+- the region id compiled into the responder, bound into the MAC, is the
+  region of the peer port it asked (5006 or 5007) and not the asker's own;
+- the document's parent-instance PCR (PCR4) is not the asker's own, which it
+  reads from its own attestation document: an extra enclave started on the
+  asker's own host never answers for a peer;
+- the answers of one restore or one save come from distinct PCR4s, one per
+  peer: one instance never answers for two peers.
+
+The cost is availability: Fill and Open wait while a peer region is down,
+and a restarting region waits until both peers answer; keep every region
+running, and replace a lost region by a redeploy, one region at a time, each
+replacement serving before the next begins, which restores from its peers
+(`enclave/RUNBOOK.md`). What it still does not cover:
+
+- **An attacker who can launch new EC2 instances in the AWS account
+  itself.** Each new instance has its own PCR4, so approved enclaves started
+  on two new instances, one per peer port, joined to M through the key share
+  and seeded with an old copy of the log, are taken as the two peers. The
+  instance PCR binds an answer to an instance, not to the deployed stack;
+  the AWS account (who may start instances in it, and the routes of the
+  peer ports) stays trusted for this.
+- every region lost at once, or the hosts of every region cutting the log at
+  once.
 
 ## What is still trusted
 
 - **AWS Nitro**: the enclave's isolation and the NSM's attestation, signed
   under the pinned AWS root.
+- **The AWS account**, for the journal's anchor: whoever can launch new EC2
+  instances in it can start approved enclaves on instances of their own and
+  answer for both peer regions (see "The journal's head in the other
+  regions").
 - **The release key.** Whoever holds the release key's private half (offline)
   decides which later builds may receive M. The host and whoever deploys the
   stacks do not: the list they carry counts only with the release signature.

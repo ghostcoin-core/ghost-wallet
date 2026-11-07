@@ -186,11 +186,12 @@ is refused.
 - **The journal store**: it must keep entries durably. It sees only sealed
   bytes, and a store that changes, drops, repeats or reorders records, or
   rolls the log back while the Seal runs, is caught and refused. A log
-  deleted, or cut while the Seal is stopped, is restored from a peer region
-  at the next start ("Journal"). What is still trusted: that the hosts of
-  every region do not cut or delete the log at once, and that not every
-  region is lost at once; and that a peer region is reachable, or no Fill or
-  Open is served.
+  deleted, or cut while the Seal is stopped, is restored from the peer
+  regions at the next start ("Journal"). What is still trusted: that the
+  hosts of every region do not cut or delete the log at once, and that not
+  every region is lost at once; that the peer regions are reachable, or no
+  Fill or Open is served; and that no one launches new EC2 instances in the
+  AWS account to answer for both peers.
 - **The chain nodes**: that the nodes of the release node list do not all
   lie the same way at once. One node that is wrong, behind or unreachable
   only stops the answer.
@@ -232,7 +233,11 @@ Next:
   not the card's home refuses it `wrong-region`, naming the home).
 - Fill and Open while one peer region is down: today every save waits for
   both peers (the conservative choice), so a region down stops Fills and
-  Opens elsewhere until it is back or replaced.
+  Opens elsewhere until it is back or replaced; a restart waits for both
+  peers too.
+- Bind a peer answer to the deployed stack, not only to an instance: today
+  whoever can launch new EC2 instances in the AWS account can answer for
+  both peers from approved enclaves on instances of their own.
 
 In place since the journal's head is anchored in the other regions: a host
 that cuts the tail of the log while the enclave is stopped is caught at the
@@ -502,31 +507,61 @@ the log's head is anchored in the other regions (`seal/src/journal_anchor.rs`):
   record is held back (not loaded) until a later save has every peer take
   it; a host that then drops it is a rollback. A peer that missed records
   while it was down is sent them first.
-- **Start.** Once M is installed and before the log is used, the enclave
-  asks every peer for its head of this region's log with a fresh 32-byte
-  nonce. Unless at least one peer answers, it serves no flow (HTTP 503, the
-  fixed event `the durable journal could not be anchored`, tried again
-  every minute). A peer ahead of the host's log (a cut tail), or holding
-  records while the host's log is empty (a replaced host), has the missing
-  records fetched, each checked with M onto the host's chain and appended to
-  the host's store, before anything is served. A peer head with the same
-  counter and another tag (a fork), a restored record that fails its check,
-  or a restore that does not end on the peer's head, is a refusal.
-- **Heads.** Every answer about a head is counter (u64) || tag || HMAC-SHA3-256
-  under the head key (HKDF(M), label `ghost-seal/v1/journal-head`, salt and
-  info) over `ghost-seal/v1/journal-head` || origin length (1) || origin ||
-  counter || tag || the asker's nonce. Every holder of M is an enclave
-  attested when M was handed over, so a good MAC is a peer enclave's answer,
-  and the fresh nonce means an old answer is never taken again. No
+- **Start.** Once M is installed and before any flow, the enclave restores
+  every log it keeps: first its copies of the other regions' logs (each
+  from that region or the other peer that holds it), then its own. Each
+  restore asks every peer for its head with a fresh 32-byte nonce, and
+  unless **every** peer answers, it serves no flow (HTTP 503, the fixed
+  event `the durable journal could not be anchored`, tried again every
+  minute). A peer holding more than the host's copy (a cut tail, or an empty
+  store on a replaced host) has the missing records fetched, each checked
+  with M onto that log's chain and appended to the host's store, before
+  anything is served. A peer head with the same counter and another tag (a
+  fork), a restored record that fails its check, or a restore that does not
+  end on the peer's head, is a refusal.
+- **No copy.** A peer log not restored yet, or empty, answers *no copy*
+  (`0 || reason`: 1 restored and empty, 2 not restored and nothing stored, 3
+  not restored with records not confirmed yet), never a zero head; so does a
+  region asked about its own log before that log is open. A *no copy* never
+  counts as a head or as agreement: a region's own restore takes heads only
+  when every peer holds one, and opens empty only when its store is empty
+  and every peer answered 1 (a log never written); a store with records that
+  no peer holds is refused. A peer log's restore with no head anywhere keeps
+  the copy it holds (checked with M), but refuses it while a holder answers 1,
+  and waits while it is empty and a holder answers 3. So a rolling
+  replacement (one region after another, no write between) keeps every log:
+  each replacement restores the others' logs before it serves.
+- **Answers.** Every answer, a head, a no copy or a fetch, is responder
+  length (1) || responder || document length (u16) || document || mac (32)
+  || body, where body is `1 || counter (u64) || tag`, `0 || reason` or the
+  fetched records, and mac is HMAC-SHA3-256 under the head key (HKDF(M),
+  label `ghost-seal/v1/journal-head`, salt and info) over
+  `ghost-seal/v1/journal-head` || op || origin length (1) || origin ||
+  responder length (1) || responder || the asker's nonce || body. The
+  responder is the region id compiled into the answering image; the
+  document is a fresh Nitro attestation document from its NSM, with the
+  asker's nonce as `nonce` and SHA3-256(`ghost-seal/v1/journal-head-answer`
+  || mac) as `user_data`. The asker takes an answer only when the MAC
+  verifies, the responder is the region of the port it asked and not its
+  own, and the document verifies with the attestation verifier, names an
+  approved build, and carries a PCR4 (the parent instance) that is not the
+  asker's own (read from its own attestation, label
+  `ghost-seal/v1/journal-head-own-instance`) and not another peer's in the
+  same restore or save. The fresh nonce means an old answer is never taken
+  again; the PCR4 means an approved enclave started on the asker's own
+  host, or one instance answering for both peers, is never taken. No
   signature crate is needed.
-- Because a save reaches every peer and a start needs one, a start always
-  meets a peer that holds the last acknowledged record.
+- Because a save reaches every peer and a start needs every peer, a start
+  always meets the peers that hold the last acknowledged record.
 
-What it does not catch: every region lost at once, or the hosts of every
-region cutting the log at once (no copy is left to restore from). The cost is
-availability: Fill and Open wait while a peer region is down. The log is not
-compacted; it survives the enclave and the host restarting and the host
-instance being replaced.
+What it does not catch: an attacker who can launch new EC2 instances in the
+AWS account itself (approved enclaves on two new instances, one per peer
+port, each with a PCR4 of its own); every region lost at once, or the hosts
+of every region cutting the log at once (no copy is left to restore from).
+The cost is availability: Fill and Open wait while a peer region is down,
+and a start waits for both peers. The log is not compacted; it survives the
+enclave and the host restarting and the host instance being replaced, one
+region at a time.
 
 ### Home region
 
@@ -556,6 +591,8 @@ finished first (`enclave/RUNBOOK.md`).
 | `ghost-seal/v1/journal` | the journal's AES-256 and HMAC keys |
 | `ghost-seal/v1/host-journal` | the journal log's AES-256 and HMAC keys (salt and info), and the first part of each record's tag |
 | `ghost-seal/v1/journal-head` | the head key a peer region MACs its answers about a log's head with (salt and info), and the first part of each head MAC |
+| `ghost-seal/v1/journal-head-answer` | not a key: the first part of the hash of a peer answer's MAC that its attestation document carries as `user_data` |
+| `ghost-seal/v1/journal-head-own-instance` | not a key: the `user_data` and `nonce` of the document an enclave reads its own PCR4 from |
 | `ghost-seal/v1/home-region` | not a key: the first part of the hash that picks a card's home region |
 | `ghost-seal/v1/open-release` | the release's AES-256 and HMAC keys, from the ML-KEM shared secret |
 | `ghost-seal/v1/record-check` | the check of each record frame |

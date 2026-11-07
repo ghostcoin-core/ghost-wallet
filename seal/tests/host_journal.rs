@@ -22,7 +22,7 @@ use ghost_seal::host_journal::{
     PARENT_CID, REQUEST_APPEND, REQUEST_DEADLINE, REQUEST_PEER, REQUEST_READ_ALL, RecordFile, StoreRefused,
     peer_log_file, peer_request,
 };
-use ghost_seal::journal_anchor::{Anchor, Peer, PeerLink, PeerLogs};
+use ghost_seal::journal_anchor::{Anchor, FakeAttester, NO_COPY, Peer, PeerLink, PeerLogs, Peers};
 use ghost_seal::journal_log::{JournalLog, LogStore, MAX_RECORD_BYTES, MemoryLogStore, SharedLog};
 use ghost_seal::key_share::{read_frame, write_frame};
 use ghost_seal::proxy::{TcpConnector, UnixConnector};
@@ -488,9 +488,17 @@ impl ghost_seal::SealRandom for Counting {
     }
 }
 
+/// A stand-in attester for region `build`'s image on instance `pcr4`,
+/// approving the builds 1 and 2 (test only).
+fn attester(build: u8, pcr4: u8) -> Arc<FakeAttester> {
+    Arc::new(FakeAttester::new([0x3c; 32], [build; 48], [pcr4; 48], vec![[1; 48], [2; 48]]))
+}
+
 #[test]
 fn a_peer_enclave_keeps_another_regions_log_on_its_host_and_a_replaced_host_restores_from_it() {
-    // eu-central-1's host keeps the log of us-east-1 for its enclave.
+    // eu-central-1's host keeps the log of us-east-1 for its enclave, which
+    // restores its copies (with no other holder to ask, as they are) when it
+    // starts.
     let dir = scratch("peer-enclave");
     let socket = serve_with_peers(&dir, "s", &[US, AP]);
     let peer = |socket: &Path| -> Arc<PeerLogs> {
@@ -498,12 +506,17 @@ fn a_peer_enclave_keeps_another_regions_log_on_its_host_and_a_replaced_host_rest
             (US.to_string(), Box::new(client(socket).peer_log(US))),
             (AP.to_string(), Box::new(client(socket).peer_log(AP))),
         ];
-        Arc::new(PeerLogs::new(EU, stores))
+        let peers = Arc::new(Peers::new(EU, Vec::new()).with_attester(attester(2, 0x22)));
+        let logs = Arc::new(PeerLogs::new(peers, stores));
+        let _ = logs.restore(&support::master());
+        logs
     };
     let eu = peer(&socket);
+    assert!(eu.is_restored(US) && eu.is_restored(AP));
     let anchor = |logs: &Arc<PeerLogs>, seed: u64| {
-        let peers = vec![Peer { region: EU.into(), link: Arc::new(InProcess(Arc::clone(logs))) as Arc<dyn PeerLink> }];
-        Anchor::with_random(US, peers, Box::new(Counting(seed << 32)))
+        let link = Arc::new(InProcess(Arc::clone(logs))) as Arc<dyn PeerLink>;
+        let peers = Peers::new(US, vec![Peer { region: EU.into(), link }]);
+        Anchor::new(Arc::new(peers.with_random(Box::new(Counting(seed << 32))).with_attester(attester(1, 0x11))))
     };
 
     // us-east-1 writes four records; each reaches eu-central-1's host.
@@ -537,8 +550,8 @@ fn a_peer_enclave_keeps_another_regions_log_on_its_host_and_a_replaced_host_rest
     assert_eq!(log.load(&UID, EntryKind::Fill), Some(b"the fill entry replaced".to_vec()));
     assert_eq!(log.load(&UID, EntryKind::Open), Some(b"an open entry".to_vec()));
 
-    // A peer log the host changed fails the peer's own check: it answers
-    // nothing about it, and the origin's log does not open.
+    // A peer log the host changed fails the peer's own check at its
+    // restore: it answers no copy of it, and the origin's log does not open.
     let path = dir.join("peer-us-east-1.log");
     let mut records = HostStore::open(&path).unwrap().records().to_vec();
     records[1].1[20] ^= 0x01;
@@ -550,9 +563,11 @@ fn a_peer_enclave_keeps_another_regions_log_on_its_host_and_a_replaced_host_rest
     drop(store);
     let socket = serve_with_peers(&dir, "third", &[US, AP]);
     let eu = peer(&socket);
+    assert!(!eu.is_restored(US), "the changed copy is not restored");
+    assert!(eu.is_restored(AP));
     let empty = MemoryLogStore::new();
     let refused =
         JournalLog::open_anchored(&support::master(), Box::new(empty.clone()), Box::new(Counting(3)), Box::new(anchor(&eu, 3)));
-    assert!(refused.is_err());
+    assert_eq!(refused.err(), Some(NO_COPY));
     assert!(empty.records().is_empty(), "nothing restored from a log that fails its checks");
 }
