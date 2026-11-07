@@ -24,14 +24,22 @@
 //! **Peer regions.** A kind 3 request is a peer region's append, head or
 //! fetch of its own log, answered from the logs this enclave keeps for the
 //! other regions on its host ([`ServiceDeps::peer_logs`],
-//! `journal_anchor::PeerLogs`), with the M it holds; it needs M only, not
-//! the flows, so two regions starting at once can anchor each other. The
-//! enclave's own log is anchored in its peers through [`ServicePeer`]s (the
-//! parent's vsock ports 5006 and 5007, one per peer): the journal is opened
-//! only once a peer has answered its head, and a journal that cannot be
-//! anchored (no peer answered, a fork, a bad restore) leaves every flow 503
-//! and logs [`ServiceEvent::JournalUnanchored`]; it is tried again like a
-//! journal that could not be read.
+//! `journal_anchor::PeerLogs`), with the M it holds, or a head or fetch of
+//! this enclave's own log (a peer restoring its copy); it needs M only, not
+//! the flows, so two regions starting at once can anchor each other. Every
+//! answer carries a fresh attestation document from this enclave's NSM with
+//! the asker's nonce, and every answer this enclave takes is checked with
+//! its attestation verifier against its trusted list, and must carry a
+//! parent-instance PCR4 other than its own (read from its own document) and
+//! other than the other peers' ([`document_pcr4`]). Once M is installed,
+//! before any flow, every peer log is restored; the enclave's own log is
+//! anchored in its peers through [`ServicePeer`]s (the parent's vsock ports
+//! 5006 and 5007, one per peer): the journal is opened only once every peer
+//! has answered its head, and a peer log or journal that cannot be restored
+//! or anchored (a peer silent, an answer not attested, a fork, a bad
+//! restore, no copy where one is needed) leaves every flow 503 and logs
+//! [`ServiceEvent::JournalUnanchored`]; it is tried again like a journal
+//! that could not be read.
 //!
 //! Fail closed: the flows are served only once the enclave holds M **and**
 //! a chain status check, a card registry (loaded) and a durable journal are
@@ -70,7 +78,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::attestation::{AttestationSource, AttestationVerifier};
+use crate::attestation::{AttestationSource, AttestationVerifier, cbor};
 use crate::card_keys::CardUid;
 use crate::chain_check::{
     ChainNode, CoinQuery, CoinStatus, CoinStatusCheck, Network, NodeChainCheck, NodeListError,
@@ -80,8 +88,8 @@ use crate::error::SealError;
 use crate::flows::{Seal, SealConfig};
 use crate::journal::{EntryKind, Journal};
 use crate::journal_anchor::{
-    PEER_DEADLINE, PeerLink, PeerLogs, Regions, SERVICE_KIND, WRONG_REGION_MESSAGE, WRONG_REGION_REASON,
-    is_anchor_error,
+    AnswerAttester, AnswerDocument, InstancePcr, PCR_BYTES, PEER_DEADLINE, PeerLink, PeerLogs, Regions, SERVICE_KIND,
+    WRONG_REGION_MESSAGE, WRONG_REGION_REASON, is_anchor_error,
 };
 use crate::journal_log::SharedLog;
 use crate::key_maker::CoreKeyMaker;
@@ -410,8 +418,11 @@ pub enum ServiceEvent {
     /// session's could not be handed out): no flow is served on it.
     JournalRefused,
     /// The durable journal's head could not be anchored in the peer regions
-    /// (no peer answered, a peer holds a fork, or a restored record failed
-    /// its check): no flow is served; it is tried again.
+    /// or a peer log could not be restored (a peer did not answer or has not
+    /// restored its copy, an answer is not attested by that region's enclave
+    /// on an instance of its own, no peer holds a copy needed, a peer holds a
+    /// fork, or a restored record failed its check): no flow is served; it
+    /// is tried again.
     JournalUnanchored,
     /// A key-share request was refused.
     KeyShareRefused,
@@ -433,7 +444,7 @@ impl fmt::Display for ServiceEvent {
                 f.write_str("the durable journal was refused (unreadable, failed its checks or rolled back)")
             }
             ServiceEvent::JournalUnanchored => f.write_str(
-                "the durable journal could not be anchored in a peer region (none answered, a fork or a bad restore); not answering cards",
+                "the durable journal could not be anchored in a peer region (a peer silent or not restored, an answer not attested, no copy, a fork or a bad restore); not answering cards",
             ),
             ServiceEvent::KeyShareRefused => f.write_str("refused a key-share request"),
             ServiceEvent::UnknownProtocol => f.write_str("closed a connection of no known protocol"),
@@ -522,6 +533,52 @@ impl Shared {
     }
 }
 
+/// How this enclave attests its answers to the peer regions and checks
+/// theirs (`journal_anchor`): documents from its own NSM, checked with its
+/// attestation verifier (the pinned AWS root) at the service's clock, the
+/// build on its trusted list as it stands, and the parent-instance PCR read
+/// from the document that verified.
+struct ServiceAttester(Arc<Shared>);
+
+impl AnswerAttester for ServiceAttester {
+    fn attest(&self, user_data: &[u8], nonce: &[u8]) -> Result<Vec<u8>, String> {
+        let mut source = self.0.attestation.source()?;
+        source.attest(user_data, nonce).map_err(|e| e.to_string())
+    }
+
+    fn check(&self, document: &[u8]) -> Result<AnswerDocument, String> {
+        let verifier = self.0.attestation.verifier();
+        let attested = verifier.verify(document, self.0.clock.now_unix()).map_err(|e| e.to_string())?;
+        lock(&self.0.state).trusted.check(&attested.pcrs).map_err(|e| e.to_string())?;
+        let pcr4 = document_pcr4(document).ok_or("the attestation document has no PCR4")?;
+        Ok(AnswerDocument {
+            pcr4,
+            user_data: attested.user_data.unwrap_or_default(),
+            nonce: attested.nonce.unwrap_or_default(),
+        })
+    }
+}
+
+/// The PCR4 (the parent instance's) of a Nitro attestation document. Read
+/// only from a document the attestation verifier has already taken, whose
+/// payload its signature covers.
+pub fn document_pcr4(document: &[u8]) -> Option<InstancePcr> {
+    let value = match cbor::decode(document).ok()? {
+        cbor::Value::Tag(18, inner) => *inner,
+        other => other,
+    };
+    let cbor::Value::Array(parts) = value else { return None };
+    let Some(cbor::Value::Bytes(payload)) = parts.get(2) else { return None };
+    let cbor::Value::Map(fields) = cbor::decode(payload).ok()? else { return None };
+    let (_, pcrs) = fields.iter().find(|(key, _)| matches!(key, cbor::Value::Text(name) if name == "pcrs"))?;
+    let cbor::Value::Map(pcrs) = pcrs else { return None };
+    let (_, pcr4) = pcrs.iter().find(|(index, _)| *index == cbor::Value::Unsigned(4))?;
+    match pcr4 {
+        cbor::Value::Bytes(bytes) if bytes.len() == PCR_BYTES => bytes.as_slice().try_into().ok(),
+        _ => None,
+    }
+}
+
 /// The Seal's session clock: the service's.
 struct SharedClock(Arc<dyn Clock + Send + Sync>);
 
@@ -565,6 +622,11 @@ impl EnclaveService {
             log,
         });
         let routes = Mutex::new(Arc::new(Routes::new(None, Some(Arc::new(Attester(Arc::clone(&shared)))))));
+        // The peer regions' answers are checked, and this enclave's own
+        // attested, with its own attestation and trusted list.
+        if let Some(logs) = &deps.peer_logs {
+            logs.peers().install_attester(Arc::new(ServiceAttester(Arc::clone(&shared))));
+        }
         EnclaveService { shared, tls, deps, config, routes }
     }
 
@@ -604,7 +666,10 @@ impl EnclaveService {
         // it may ask the peer regions, whose own requests to this enclave
         // need M.
         let Some(master) = lock(&self.shared.state).master.as_ref().map(copy_master) else { return false };
-        if !self.deps.ready() {
+        // The other regions' logs this enclave keeps are restored first,
+        // whether or not the flows can be served yet: the peers' own
+        // restores need them.
+        if !self.restore_peer_logs(&master) || !self.deps.ready() {
             return false;
         }
         let Some(flows) = self.flows(&master) else { return false };
@@ -627,17 +692,37 @@ impl EnclaveService {
         let held = copy_master(&master);
         *lock(&self.shared.answer_key) = Some(answer_key);
         lock(&self.shared.state).master = Some(master);
-        let flows = self.deps.ready().then(|| self.flows(&held)).flatten();
+        let peer_logs_restored = self.restore_peer_logs(&held);
+        let flows = (peer_logs_restored && self.deps.ready()).then(|| self.flows(&held)).flatten();
         let serves_flows = flows.is_some();
         let routes = Routes::new(flows, Some(Arc::new(Attester(Arc::clone(&self.shared)))));
         *lock(&self.routes) = Arc::new(routes);
         self.shared.log.record(ServiceEvent::MasterInstalled { serves_flows });
     }
 
+    /// Restores every peer log not restored yet (`PeerLogs::restore`), with
+    /// `master`; whether all are. A refusal is logged
+    /// [`ServiceEvent::JournalUnanchored`] and tried again with the flows.
+    fn restore_peer_logs(&self, master: &MasterKey) -> bool {
+        let Some(logs) = &self.deps.peer_logs else { return true };
+        if logs.all_restored() {
+            return true;
+        }
+        if logs.restore(master).is_err() {
+            self.shared.log.record(ServiceEvent::JournalUnanchored);
+            return false;
+        }
+        true
+    }
+
     /// The flows over Seals holding `master`, with the installed deps; none
-    /// until all three are installed, the registry is loaded and the
-    /// durable journal opened and verified with `master`.
+    /// until all three are installed, the registry is loaded, every peer
+    /// log is restored and the durable journal opened and verified with
+    /// `master`.
     fn flows(&self, master: &MasterKey) -> Option<Flows> {
+        if self.deps.peer_logs.as_ref().is_some_and(|logs| !logs.all_restored()) {
+            return None;
+        }
         let chain = self.deps.chain.clone()?;
         let registry = self.deps.registry.clone().filter(|r| r.loaded())?;
         let journal = self.deps.journal.clone()?;

@@ -184,8 +184,18 @@ log and sees counters and ciphertext only: no UID, card data, key or M.
   outbound to their proxies, 10 seconds each); each checks it with M and
   keeps it in its host's peer log. A Fill or an Open goes on only once both
   took it. When the enclave starts, after it holds M and before it serves,
-  it asks both for its log's head with a fresh nonce and restores from a
-  peer any records its host's log lacks.
+  it restores every log it keeps: its copies of the other regions' logs
+  (each from that region or the other peer that holds it) and its own log.
+  Each restore asks both other regions with a fresh nonce (both must
+  answer; one is not enough) and restores any records its host's file
+  lacks. An empty or not yet restored copy answers "no copy", never an
+  empty head, and a "no copy" is never taken as agreement.
+- Every answer between regions carries a fresh attestation document from
+  the answering enclave, with the asker's nonce. The enclave takes it only
+  from a build on its trusted list, of the region of the port it came on
+  (not its own region), on a parent instance (PCR4) that is not its own and
+  not the other peer's: an approved enclave started on the same host, or one
+  instance answering for both peers, is refused.
 - If the enclave logs `the durable journal was refused`, it answers every
   card `unavailable`. Either the store was not reachable (start
   `seal-journal`; the enclave tries again every minute and at each registry
@@ -194,10 +204,15 @@ log and sees counters and ciphertext only: no UID, card data, key or M.
   records into the file; the enclave refuses it.
 - If the enclave logs `the durable journal could not be anchored in a peer
   region`, it answers every card `unavailable` and tries again every minute:
-  no other region answered (start `seal-anchor` and `seal-anchor-2`, and the
-  other regions), or a peer holds another log at the same counter (a fork),
-  or a record restored from a peer failed its check. A fork or a bad restore
-  is not fixed by retrying: stop and look at the peer regions' logs.
+  an other region did not answer (start `seal-anchor` and `seal-anchor-2`,
+  and the other regions: both must run), an other region has not restored
+  its copy yet (it is starting too; this clears once it has), an answer was
+  not attested by that region's enclave on an instance of its own (look for
+  an extra enclave on this host or a peer port led elsewhere), the host
+  holds records no other region holds a copy of, or a peer holds another log
+  at the same counter (a fork), or a record restored from a peer failed its
+  check. A fork or a bad restore is not fixed by retrying: stop and look at
+  the peer regions' logs.
 - Never delete or truncate `/var/lib/seal/journal.log` or a peer log while
   cards are being filled or opened. Never compact them by hand.
 
@@ -209,18 +224,26 @@ What it survives, what it costs and what it does not cover:
   upgrade, "Replace a lost region"): the new host starts with an empty
   journal, and the new enclave restores the whole log from a peer region
   before it serves, so a Fill or an Open begun before is finished, never
-  lost or replayed.
+  lost or replayed. It restores its copies of the other regions' logs
+  before it serves too, so replacing the regions one after another keeps
+  every log: replace one region at a time, and only once the one before
+  serves again.
 - A host that cuts the end off the log while the enclave is stopped is
   caught when the enclave starts again, and the cut records are restored
   from a peer. A cut made while the enclave runs is caught and refused.
 - The cost is availability: while a peer region is down or unreachable,
   every Fill and Open in the regions that need it waits (refused, nothing
-  changed on the card); with no peer answering at its start an enclave
-  serves no card. Keep every region running. A lost region is replaced by a
-  redeploy, which restores from a peer.
+  changed on the card); unless both other regions answer at its start an
+  enclave serves no card. Keep every region running.
+  A lost region is replaced by a redeploy, which restores from a peer.
 - It does not cover every region lost at once, nor the hosts of every
   region cutting the log at once: there is then no copy left to restore
   from.
+- It does not cover an attacker who can launch new EC2 instances in the AWS
+  account itself: approved enclaves on two new instances (each with a PCR4
+  of its own), one led to each peer port, are taken as the two peers. Keep
+  the right to launch instances, and to change the peer ports' routes, to
+  the few who deploy.
 
 Each card is served by its home region only (`docs/sealed-card.md`, "Home
 region"); every other region refuses it `wrong-region`, naming the home, and
@@ -253,6 +276,10 @@ starts empty: load it again after its start.
 3. Redeploy one region at a time with that region's new EIF and the new list
    (`deploy.sh` with every region's `--eif-url` and `--eif-sha256`): each new
    host joins from a region still running. Wait for its `ok` before the next.
+   A release that changes the answers between regions (as the attested
+   answers did) is not taken by the release before it: until every region
+   runs it, Fills and Opens wait and a restarted region serves no card, and
+   each region serves again once all three run it.
 4. When every region runs the new build and the app pins it, mark the old
    build `revoked` in a later signed list and give it to every enclave.
 
@@ -272,8 +299,10 @@ Redeploy its stack with that region's own EIF (the same `--eif-url` and
 its peer (or from any running region: change its `peer` in `regions.json`). Then load the card
 registry into it (above). Its host's journal starts empty and the enclave
 restores it from a peer region before it serves (see "The journal store");
-until one other region answers, it serves no card. Its peer logs of the
-other regions start empty too and fill again with their next records.
+until both other regions answer, it serves no card. Its peer logs of the
+other regions start empty too, and it restores them from those regions
+before it serves. Replace one region at a time: wait until the replaced
+region serves again before the next.
 
 ## Change the region list
 

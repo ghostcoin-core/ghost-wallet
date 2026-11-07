@@ -49,12 +49,15 @@
 //! `wrong-region`, naming the home region (`homeRegion`), before any card
 //! traffic, and [`TestSealServer::fill`] refuses such a card the same way
 //! before any card command. Its journal's head is anchored in its peers:
-//! the journal file is opened at the first session, after every peer was
-//! asked for its head and what they hold past the file was restored; each
-//! save is `Ok` only once every peer took it. On its peer port (plain TCP,
-//! loopback only) it keeps the other regions' logs, each in
-//! `peer-<region>.log` beside the journal file, and answers their framed
-//! service requests kind 3 under the test M.
+//! from its start it restores its copies of the other regions' logs (tried
+//! again until every peer answers), and the journal file is opened at the
+//! first session, after every peer was asked for its head and what they hold
+//! past the file was restored; each save is `Ok` only once every peer took
+//! it. On its peer port (plain TCP, loopback only) it keeps the other
+//! regions' logs, each in `peer-<region>.log` beside the journal file, and
+//! answers their framed service requests kind 3 under the test M. Its
+//! answers carry a stand-in attestation ([`dev_test_attester`]: a public
+//! key, so it proves nothing) with an instance PCR of its own per region.
 //!
 //! Every request must arrive whole in time: its body within
 //! `--body-ms` (5 seconds by default) of its head, and each head within
@@ -82,7 +85,8 @@ use crate::flows::{FillOutcome, FillRequest, Seal, SealConfig};
 use crate::host_journal::HostStore;
 use crate::journal::{EntryKind, Journal, MemoryJournal};
 use crate::journal_anchor::{
-    Anchor, PEER_DEADLINE, Peer, PeerLink, PeerLogs, Regions, SERVICE_KIND, WRONG_REGION_MESSAGE, WRONG_REGION_REASON,
+    Anchor, AnswerAttester, FakeAttester, InstancePcr, PCR_BYTES, PEER_DEADLINE, Peer, PeerLink, PeerLogs, Peers, Regions,
+    SERVICE_KIND, WRONG_REGION_MESSAGE, WRONG_REGION_REASON,
 };
 use crate::journal_log::{JournalLog, LogStore, SharedLog};
 use crate::key_maker::CoreKeyMaker;
@@ -143,6 +147,38 @@ pub const USAGE: &str = "usage: GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-tes
 const MAX_PEER_FRAME_BYTES: usize = 64 * 1024;
 /// How many peer connections are served at once; more are closed.
 const MAX_PEER_CONNECTIONS: usize = 16;
+/// How often the peer logs not restored yet are tried again.
+const PEER_RESTORE_RETRY: Duration = Duration::from_millis(200);
+/// The text whose SHA3-256 keys the test servers' stand-in attestation of
+/// their peer answers. Public, like the test M: it proves nothing.
+pub const DEV_ANSWER_ATTESTATION_LABEL: &[u8] = b"ghost-seal/dev-test-seal/answer-attestation/v1";
+/// The build measurement the test servers' stand-in attestation reports and
+/// approves.
+pub const DEV_ANSWER_BUILD: InstancePcr = [0x7e; PCR_BYTES];
+
+/// The stand-in attestation of the test server of `region`: the public test
+/// key, the test build, and an instance PCR of its own, derived from the
+/// region (as each region's enclave runs on its own instance).
+pub fn dev_test_attester(region: &str) -> FakeAttester {
+    let mut pcr4 = [0u8; PCR_BYTES];
+    pcr4[..32].copy_from_slice(&sha3_256(&[DEV_ANSWER_ATTESTATION_LABEL, b"/instance/", region.as_bytes()]));
+    FakeAttester::new(sha3_256(&[DEV_ANSWER_ATTESTATION_LABEL]), DEV_ANSWER_BUILD, pcr4, vec![DEV_ANSWER_BUILD])
+}
+
+/// One file store shared by the journal and the answers about it, as the
+/// enclave's two connections reach one host store.
+#[derive(Clone)]
+struct SharedStore(Arc<Mutex<HostStore>>);
+
+impl LogStore for SharedStore {
+    fn append(&mut self, counter: u64, record: &[u8]) -> Result<(), SealError> {
+        LogStore::append(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner), counter, record)
+    }
+
+    fn read_all(&mut self) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).read_all()
+    }
+}
 
 /// The test M's bytes. Public by design: SHA3-256 of
 /// [`DEV_TEST_MASTER_LABEL`]. Card setup uses the same value for test cards.
@@ -547,19 +583,26 @@ pub struct TestSealServer {
 #[derive(Clone)]
 enum SessionJournal {
     Plain(JournalLog),
-    Anchored(Arc<SharedLog>),
+    Anchored(Arc<SharedLog>, Arc<PeerLogs>),
 }
 
 impl SessionJournal {
     fn journal(&self) -> Box<dyn Journal> {
         match self {
             SessionJournal::Plain(log) => Box::new(log.clone()),
-            SessionJournal::Anchored(shared) => match shared.journal(&dev_test_master()) {
-                Ok(log) => Box::new(log),
-                // No peer answered, a fork, a bad restore or a rollback: the
-                // session's Seal changes no card.
-                Err(_) => Box::new(RefusedJournal),
-            },
+            SessionJournal::Anchored(shared, logs) => {
+                // Every peer log is restored before a card is served.
+                if logs.restore(&dev_test_master()).is_err() {
+                    return Box::new(RefusedJournal);
+                }
+                match shared.journal(&dev_test_master()) {
+                    Ok(log) => Box::new(log),
+                    // A peer silent, an answer not attested, a fork, a bad
+                    // restore or a rollback: the session's Seal changes no
+                    // card.
+                    Err(_) => Box::new(RefusedJournal),
+                }
+            }
         }
     }
 }
@@ -679,18 +722,21 @@ fn serve_peers(listener: TcpListener, logs: Arc<PeerLogs>, stop: Arc<AtomicBool>
 
 /// The journal of a server running as one region of several: the file's
 /// log anchored in the peers, and the peers' logs beside the file.
-fn anchored_journal(path: &std::path::Path, options: &RegionOptions) -> Result<(SharedLog, PeerLogs), StartError> {
+fn anchored_journal(path: &std::path::Path, options: &RegionOptions) -> Result<(Arc<SharedLog>, PeerLogs), StartError> {
     let open = |file: &std::path::Path| {
         HostStore::open(file)
             .map_err(|e| StartError::Journal(format!("cannot open the journal file {}: {e}", file.display())))
     };
     let own = options.regions.own();
-    let peers = options
+    let links = options
         .peers
         .iter()
         .map(|(region, addr)| Peer { region: region.clone(), link: Arc::new(TcpPeer(*addr)) as Arc<dyn PeerLink> })
         .collect();
-    let journal = SharedLog::anchored(Box::new(open(path)?), Box::new(Anchor::new(own, peers)));
+    let attester: Arc<dyn AnswerAttester> = Arc::new(dev_test_attester(own));
+    let peers = Arc::new(Peers::new(own, links).with_attester(attester));
+    let store = SharedStore(Arc::new(Mutex::new(open(path)?)));
+    let journal = Arc::new(SharedLog::anchored(Box::new(store.clone()), Box::new(Anchor::new(Arc::clone(&peers)))));
     let dir = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
@@ -699,7 +745,8 @@ fn anchored_journal(path: &std::path::Path, options: &RegionOptions) -> Result<(
     for (region, _) in &options.peers {
         stores.push((region.clone(), Box::new(open(&dir.join(format!("peer-{region}.log")))?)));
     }
-    Ok((journal, PeerLogs::new(own, stores)))
+    let logs = PeerLogs::new(peers, stores).with_own_log(Arc::clone(&journal), Box::new(store));
+    Ok((journal, logs))
 }
 
 /// The refusal of a card whose home is region `home`.
@@ -767,8 +814,9 @@ impl TestSealServer {
                 let (journal, logs) = anchored_journal(&options.journal, regions)?;
                 let listener = TcpListener::bind(regions.peer_listen).map_err(|e| StartError::Listen(e.to_string()))?;
                 let peer_addr = listener.local_addr().map_err(|e| StartError::Listen(e.to_string()))?;
-                peer_service = Some((listener, peer_addr, Arc::new(logs)));
-                SessionJournal::Anchored(Arc::new(journal))
+                let logs = Arc::new(logs);
+                peer_service = Some((listener, peer_addr, Arc::clone(&logs)));
+                SessionJournal::Anchored(journal, logs)
             }
         };
 
@@ -795,8 +843,19 @@ impl TestSealServer {
         let mut peer_addr = None;
         if let Some((listener, addr, logs)) = peer_service {
             peer_addr = Some(addr);
+            {
+                let (logs, stop) = (Arc::clone(&logs), Arc::clone(&stop));
+                threads.push(std::thread::spawn(move || serve_peers(listener, logs, stop)));
+            }
+            // The other regions' logs are restored at the start, as an
+            // enclave restores them once it holds M, whether or not this
+            // server ever serves a card: the peers' own restores need them.
             let stop = Arc::clone(&stop);
-            threads.push(std::thread::spawn(move || serve_peers(listener, logs, stop)));
+            threads.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) && logs.restore(&dev_test_master()).is_err() {
+                    std::thread::sleep(PEER_RESTORE_RETRY);
+                }
+            }));
         }
         {
             let (shared, stop) = (Arc::clone(&shared), Arc::clone(&stop));
@@ -834,6 +893,16 @@ impl TestSealServer {
     /// The region list and its own region, when it runs as one of several.
     pub fn regions(&self) -> Option<&Regions> {
         self.shared.regions.as_ref()
+    }
+
+    /// Whether every copy it keeps of the other regions' logs is restored
+    /// (always, as the one region it is): until then the other regions'
+    /// journals do not open.
+    pub fn peer_logs_restored(&self) -> bool {
+        match &self.sessions.journal {
+            SessionJournal::Plain(_) => true,
+            SessionJournal::Anchored(_, logs) => logs.all_restored(),
+        }
     }
 
     /// A Seal as each of the server's sessions runs: the test M, the chain

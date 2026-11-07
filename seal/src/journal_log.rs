@@ -48,7 +48,7 @@
 //! a rollback.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use zeroize::Zeroizing;
 
@@ -371,6 +371,8 @@ struct LogState {
     unsettled: Option<Unsettled>,
     /// A rollback was seen: no save is taken again.
     refused: bool,
+    /// The counter and tag written so far, behind a lock of their own.
+    published: Arc<Mutex<(u64, [u8; TAG_BYTES])>>,
 }
 
 const ROLLED_BACK: SealError = SealError::Journal("the log store was rolled back or changed");
@@ -416,6 +418,7 @@ impl LogState {
             }
             self.counter = unsettled.counter;
             self.tag = tag_of(&unsettled.record);
+            self.publish();
             self.entries.insert((unsettled.uid, unsettled.kind), unsettled.sealed);
             return Ok(());
         }
@@ -451,8 +454,15 @@ impl LogState {
         }
         self.counter = counter;
         self.tag = tag_of(&record);
+        self.publish();
         self.entries.insert((*uid, kind), sealed);
         Ok(())
+    }
+
+    /// Shows the head written so far to those who must not wait for this
+    /// log's lock (the peers' restores, `journal_anchor::PeerLogs`).
+    fn publish(&self) {
+        *self.published.lock().unwrap_or_else(|e| e.into_inner()) = (self.counter, self.tag);
     }
 }
 
@@ -483,6 +493,7 @@ fn settle_open(
 #[derive(Clone)]
 pub struct JournalLog {
     state: Arc<Mutex<LogState>>,
+    published: Arc<Mutex<(u64, [u8; TAG_BYTES])>>,
 }
 
 impl JournalLog {
@@ -525,6 +536,7 @@ impl JournalLog {
         anchor: Option<Box<dyn HeadAnchor>>,
         verified: Verified,
     ) -> JournalLog {
+        let published = Arc::new(Mutex::new((verified.counter, verified.tag)));
         let state = LogState {
             store,
             keys,
@@ -535,8 +547,15 @@ impl JournalLog {
             entries: verified.entries,
             unsettled: None,
             refused: false,
+            published: Arc::clone(&published),
         };
-        JournalLog { state: Arc::new(Mutex::new(state)) }
+        JournalLog { state: Arc::new(Mutex::new(state)), published }
+    }
+
+    /// The counter and tag of the last record written (0 and zeros: none),
+    /// read without waiting for a save in progress.
+    pub fn head(&self) -> (u64, [u8; TAG_BYTES]) {
+        *self.published.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn lock(&self) -> MutexGuard<'_, LogState> {
@@ -602,6 +621,8 @@ struct Opening {
 /// install.
 pub struct SharedLog {
     opening: Mutex<Opening>,
+    /// The log once opened, readable while another open is being tried.
+    opened: OnceLock<JournalLog>,
 }
 
 impl SharedLog {
@@ -612,7 +633,10 @@ impl SharedLog {
 
     /// [`SharedLog::new`] with the random source of the records' IVs.
     pub fn with_random(store: Box<dyn LogStore>, random: Box<dyn SealRandom + Send>) -> SharedLog {
-        SharedLog { opening: Mutex::new(Opening { waiting: Some((store, random, None)), open: None }) }
+        SharedLog {
+            opening: Mutex::new(Opening { waiting: Some((store, random, None)), open: None }),
+            opened: OnceLock::new(),
+        }
     }
 
     /// A log over `store` whose head `anchor` keeps (the enclave's: its
@@ -629,12 +653,22 @@ impl SharedLog {
         random: Box<dyn SealRandom + Send>,
         anchor: Box<dyn HeadAnchor>,
     ) -> SharedLog {
-        SharedLog { opening: Mutex::new(Opening { waiting: Some((store, random, Some(anchor))), open: None }) }
+        SharedLog {
+            opening: Mutex::new(Opening { waiting: Some((store, random, Some(anchor))), open: None }),
+            opened: OnceLock::new(),
+        }
     }
 
     /// Whether the log has been opened and verified.
     pub fn is_open(&self) -> bool {
-        self.opening.lock().unwrap_or_else(|e| e.into_inner()).open.is_some()
+        self.opened.get().is_some()
+    }
+
+    /// The counter and tag of the log's last record once it is open (and,
+    /// anchored, restored and confirmed by every peer); `None` before. Never
+    /// waits for an open or a save in progress.
+    pub fn head(&self) -> Option<(u64, [u8; TAG_BYTES])> {
+        self.opened.get().map(JournalLog::head)
     }
 
     /// The log for `master`. The first call reads and verifies the whole
@@ -657,6 +691,7 @@ impl SharedLog {
         let (store, random, anchor) = opening.waiting.take().ok_or(SealError::Journal("the log has no store"))?;
         let log = JournalLog::from_verified(store, keys, random, anchor, verified);
         opening.open = Some(log.clone());
+        let _ = self.opened.set(log.clone());
         Ok(log)
     }
 }
