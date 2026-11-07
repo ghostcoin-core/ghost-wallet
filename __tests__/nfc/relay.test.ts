@@ -6,19 +6,27 @@
 import fs from 'fs';
 import path from 'path';
 
-import { CardCancelled } from '../../modules/ghost-nfc';
+import { CardCancelled, type GhostNfcSealRegionsNative } from '../../modules/ghost-nfc';
 import {
   checkWithSeal,
   confirmFillWithSeal,
   fillWithSeal,
+  HOME_REGION,
   openWithSeal,
+  readAnswerResult,
   readResult,
   RELAY_PROBLEMS,
   SealRelayError,
+  setSealRegions,
   type GhostNfcRelayNative,
   type GhostNfcSealNative,
   type NativeSealCheck,
 } from '../../modules/ghost-nfc/relay';
+
+jest.mock('expo', () => ({ requireOptionalNativeModule: () => null }));
+
+/** The region the double's native relay picks for a home-region flow. */
+const HOME = 'eu-central-1';
 
 const UID = Uint8Array.from([0x04, 0x51, 0x8d, 0xfa, 0xa9, 0x61, 0x80]);
 const AMOUNT = 1_500_000_000_000_000_000n;
@@ -157,6 +165,8 @@ function relayDouble(card = new FakeCard(), seal = new FakeSeal()) {
         signature: hex(reply.signature),
         rounds,
         totalMs: clock - started,
+        // As SealRelay.swift does: the home region it chose, none for a typed address.
+        region: url === '' ? HOME : '',
       };
     },
   };
@@ -179,12 +189,15 @@ describe('a Check through the Seal', () => {
       'amountWei',
       'answer',
       'challenge',
+      'region',
       'rounds',
       'signature',
       'state',
       'totalMs',
       'uid',
     ]);
+    // A typed address is that one Seal: no region.
+    expect(result.region).toBe('');
     // The challenge the native relay made and sent: the answer's check needs it.
     expect(hex(result.challenge)).toBe(hex(stream(42, 32)));
     expect(result.uid).toBe('04518DFAA96180');
@@ -253,6 +266,7 @@ describe('a Check through the Seal', () => {
       signature: hex(reply.signature),
       rounds: [{ kind: 'seal', ms: 3, bytes: 'ff' }],
       totalMs: 3,
+      region: '',
       extra: 'nothing',
     } as unknown as NativeSealCheck;
     const result = readResult(native);
@@ -260,6 +274,112 @@ describe('a Check through the Seal', () => {
     expect(hex(result.challenge)).toBe(hex(challenge));
     expect(result.rounds).toEqual([{ kind: 'seal', ms: 3 }]);
     expect(() => readResult({ ...native, rounds: [{ kind: 'phone', ms: 1 }] })).toThrow(SealRelayError);
+  });
+
+  it('keeps the region on the answer, and refuses one that is malformed', () => {
+    const { seal } = relayDouble();
+    const challenge = stream(42, 32);
+    let reply = seal.start(UID, challenge);
+    const card = new FakeCard();
+    while (reply.status === 'command') {
+      reply = seal.step(reply.session, card.answer(reply.command)!);
+    }
+    const base = {
+      uid: hex(UID),
+      challenge: hex(challenge),
+      answer: hex(reply.answer),
+      signature: hex(reply.signature),
+      rounds: [],
+      totalMs: 3,
+    };
+    expect(readAnswerResult({ ...base, region: HOME }, 'check', true).region).toBe(HOME);
+    expect(readAnswerResult({ ...base, region: '' }, 'check', false).region).toBe('');
+    // A home-region flow must name a region id; a typed address none.
+    for (const region of ['', 'EU-CENTRAL-1', 'eu central', 'a'.repeat(33), 'eu-central-1\n', undefined, 7, null]) {
+      expect(() => readAnswerResult({ ...base, region } as unknown as NativeSealCheck, 'check', true)).toThrow(SealRelayError);
+    }
+    for (const region of [HOME, undefined, 0]) {
+      expect(() => readAnswerResult({ ...base, region } as unknown as NativeSealCheck, 'check')).toThrow(SealRelayError);
+    }
+  });
+});
+
+describe('a flow sent to the card\'s home region', () => {
+  it('goes to the native relay with an empty address, and names the region it ran in', async () => {
+    expect(HOME_REGION).toBe('');
+    const { nfc, calls } = relayDouble();
+    const result = await checkWithSeal(HOME_REGION, nfc);
+    expect(calls).toEqual([{ url: '', alert: expect.any(String) }]);
+    expect(result.region).toBe(HOME);
+    expect(result.state).toBe('sealed');
+  });
+
+  it('refuses a native result that names no region', async () => {
+    const { nfc } = relayDouble();
+    const relayCheck = nfc.relayCheck.bind(nfc);
+    nfc.relayCheck = async (url, alert) => ({ ...(await relayCheck(url, alert)), region: '' });
+    expect(await problemOf(checkWithSeal(HOME_REGION, nfc))).toBe('bad-answer');
+  });
+
+  it('a blank address is not the home region: only the empty string is', async () => {
+    const { nfc, calls } = relayDouble();
+    expect(await problemOf(checkWithSeal(' ', nfc))).toBe('bad-address');
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('setSealRegions', () => {
+  function regionsNative(answer = true) {
+    const lists: string[] = [];
+    const nfc: GhostNfcSealRegionsNative = {
+      setSealRegions: (json) => {
+        lists.push(json);
+        return answer;
+      },
+    };
+    return { nfc, lists };
+  }
+
+  const THREE = [
+    { id: 'us-east-1', url: 'https://us-east-1.seal.example' },
+    { id: 'eu-central-1', url: 'https://eu-central-1.seal.example' },
+    { id: 'ap-southeast-1', url: 'https://ap-southeast-1.seal.example' },
+  ];
+
+  it('hands the native relay the ordered list as JSON, ids and addresses only', () => {
+    const { nfc, lists } = regionsNative();
+    const extra = THREE.map((r) => ({ ...r, note: 'not sent' }));
+    expect(setSealRegions(extra, nfc)).toBe(true);
+    expect(lists).toEqual([JSON.stringify(THREE)]);
+    expect(setSealRegions([], nfc)).toBe(true);
+    expect(lists[1]).toBe('[]');
+  });
+
+  it('clears the native list instead for a bad id, a duplicate or an address that is not https://', () => {
+    for (const bad of [
+      [{ id: '', url: 'https://seal.example' }],
+      [{ id: 'Us-East', url: 'https://seal.example' }],
+      [THREE[0], { ...THREE[1], id: 'us-east-1' }],
+      [{ id: 'us-east-1', url: 'http://seal.example' }],
+      [{ id: 'us-east-1', url: 'seal.example' }],
+    ]) {
+      const { nfc, lists } = regionsNative();
+      expect(setSealRegions(bad, nfc)).toBe(false);
+      expect(lists).toEqual(['[]']);
+    }
+  });
+
+  it('is false with no module, or when the native side refuses or throws', () => {
+    expect(setSealRegions(THREE, null)).toBe(false);
+    expect(setSealRegions(THREE)).toBe(false);
+    expect(setSealRegions(THREE, regionsNative(false).nfc)).toBe(false);
+    expect(
+      setSealRegions(THREE, {
+        setSealRegions: () => {
+          throw new Error('refused');
+        },
+      }),
+    ).toBe(false);
   });
 });
 
@@ -309,7 +429,8 @@ describe('a failed relay', () => {
 
   it('refuses a bad Seal address, or no NFC, before opening the card sheet', async () => {
     const { nfc, calls } = relayDouble();
-    for (const address of ['', 'seal.example', 'ftp://seal.example', 'https://']) {
+    // The empty address is the card's home region (below), not a bad one.
+    for (const address of [' ', 'seal.example', 'ftp://seal.example', 'https://']) {
       expect(await problemOf(checkWithSeal(address, nfc))).toBe('bad-address');
     }
     expect(await problemOf(checkWithSeal(SEAL_URL, null))).toBe('no-nfc');
@@ -333,7 +454,7 @@ describe('a Fill and an Open through the Seal', () => {
   function sealNative(kindOf: { fill: number; open: number } = { fill: 2, open: 3 }) {
     const challenge = stream(77, 32);
     const calls: unknown[][] = [];
-    const base = { uid: hex(UID), challenge: hex(challenge), signature: hex(stream(9, 3309)), rounds: [], totalMs: 5 };
+    const base = { uid: hex(UID), challenge: hex(challenge), signature: hex(stream(9, 3309)), rounds: [], totalMs: 5, region: '' };
     const nfc: GhostNfcSealNative = {
       isSupported: () => true,
       relayCheck: async () => ({ ...base, answer: answerOf(1, challenge) }),
@@ -397,6 +518,7 @@ describe('a Fill and an Open through the Seal', () => {
       ['ERR_SEAL_WRONG_PIN', 'wrong-pin'],
       ['ERR_SEAL_PIN_LOCKED', 'pin-locked'],
       ['ERR_SEAL_SPENT', 'spent'],
+      ['ERR_SEAL_WRONG_REGION', 'wrong-region'],
     ];
     for (const [code, problem] of cases) {
       const { nfc } = sealNative();
@@ -405,6 +527,37 @@ describe('a Fill and an Open through the Seal', () => {
       };
       expect(await problemOf(openWithSeal(SEAL_URL, stream(3, 1184), '1234', nfc))).toBe(problem);
     }
+  });
+
+  it('runs a Fill, a confirmation and an Open in the home region, and keeps the region each names', async () => {
+    const { nfc, calls } = sealNative();
+    // As SealRelay.swift answers a flow sent with an empty address: naming the home region it chose.
+    const { relayFill, relayFillConfirm, relayOpen } = nfc;
+    nfc.relayFill = async (...args) => ({ ...(await relayFill(...args)), region: HOME });
+    nfc.relayFillConfirm = async (...args) => ({ ...(await relayFillConfirm(...args)), region: HOME });
+    nfc.relayOpen = async (...args) => ({ ...(await relayOpen(...args)), region: HOME });
+    expect((await fillWithSeal(HOME_REGION, AMOUNT, null, nfc)).region).toBe(HOME);
+    expect((await confirmFillWithSeal(HOME_REGION, nfc)).region).toBe(HOME);
+    expect((await openWithSeal(HOME_REGION, stream(3, 1184), null, nfc)).region).toBe(HOME);
+    expect(calls.map((call) => call[1])).toEqual(['', '', '']);
+    // The same native results against a typed address name a region they must not.
+    expect(await problemOf(fillWithSeal(SEAL_URL, AMOUNT, null, nfc))).toBe('bad-answer');
+  });
+
+  it('says plainly that a card served by another region needs an update, and nothing the Seal sent', async () => {
+    expect(RELAY_PROBLEMS['wrong-region']).toBe(
+      'This card is served by another Seal region than the one this iPhone chose. Update Ghost Wallet, then try again.',
+    );
+    const { nfc, calls } = sealNative();
+    nfc.relayCheck = async () => {
+      throw Object.assign(new Error('The Seal refused the card: ap-southeast-1'), { code: 'ERR_SEAL_WRONG_REGION', homeRegion: 'ap-southeast-1' });
+    };
+    const error = await checkWithSeal(HOME_REGION, nfc).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SealRelayError);
+    expect((error as SealRelayError).problem).toBe('wrong-region');
+    expect((error as Error).message).toBe(RELAY_PROBLEMS['wrong-region']);
+    expect((error as Error).message).not.toMatch(/ap-southeast/);
+    expect(calls).toHaveLength(0);
   });
 });
 

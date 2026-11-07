@@ -15,9 +15,18 @@
 // The signature is not verified here: the native core verifies it against
 // the Seal's pinned key and code measurement (lib/seal/verify-answer.ts). The
 // state and amount read here are only for the speed screen's timings.
+//
+// Each card is served by one Seal region, its home. JavaScript hands the
+// native relay the ordered list of live regions (`setSealRegions`) and calls
+// a flow with an empty Seal address (`HOME_REGION`): the native relay reads
+// the card's UID, has the native core choose its home region over the whole
+// list and runs the flow there, and the result names that region. A typed
+// https:// address runs against that one Seal, as the speed screen does, with
+// no region. JavaScript never chooses a region, never retries a flow in
+// another one, and never follows the region a `wrong-region` refusal names.
 import { requireOptionalNativeModule } from 'expo';
 
-import { CardCancelled, type GhostNfcSealPinNative } from './index';
+import { CardCancelled, type GhostNfcSealPinNative, type GhostNfcSealRegionsNative } from './index';
 
 /** One round trip of a relayed flow: to the card over NFC, or to the Seal over the network. */
 export type RelayRound = { kind: 'card' | 'seal'; ms: number };
@@ -46,6 +55,8 @@ export type SealCheck = {
 export type RelayedAnswer = SealCheck & {
   /** The 32 random bytes the native relay sent with the request. */
   challenge: Uint8Array;
+  /** The id of the Seal region the native relay chose and ran the flow in; `""` for a typed address. */
+  region: string;
 };
 
 /** What a Fill through the Seal hands back: the answer and the coin's public commit data. */
@@ -62,6 +73,8 @@ export type NativeSealCheck = {
   signature: string;
   rounds: { kind: string; ms: number }[];
   totalMs: number;
+  /** The region the flow ran in; `""` for a typed address. */
+  region: string;
 };
 
 /** What the native relay resolves a Fill with. */
@@ -73,7 +86,7 @@ export type NativeSealFill = NativeSealCheck & { commitData: string };
  */
 export type GhostNfcRelayNative = {
   isSupported(): boolean;
-  /** Runs one Check through the Seal at `sealUrl` on the next card tapped. */
+  /** Runs one Check through the Seal at `sealUrl` (`""`: the card's home region) on the next card tapped. */
   relayCheck(sealUrl: string, alert: string): Promise<NativeSealCheck>;
 };
 
@@ -118,6 +131,7 @@ export const RELAY_PROBLEMS = {
   spent: 'This card was emptied.',
   'wrong-state': 'This card cannot do that now.',
   'fill-pending': 'This card is already being filled with another amount or PIN.',
+  'wrong-region': 'This card is served by another Seal region than the one this iPhone chose. Update Ghost Wallet, then try again.',
   failed: 'The card could not be checked. Try again.',
 } as const;
 
@@ -152,7 +166,17 @@ const NATIVE_PROBLEMS: Record<string, RelayProblem> = {
   ERR_SEAL_SPENT: 'spent',
   ERR_SEAL_WRONG_STATE: 'wrong-state',
   ERR_SEAL_FILL_PENDING: 'fill-pending',
+  ERR_SEAL_WRONG_REGION: 'wrong-region',
 };
+
+/** The Seal address that sends a flow to the card's home region, chosen natively once its UID is read. */
+export const HOME_REGION = '';
+
+/** A Seal region id as the Seal's release lists it: 1 to 32 of `a-z`, `0-9` and `-`. */
+const REGION_ID = /^[a-z0-9-]{1,32}$/;
+
+/** One live Seal region: its id and its https:// address. */
+export type SealRegionAddress = { id: string; url: string };
 
 const ALERT = 'Hold the Ghost card near the top of the iPhone.';
 
@@ -178,9 +202,13 @@ export function sealAddress(text: string): string | null {
   return /^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/i.test(trimmed) ? trimmed : null;
 }
 
-/** Checks the address and that this iPhone reads cards, before any card sheet opens. */
-function ready<T extends GhostNfcRelayNative>(sealUrl: string, nfc: T | null): { address: string; nfc: T } {
-  const address = sealAddress(sealUrl);
+/**
+ * Checks the address and that this iPhone reads cards, before any card sheet
+ * opens. `HOME_REGION` (`""`) sends the flow to the card's home region.
+ */
+function ready<T extends GhostNfcRelayNative>(sealUrl: string, nfc: T | null): { address: string; home: boolean; nfc: T } {
+  const home = sealUrl === HOME_REGION;
+  const address = home ? HOME_REGION : sealAddress(sealUrl);
   if (address === null) {
     throw new SealRelayError('bad-address');
   }
@@ -193,7 +221,7 @@ function ready<T extends GhostNfcRelayNative>(sealUrl: string, nfc: T | null): {
   if (!nfc || !supported) {
     throw new SealRelayError('no-nfc');
   }
-  return { address, nfc };
+  return { address, home, nfc };
 }
 
 /** Runs a native relay call; the sheet closed is `CardCancelled`, anything else a `SealRelayError`. */
@@ -210,10 +238,10 @@ async function relayed<T>(run: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Runs one Check of the next card tapped through the Seal at `sealUrl` and
- * returns only its result, the challenge and the timings. Throws
- * `CardCancelled` when the card sheet is closed and `SealRelayError` for
- * everything else.
+ * Runs one Check of the next card tapped through the Seal at `sealUrl` (or,
+ * for `HOME_REGION`, the card's home region) and returns only its result,
+ * the challenge, the region and the timings. Throws `CardCancelled` when the
+ * card sheet is closed and `SealRelayError` for everything else.
  */
 export async function checkWithSeal(
   sealUrl: string,
@@ -221,7 +249,7 @@ export async function checkWithSeal(
 ): Promise<RelayedAnswer> {
   const relay = ready(sealUrl, nfc);
   const result = await relayed(() => relay.nfc.relayCheck(relay.address, ALERT));
-  return readResult(result);
+  return readAnswerResult(result, 'check', relay.home);
 }
 
 /** An Open PIN for the wire: 4 to 8 digits, or `""` for none. Never kept. */
@@ -254,7 +282,7 @@ export async function fillWithSeal(
   const result = await relayed(() =>
     relay.nfc.relayFill(relay.address, 'Hold the empty Ghost card near the top of the iPhone.', amountWei.toString(), wire),
   );
-  const answer = readAnswerResult(result, 'fill');
+  const answer = readAnswerResult(result, 'fill', relay.home);
   const commitData = bytesOf(result?.commitData, COMMIT_DATA_BYTES);
   if (!commitData) {
     throw new SealRelayError('bad-answer');
@@ -269,7 +297,7 @@ export async function confirmFillWithSeal(
 ): Promise<RelayedAnswer> {
   const relay = ready(sealUrl, nfc);
   const result = await relayed(() => relay.nfc.relayFillConfirm(relay.address, ALERT));
-  return readAnswerResult(result, 'fill');
+  return readAnswerResult(result, 'fill', relay.home);
 }
 
 /**
@@ -289,7 +317,7 @@ export async function openWithSeal(
   }
   const wire = pinText(pin);
   const result = await relayed(() => relay.nfc.relayOpen(relay.address, ALERT, hexOf(phoneKey).toLowerCase(), wire));
-  return readAnswerResult(result, 'open');
+  return readAnswerResult(result, 'open', relay.home);
 }
 
 /** The native module's Keychain of the Open's phone key; null in a build without it. */
@@ -376,20 +404,69 @@ export function setSealPin(
   }
 }
 
-/** Checks the native result of a Check and keeps only what JavaScript may see. */
+/**
+ * Hands the native relay the ordered list of live Seal regions (`[{ id, url }]`,
+ * exactly the Seal's release order), for its home-region flows. A list with
+ * an id that is not a region id or is listed twice, or an address that is not
+ * https://, is not handed over: the native list is cleared instead. False when
+ * the list could not be set (no module, a bad list, a native refusal).
+ */
+export function setSealRegions(
+  regions: readonly SealRegionAddress[],
+  nfc: GhostNfcSealRegionsNative | null = regionsNative(),
+): boolean {
+  if (!nfc || typeof nfc.setSealRegions !== 'function') {
+    return false;
+  }
+  const ids = new Set<string>();
+  const list: SealRegionAddress[] = [];
+  for (const region of regions) {
+    const id = region?.id;
+    const url = typeof region?.url === 'string' ? sealAddress(region.url) : null;
+    if (typeof id !== 'string' || !REGION_ID.test(id) || ids.has(id) || url === null || !/^https:/i.test(url)) {
+      try {
+        nfc.setSealRegions('[]');
+      } catch {
+        // Clearing never fails the call; the list was not set either way.
+      }
+      return false;
+    }
+    ids.add(id);
+    list.push({ id, url });
+  }
+  try {
+    return nfc.setSealRegions(JSON.stringify(list)) === true;
+  } catch {
+    return false;
+  }
+}
+
+function regionsNative(): GhostNfcSealRegionsNative | null {
+  return requireOptionalNativeModule<GhostNfcSealRegionsNative>('GhostNfc');
+}
+
+/** Checks the native result of a Check against a typed address and keeps only what JavaScript may see. */
 export function readResult(result: NativeSealCheck): RelayedAnswer {
   return readAnswerResult(result, 'check');
 }
 
-/** Checks the native result of a flow of `kind` and keeps only what JavaScript may see. */
-export function readAnswerResult(result: NativeSealCheck, kind: AnswerKind): RelayedAnswer {
+/**
+ * Checks the native result of a flow of `kind` and keeps only what
+ * JavaScript may see. A flow sent to the card's home region (`home`) must
+ * name a region id; one sent to a typed address must name none.
+ */
+export function readAnswerResult(result: NativeSealCheck, kind: AnswerKind, home = false): RelayedAnswer {
   const uid = bytesOf(result?.uid, 7);
   const challenge = bytesOf(result?.challenge, 32);
   const answer = bytesOf(result?.answer, ANSWER_BYTES);
   const signature = bytesOf(result?.signature);
   const rounds = roundsOf(result?.rounds);
   const totalMs = result?.totalMs;
+  const region: unknown = result?.region;
   if (!uid || !challenge || !answer || !signature || signature.length === 0 || !rounds) {
+    throw new SealRelayError('bad-answer');
+  }
+  if (typeof region !== 'string' || (home ? !REGION_ID.test(region) : region !== '')) {
     throw new SealRelayError('bad-answer');
   }
   if (typeof totalMs !== 'number' || !Number.isFinite(totalMs) || totalMs < 0) {
@@ -410,7 +487,7 @@ export function readAnswerResult(result: NativeSealCheck, kind: AnswerKind): Rel
   for (const byte of answer.slice(145, 161)) {
     amountWei = (amountWei << 8n) | BigInt(byte);
   }
-  return { uid: hexOf(uid), state, amountWei, answer, signature, rounds, totalMs, challenge };
+  return { uid: hexOf(uid), state, amountWei, answer, signature, rounds, totalMs, challenge, region };
 }
 
 function roundsOf(value: unknown): RelayRound[] | null {

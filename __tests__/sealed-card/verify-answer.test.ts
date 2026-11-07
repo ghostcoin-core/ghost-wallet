@@ -8,8 +8,15 @@ import { parseMeasurementList, PINNED_MEASUREMENTS } from '../../lib/seal/pinned
 import { trustedSeal } from '../../lib/seal/trusted-seal';
 import { answerCheck, pinnedAnswerMeasurements, verifyCheckAnswer } from '../../lib/seal/verify-answer';
 import { CardCancelled } from '../../modules/ghost-nfc';
-import { checkWithSeal, confirmFillWithSeal, fillWithSeal, openWithSeal, SealRelayError } from '../../modules/ghost-nfc/relay';
-import { FAKE_MEASUREMENT_HEX, GHOST, hexOf, PINNED_JSON, resetWorld, UID_HEX, type World } from './fake-seal';
+import {
+  checkWithSeal,
+  confirmFillWithSeal,
+  fillWithSeal,
+  HOME_REGION,
+  openWithSeal,
+  SealRelayError,
+} from '../../modules/ghost-nfc/relay';
+import { FAKE_MEASUREMENT_HEX, FAKE_REGION, GHOST, hexOf, PINNED_JSON, resetWorld, UID_HEX, type World } from './fake-seal';
 
 const mockFiles = new Map<string, unknown>();
 jest.mock('../../lib/storage', () => ({
@@ -25,12 +32,13 @@ const PINNED = parseMeasurementList(PINNED_JSON);
 
 function depsOf(world: World, list = PINNED): SealDeps {
   return {
-    seal: world.trusted(),
+    seals: world.trusted(),
+    refresh: async () => world.refreshed(),
     core: world.core,
-    check: (url) => checkWithSeal(url, world.native),
-    fill: (url, amountWei, pin) => fillWithSeal(url, amountWei, pin, world.native),
-    confirm: (url) => confirmFillWithSeal(url, world.native),
-    open: (url, phoneKey, pin) => openWithSeal(url, phoneKey, pin, world.native),
+    check: () => checkWithSeal(HOME_REGION, world.native),
+    fill: (amountWei, pin) => fillWithSeal(HOME_REGION, amountWei, pin, world.native),
+    confirm: () => confirmFillWithSeal(HOME_REGION, world.native),
+    open: (phoneKey, pin) => openWithSeal(HOME_REGION, phoneKey, pin, world.native),
     keeper: world.native,
     list,
   };
@@ -63,21 +71,21 @@ describe('the pinned measurements', () => {
   });
 
   it('has no Seal to vouch for outside the tests: the seam returns nothing', () => {
-    expect(trustedSeal()).toBeNull();
+    expect(trustedSeal(FAKE_REGION)).toBeNull();
   });
 });
 
 describe('the Seal a card flow checks with', () => {
   it('is the one the attestation gives at the start of the flow, not the one the screen opened with', async () => {
     world.sealedCard(5n * GHOST);
-    const gone = jest.fn(async () => null);
+    const gone = jest.fn(async () => new Map());
     expect(await checkCard({ ...depsOf(world), refresh: gone })).toEqual({ kind: 'cant-verify' });
     expect(await fillCard({ ...depsOf(world), refresh: gone }, GHOST, null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
     expect(gone).toHaveBeenCalledTimes(2);
     expect(world.calls).toEqual([]);
 
-    const fresh = jest.fn(async () => world.trusted());
-    const status = await checkCard({ ...depsOf(world), seal: null, refresh: fresh });
+    const fresh = jest.fn(async () => world.refreshed());
+    const status = await checkCard({ ...depsOf(world), seals: new Map(), refresh: fresh });
     expect(fresh).toHaveBeenCalledTimes(1);
     expect(status).toMatchObject({ kind: 'secured', amountWei: 5n * GHOST });
   });
@@ -96,7 +104,7 @@ describe('what the core checks an answer against', () => {
   it('is the challenge the relay sent, the card tapped, now, the Seal key and the pinned list', async () => {
     world.sealedCard(5n * GHOST);
     const relayed = await checkWithSeal('https://seal.example', world.native);
-    const check = answerCheck(world.trusted()!, relayed, 'check', { now: () => 1_800_000_000_500, list: PINNED });
+    const check = answerCheck(world.trustedSeal()!, relayed, 'check', { now: () => 1_800_000_000_500, list: PINNED });
     expect(hexOf(new Uint8Array(check.challenge))).toBe(hexOf(world.challenges[0]));
     expect(hexOf(new Uint8Array(check.uid)).toUpperCase()).toBe(UID_HEX);
     expect(check.now).toBe(1_800_000_000n);
@@ -110,7 +118,7 @@ describe('a Check answer', () => {
   it('is accepted when the Seal signed it fresh over this challenge about this card', async () => {
     world.sealedCard(5n * GHOST);
     const relayed = await checkWithSeal('https://seal.example', world.native);
-    const verdict = verifyCheckAnswer(world.core, world.trusted()!, relayed, { list: PINNED });
+    const verdict = verifyCheckAnswer(world.core, world.trustedSeal()!, relayed, { list: PINNED });
     expect(verdict).toEqual({
       ok: true,
       answer: expect.objectContaining({ state: 'sealed', amountWei: 5n * GHOST, uid: UID_HEX, pinRequired: false }),
@@ -121,7 +129,7 @@ describe('a Check answer', () => {
     world.sealedCard(5n * GHOST);
     world.seal.tamper = 'bad-signature';
     const relayed = await checkWithSeal('https://seal.example', world.native);
-    const verdict = verifyCheckAnswer(world.core, world.trusted()!, relayed, { list: PINNED });
+    const verdict = verifyCheckAnswer(world.core, world.trustedSeal()!, relayed, { list: PINNED });
     expect(verdict).toEqual({ ok: false, refusal: 'bad-signature' });
     expect(JSON.stringify(verdict, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v))).not.toMatch(/5000000000000000000/);
   });
@@ -130,7 +138,7 @@ describe('a Check answer', () => {
     world.sealedCard(5n * GHOST);
     world.seal.tamper = 'other-key';
     const relayed = await checkWithSeal('https://seal.example', world.native);
-    expect(verifyCheckAnswer(world.core, world.trusted()!, relayed, { list: PINNED })).toEqual({ ok: false, refusal: 'bad-signature' });
+    expect(verifyCheckAnswer(world.core, world.trustedSeal()!, relayed, { list: PINNED })).toEqual({ ok: false, refusal: 'bad-signature' });
   });
 
   it('replayed (an old Sealed answer over an earlier challenge) is refused', async () => {
@@ -140,7 +148,7 @@ describe('a Check answer', () => {
     world.card.state = 'opened';
     const fresh = await checkWithSeal('https://seal.example', world.native);
     const replayed = { ...fresh, answer: old.answer, signature: old.signature };
-    expect(verifyCheckAnswer(world.core, world.trusted()!, replayed, { list: PINNED })).toEqual({
+    expect(verifyCheckAnswer(world.core, world.trustedSeal()!, replayed, { list: PINNED })).toEqual({
       ok: false,
       refusal: 'wrong-challenge',
     });
@@ -153,31 +161,31 @@ describe('a Check answer', () => {
     world.sealedCard(5n * GHOST);
     world.seal.tamper = 'expired';
     const relayed = await checkWithSeal('https://seal.example', world.native);
-    expect(verifyCheckAnswer(world.core, world.trusted()!, relayed, { list: PINNED })).toEqual({ ok: false, refusal: 'expired' });
+    expect(verifyCheckAnswer(world.core, world.trustedSeal()!, relayed, { list: PINNED })).toEqual({ ok: false, refusal: 'expired' });
 
     world.seal.tamper = null;
     const fresh = await checkWithSeal('https://seal.example', world.native);
     const later = { list: PINNED, now: () => Date.now() + 121_000 };
-    expect(verifyCheckAnswer(world.core, world.trusted()!, fresh, later)).toEqual({ ok: false, refusal: 'expired' });
+    expect(verifyCheckAnswer(world.core, world.trustedSeal()!, fresh, later)).toEqual({ ok: false, refusal: 'expired' });
   });
 
   it('from Seal code that is not pinned is refused', async () => {
     world.sealedCard(5n * GHOST);
     const relayed = await checkWithSeal('https://seal.example', world.native);
-    expect(verifyCheckAnswer(world.core, world.trusted()!, relayed, { list: PINNED_MEASUREMENTS })).toEqual({
+    expect(verifyCheckAnswer(world.core, world.trustedSeal()!, relayed, { list: PINNED_MEASUREMENTS })).toEqual({
       ok: false,
       refusal: 'not-pinned',
     });
     world.seal.tamper = 'other-measurement';
     const other = await checkWithSeal('https://seal.example', world.native);
-    expect(verifyCheckAnswer(world.core, world.trusted()!, other, { list: PINNED })).toEqual({ ok: false, refusal: 'wrong-measurement' });
+    expect(verifyCheckAnswer(world.core, world.trustedSeal()!, other, { list: PINNED })).toEqual({ ok: false, refusal: 'wrong-measurement' });
   });
 
   it('is refused when the core cannot check it', async () => {
     world.sealedCard(5n * GHOST);
     const relayed = await checkWithSeal('https://seal.example', world.native);
     const broken = { ...world.core, verifySealAnswer: () => { throw new Error('core gone'); } } as unknown as typeof world.core;
-    expect(verifyCheckAnswer(broken, world.trusted()!, relayed, { list: PINNED })).toEqual({ ok: false, refusal: 'core-failed' });
+    expect(verifyCheckAnswer(broken, world.trustedSeal()!, relayed, { list: PINNED })).toEqual({ ok: false, refusal: 'core-failed' });
   });
 });
 

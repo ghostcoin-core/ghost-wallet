@@ -31,3 +31,14 @@ intptr_t ghost_wallet_seal_open_copy_seed(uint8_t *out, uintptr_t capacity);
 /// Gives the core back an Open phone key seed kept in the Keychain. Returns 0,
 /// -2 when `length` is not 64, -3 for a null pointer.
 intptr_t ghost_wallet_seal_open_restore_seed(const uint8_t *seed, uintptr_t length);
+
+// The C bridge of core/src/seal_home_region.rs: the home region of a Sealed
+// card, chosen exactly as the Seal chooses it. Only the native relay calls
+// it; JavaScript never chooses a region.
+
+/// The index of the card's home region in `ids`: the ordered region ids as
+/// one UTF-8 buffer of `ids_len` bytes, one id per line. `uid` is the card's
+/// UID (`uid_len` bytes, 7 for a card). Returns the index, -1 for none (an
+/// empty list, a UID that is not 7 bytes, an empty or duplicate id), -3 for a
+/// null pointer.
+intptr_t ghost_wallet_seal_home_region(const uint8_t *uid, uintptr_t uid_len, const uint8_t *ids, uintptr_t ids_len);

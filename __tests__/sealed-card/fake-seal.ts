@@ -8,15 +8,40 @@
 // fake core checks answers in the order core/src/seal_answer.rs does. The
 // fake relay behaves like ios/SealRelay.swift: it makes the challenge, carries
 // the flow, refuses an answer of another flow, challenge or card, and hands an
-// Open's release to the core, never to JavaScript.
+// Open's release to the core, never to JavaScript. Called with no Seal
+// address, it sends the flow to the card's home region of the list it was
+// handed (`setSealRegions`), and names that region in its result; the home
+// regions come from a table of the fixed vectors the Rust core is tested
+// against (core/tests/seal_home_region.rs), not from a hash in JavaScript.
 import type { SealBindings, CoreSealAnswerCheck, CoreSealAnswerVerdict } from '../../modules/ghost-core';
-import type { GhostNfcSealNative, NativeSealCheck } from '../../modules/ghost-nfc/relay';
+import type { GhostNfcSealRegionsNative } from '../../modules/ghost-nfc';
+import type { GhostNfcSealNative, NativeSealCheck, SealRegionAddress } from '../../modules/ghost-nfc/relay';
+import type { TrustedSeal } from '../../lib/seal/trusted-seal';
 
 export const FAKE_MEASUREMENT_HEX = '5e'.repeat(48);
 export const OTHER_MEASUREMENT_HEX = '6f'.repeat(48);
 export const FAKE_SEAL_URL = 'https://seal.example:8443';
+/** The one region of a single-region world. */
+export const FAKE_REGION = 'eu-central-1';
 export const UID_HEX = '04518DFAA96180';
 export const GHOST = 10n ** 18n;
+
+/** Three regions, in the Seal's release order. */
+export const THREE_REGIONS = ['us-east-1', 'eu-central-1', 'ap-southeast-1'] as const;
+
+/** The home region of each fixed vector card over `THREE_REGIONS` (core/tests/seal_home_region.rs). */
+export const HOME_VECTORS: readonly { uid: string; home: string }[] = [
+  { uid: '04518DFAA96180', home: 'eu-central-1' },
+  { uid: '0412345678ABCD', home: 'ap-southeast-1' },
+  { uid: '04FFFFFFFFFFFF', home: 'eu-central-1' },
+  { uid: '04000000000001', home: 'ap-southeast-1' },
+  { uid: '04A1B2C3D4E5F6', home: 'us-east-1' },
+];
+
+/** A fake region's address (test only). */
+export function regionUrl(id: string): string {
+  return `https://${id}.seal.example`;
+}
 
 /** The pinned list the tests give the app: one allowed build, the fake Seal's. */
 export const PINNED_JSON = JSON.stringify({
@@ -146,6 +171,10 @@ export class FakeSeal {
   pinTries = 0;
   /** Whatever the Seal was sent last, for the tests' look at what crossed. */
   lastRequest: Record<string, string> = {};
+  /** How many start requests reached this Seal. */
+  starts = 0;
+  /** This Seal is not the card's home: it refuses every start `wrong-region`, naming another region. */
+  wrongRegion = false;
 
   sign(answer: Uint8Array): { answer: Uint8Array; signature: Uint8Array } {
     const key = this.tamper === 'other-key' ? bytesOf('b2'.repeat(32)) : this.key;
@@ -316,7 +345,7 @@ export class World {
   keychain: Uint8Array | null = null;
   /** Challenges the relay sent, in order. */
   challenges: Uint8Array[] = [];
-  native: GhostNfcSealNative;
+  native: GhostNfcSealNative & GhostNfcSealRegionsNative;
   calls: string[] = [];
   /** Run before a flow resolves, to hold it (the spinner tests). */
   gate: Promise<void> | null = null;
@@ -327,48 +356,120 @@ export class World {
     this.native = this.makeNative();
   }
 
-  /** How many times a card flow asked for the Seal's attestation to be checked again. */
+  /** How many times a card flow asked for the Seals' attestations to be checked again. */
   refreshes = 0;
 
-  trusted() {
-    return this.noSeal
-      ? null
-      : {
-          url: FAKE_SEAL_URL,
-          verifyingKey: this.seal.key,
-          measurement: this.seal.measurement,
-          kemKey: new Uint8Array(1184).fill(0x4b),
-          tlsCertSha256: new Uint8Array(32).fill(0x7e),
-        };
+  /** The listed regions, in the Seal's release order (what `SEAL_REGIONS` would hold). */
+  regions: SealRegionAddress[] = [{ id: FAKE_REGION, url: FAKE_SEAL_URL }];
+  /** Each region's Seal; the one region of a single-region world is `seal`. */
+  regionSeals = new Map<string, FakeSeal>([[FAKE_REGION, this.seal]]);
+  /** Regions whose attestation fails now. */
+  unverified = new Set<string>();
+  /** The region list the native relay holds (`setSealRegions`); null until it is handed one. */
+  nativeRegions: SealRegionAddress[] | null = null;
+  /** The region each relay call ran in, in order (`""` for a typed address). */
+  regionsUsed: string[] = [];
+  /** The Seal serving the flow being relayed. */
+  private serving: FakeSeal = this.seal;
+
+  /** Lists `ids` as the regions, each with a Seal of its own key, all with the same pinned build. */
+  useRegions(ids: readonly string[]): void {
+    this.regions = ids.map((id) => ({ id, url: regionUrl(id) }));
+    this.regionSeals = new Map<string, FakeSeal>(
+      ids.map((id, i): [string, FakeSeal] => {
+        const seal = new FakeSeal();
+        seal.key = bytesOf((0xa1 + i).toString(16).padStart(2, '0').repeat(32));
+        return [id, seal];
+      }),
+    );
+    this.seal = this.regionSeals.get(ids[0])!;
   }
 
-  /** What `refreshTrustedSeal` gives a card flow: the Seal as the attestation says now. */
-  refreshed() {
+  /** The Seal of `region` (test only). */
+  sealOf(region: string): FakeSeal {
+    const seal = this.regionSeals.get(region);
+    if (!seal) {
+      throw new Error(`no fake Seal for ${region}`);
+    }
+    return seal;
+  }
+
+  /** The verified Seal of `region` (the first listed by default), or null when its attestation fails now. */
+  trustedSeal(region: string = this.regions[0]?.id ?? ''): TrustedSeal | null {
+    const listed = this.regions.find((r) => r.id === region);
+    const seal = this.regionSeals.get(region);
+    if (this.noSeal || !listed || !seal || this.unverified.has(region)) {
+      return null;
+    }
+    return {
+      region,
+      url: listed.url,
+      verifyingKey: seal.key,
+      measurement: seal.measurement,
+      kemKey: new Uint8Array(1184).fill(0x4b),
+      tlsCertSha256: new Uint8Array(32).fill(0x7e),
+    };
+  }
+
+  /** Every verified Seal now, by region id. */
+  trusted(): Map<string, TrustedSeal> {
+    const seals = new Map<string, TrustedSeal>();
+    for (const region of this.regions) {
+      const seal = this.trustedSeal(region.id);
+      if (seal) {
+        seals.set(region.id, seal);
+      }
+    }
+    return seals;
+  }
+
+  /**
+   * What `refreshTrustedSeals` gives a card flow: it hands the native relay
+   * the list first, then gives the Seals as their attestations say now.
+   */
+  refreshed(): Map<string, TrustedSeal> {
     this.refreshes += 1;
+    this.nativeRegions = this.regions.map((r) => ({ ...r }));
     return this.trusted();
   }
 
   /** Puts a fresh card, set up and empty, in the field. */
-  newCard(): FakeCard {
+  newCard(uid: string = UID_HEX): FakeCard {
     this.card = new FakeCard();
+    this.card.uid = bytesOf(uid);
     return this.card;
   }
 
   /** Makes the card Sealed with `amountWei`, as a confirmed Fill leaves it. */
-  sealedCard(amountWei: bigint, pin: string | null = null): FakeCard {
-    const card = this.newCard();
+  sealedCard(amountWei: bigint, pin: string | null = null, uid: string = UID_HEX): FakeCard {
+    const card = this.newCard(uid);
     card.state = 'sealed';
     card.keyPresent = true;
     card.amountWei = amountWei;
     card.coin = fakeHash(Uint8Array.from([1, 2, 3]));
     card.pin = pin;
     card.tries = pin ? 5 : 0;
-    this.seal.paid = true;
+    for (const seal of this.regionSeals.values()) {
+      seal.paid = true;
+    }
     return card;
   }
 
+  /** The card's home region of `list`: the only one, or the fixed vectors' answer over three. */
+  private homeOf(list: readonly SealRegionAddress[]): string {
+    if (list.length === 1) {
+      return list[0].id;
+    }
+    const uid = hexOf(this.card.uid).toUpperCase();
+    const vector = HOME_VECTORS.find((v) => v.uid === uid);
+    if (!vector || list.map((r) => r.id).join() !== THREE_REGIONS.join()) {
+      throw new Error('test: no home vector for this card and list');
+    }
+    return vector.home;
+  }
+
   private answer(kind: 1 | 2 | 3, challenge: Uint8Array, fields: Partial<Body>): { answer: Uint8Array; signature: Uint8Array } {
-    const seal = this.seal;
+    const seal = this.serving;
     if (seal.tamper === 'replay' && seal.signed.length > 0) {
       // An old answer, signed over an earlier challenge.
       return seal.signed[0];
@@ -399,7 +500,7 @@ export class World {
   /** seal/src/flows.rs `check`, with the chain status check installed. */
   private check(challenge: Uint8Array) {
     const card = this.card;
-    const journaled = this.seal.opens.get(hexOf(card.uid));
+    const journaled = this.serving.opens.get(hexOf(card.uid));
     if (journaled || card.state === 'opening' || card.state === 'opened') {
       const state = card.state === 'opened' ? 3 : 2;
       return this.answer(1, challenge, { state, coin: card.coin, amountWei: card.amountWei });
@@ -416,13 +517,13 @@ export class World {
   }
 
   private chainStatus() {
-    if (this.seal.chainDown) {
+    if (this.serving.chainDown) {
       throw new Refused('ERR_SEAL_CANT_CHECK');
     }
-    if (this.seal.spent) {
+    if (this.serving.spent) {
       throw new Refused('ERR_SEAL_SPENT');
     }
-    if (!this.seal.paid) {
+    if (!this.serving.paid) {
       throw new Refused('ERR_SEAL_FILLING');
     }
   }
@@ -434,15 +535,15 @@ export class World {
     if (card.state !== 'empty') {
       throw new Refused('ERR_SEAL_WRONG_STATE');
     }
-    let pending = this.seal.fills.get(uid);
+    let pending = this.serving.fills.get(uid);
     if (card.keyPresent) {
       if (!pending || pending.amountWei !== amountWei || pending.pin !== pin) {
         throw new Refused('ERR_SEAL_FILL_PENDING');
       }
     } else {
-      const n = this.seal.fills.size + 1;
+      const n = this.serving.fills.size + 1;
       pending = { commitData: new Uint8Array(430).map((_, i) => (i * 7 + n) & 0xff), amountWei, pin };
-      this.seal.fills.set(uid, pending);
+      this.serving.fills.set(uid, pending);
       card.keyPresent = true;
       card.amountWei = amountWei;
       card.coin = fakeHash(pending.commitData);
@@ -474,7 +575,7 @@ export class World {
   private open(challenge: Uint8Array, phoneKeyHex: string, pin: string | null) {
     const card = this.card;
     const uid = hexOf(card.uid);
-    const journaled = this.seal.opens.get(uid);
+    const journaled = this.serving.opens.get(uid);
     if (journaled !== undefined) {
       if (journaled !== phoneKeyHex) {
         throw new Refused('ERR_SEAL_REFUSED');
@@ -492,12 +593,12 @@ export class World {
         }
         // The try is counted on the card before the PIN is compared.
         card.tries -= 1;
-        this.seal.pinTries += 1;
+        this.serving.pinTries += 1;
         if (pin !== card.pin) {
           throw new Refused('ERR_SEAL_WRONG_PIN');
         }
       }
-      this.seal.opens.set(uid, phoneKeyHex);
+      this.serving.opens.set(uid, phoneKeyHex);
       card.state = 'opening';
     }
     card.state = 'opened';
@@ -515,16 +616,35 @@ export class World {
     name: string,
     kind: 1 | 2 | 3,
     run: (challenge: Uint8Array) => { answer: Uint8Array; signature: Uint8Array; commitData?: Uint8Array; release?: Uint8Array },
+    url: string,
+    request: Record<string, string>,
   ): Promise<NativeSealCheck & { commitData?: string }> {
     this.calls.push(name);
+    // A home-region flow with no list sends nothing and opens no card sheet.
+    const home = url === '';
+    if (home && (!this.nativeRegions || this.nativeRegions.length === 0)) {
+      throw new Refused('ERR_SEAL_UNREACHABLE');
+    }
     if (this.gate) {
       await this.gate;
     }
     if (this.cancel) {
       throw new Refused('ERR_NFC_CANCELLED');
     }
-    if (this.seal.offline) {
+    // The card's UID is read; the one Seal of this tap is chosen now, once.
+    const region = home ? this.homeOf(this.nativeRegions!) : '';
+    const seal = home ? this.sealOf(region) : this.seal;
+    this.regionsUsed.push(region);
+    this.serving = seal;
+    seal.lastRequest = { ...request, region };
+    if (seal.offline) {
       throw new Refused('ERR_SEAL_UNREACHABLE');
+    }
+    // The one start request of this tap.
+    seal.starts += 1;
+    if (seal.wrongRegion) {
+      // Refused before any session, card command or journal write; the region it names is never followed.
+      throw new Refused('ERR_SEAL_WRONG_REGION');
     }
     if (!this.card.ghost) {
       throw new Refused('ERR_SEAL_NOT_GHOST_CARD');
@@ -562,31 +682,28 @@ export class World {
         { kind: 'card', ms: 10 },
       ],
       totalMs: 50,
+      region,
       ...(done.commitData ? { commitData: hexOf(done.commitData) } : {}),
     };
   }
 
-  private makeNative(): GhostNfcSealNative {
+  private makeNative(): GhostNfcSealNative & GhostNfcSealRegionsNative {
     return {
       isSupported: () => this.nfc,
-      relayCheck: (url) => {
-        this.seal.lastRequest = { url };
-        return this.relay('check', 1, (challenge) => this.check(challenge));
+      setSealRegions: (regionsJson) => {
+        this.nativeRegions = JSON.parse(regionsJson) as SealRegionAddress[];
+        return true;
       },
-      relayFill: (url, _alert, amountWei, pin) => {
-        this.seal.lastRequest = { url, amountWei, pin };
-        return this.relay('fill', 2, (challenge) => this.fill(challenge, BigInt(amountWei), pin === '' ? null : pin)) as Promise<
-          NativeSealCheck & { commitData: string }
-        >;
-      },
-      relayFillConfirm: (url) => {
-        this.seal.lastRequest = { url };
-        return this.relay('confirm', 2, (challenge) => this.confirm(challenge));
-      },
-      relayOpen: (url, _alert, phoneKey, pin) => {
-        this.seal.lastRequest = { url, phoneKey, pin };
-        return this.relay('open', 3, (challenge) => this.open(challenge, phoneKey, pin === '' ? null : pin));
-      },
+      relayCheck: (url) => this.relay('check', 1, (challenge) => this.check(challenge), url, { url }),
+      relayFill: (url, _alert, amountWei, pin) =>
+        this.relay('fill', 2, (challenge) => this.fill(challenge, BigInt(amountWei), pin === '' ? null : pin), url, {
+          url,
+          amountWei,
+          pin,
+        }) as Promise<NativeSealCheck & { commitData: string }>,
+      relayFillConfirm: (url) => this.relay('confirm', 2, (challenge) => this.confirm(challenge), url, { url }),
+      relayOpen: (url, _alert, phoneKey, pin) =>
+        this.relay('open', 3, (challenge) => this.open(challenge, phoneKey, pin === '' ? null : pin), url, { url, phoneKey, pin }),
       keepOpenKey: () => {
         if (!this.core.phoneKey) {
           throw new Error('no phone key');

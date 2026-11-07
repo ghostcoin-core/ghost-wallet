@@ -20,7 +20,21 @@
 // Nitro attestation that binds it. Every connection's leaf certificate is
 // hashed and compared with the pin of its host; with no pin, another hash or
 // no TLS at all, the connection is cancelled and the flow fails as
-// "seal-unreachable". Nothing here logs.
+// "seal-unreachable".
+//
+// Every card is served by one Seal region only, its home
+// (docs/sealed-card.md, "Home region"). JavaScript hands the relay the
+// ordered list of live regions (`SealRegions`, set by `setSealRegions`,
+// memory only). A flow called with an empty Seal address is sent to the
+// card's home region: once the card's UID is read, the native core chooses
+// it over the whole listed list (ghost_wallet_seal_home_region), never only
+// the regions that verified, and the flow runs against that region's address
+// alone. With no list, or no pin for that region's host, nothing is sent and
+// the flow fails as "seal-unreachable". A typed address runs against that one
+// Seal, as the speed screen does. Each tap makes exactly one start request,
+// to one Seal; a refusal ends the flow. A `wrong-region` refusal is never
+// followed: the region the Seal names is ignored, and nothing is sent again,
+// to that Seal or to any other. Nothing here logs.
 import ExpoModulesCore
 import Foundation
 import Security
@@ -76,6 +90,57 @@ final class SealPins {
       guard let byte = UInt8(String(decoding: digits[index..<index + 2], as: UTF8.self), radix: 16) else { return nil }
       out.append(byte)
       index += 2
+    }
+    return out
+  }
+}
+
+/// One live Seal region: its id (as the Seal's release list names it) and its https:// address.
+struct SealRegion {
+  let id: String
+  let url: URL
+}
+
+/// The ordered list of live Seal regions (memory only), exactly as the Seal's
+/// release lists them. Set by `setSealRegions` before a card flow; a list that
+/// does not parse clears it.
+final class SealRegions {
+  static let shared = SealRegions()
+
+  private let lock = NSLock()
+  private var regions: [SealRegion] = []
+
+  /// The list now.
+  var list: [SealRegion] {
+    lock.lock()
+    defer { lock.unlock() }
+    return regions
+  }
+
+  /// Keeps `json`, an array of `{ "id", "url" }` in the release's order.
+  /// False, with the list cleared, for anything else: an id that is empty,
+  /// listed twice or holds a line break, or an address that is not https://.
+  @discardableResult
+  func set(json: String) -> Bool {
+    let parsed = Self.parse(json)
+    lock.lock()
+    regions = parsed ?? []
+    lock.unlock()
+    return parsed != nil
+  }
+
+  private static func parse(_ json: String) -> [SealRegion]? {
+    guard let entries = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [Any] else { return nil }
+    var out: [SealRegion] = []
+    for entry in entries {
+      guard let fields = entry as? [String: Any],
+            let id = fields["id"] as? String,
+            let text = fields["url"] as? String,
+            !id.isEmpty, !id.contains("\n"), !id.contains("\r"),
+            !out.contains(where: { $0.id == id }),
+            let url = SealRelay.baseUrl(text)
+      else { return nil }
+      out.append(SealRegion(id: id, url: url))
     }
     return out
   }
@@ -173,6 +238,14 @@ final class SealWrongStateException: Exception {
 
 final class SealFillPendingException: Exception {
   override var reason: String { "This card is already being filled with another amount or PIN." }
+}
+
+/// The Seal serves this card from another region. Nothing the Seal sent is
+/// kept or shown, and the region it names is never followed.
+final class SealWrongRegionException: Exception {
+  override var reason: String {
+    "This card is served by another Seal region than the one this iPhone chose. Update Ghost Wallet, then try again."
+  }
 }
 
 final class SealRelay {
@@ -276,37 +349,68 @@ final class SealRelay {
     run(.check, sealUrl: sealUrl, alert: alert, promise: promise)
   }
 
-  /// Runs `flow` through the Seal at `sealUrl` on the next card tapped.
+  /// Where a flow goes: the one Seal of a typed address, or the card's home
+  /// region of the listed regions, chosen once the card's UID is read.
+  private enum Target {
+    case typed(URL)
+    case home([SealRegion])
+  }
+
+  /// Runs `flow` through the Seal at `sealUrl` on the next card tapped; an
+  /// empty `sealUrl` runs it through the card's home region.
   func run(_ flow: Flow, sealUrl: String, alert: String, promise: Promise) {
     queue.async {
-      guard let base = Self.baseUrl(sealUrl) else {
-        promise.reject(SealAddressException())
-        return
+      let target: Target
+      if sealUrl.trimmingCharacters(in: .whitespaces).isEmpty {
+        // The whole listed list, as it is now: with none, nothing is sent.
+        let regions = SealRegions.shared.list
+        guard !regions.isEmpty else {
+          promise.reject(SealUnreachableException())
+          return
+        }
+        target = .home(regions)
+      } else {
+        guard let base = Self.baseUrl(sealUrl) else {
+          promise.reject(SealAddressException())
+          return
+        }
+        target = .typed(base)
       }
       guard !self.running else {
         promise.reject(SealRelayBusyException())
         return
       }
-      // No pinned certificate for this Seal: no connection at all.
-      guard SealPins.shared.allows(base) else {
-        promise.reject(SealUnreachableException())
-        return
+      if case let .typed(base) = target {
+        // No pinned certificate for this Seal: no connection at all.
+        guard SealPins.shared.allows(base) else {
+          promise.reject(SealUnreachableException())
+          return
+        }
       }
       guard let challenge = Self.randomBytes(32) else {
         promise.reject(SealUnreachableException())
         return
       }
       self.running = true
-      let run = Run(flow: flow, base: base, challenge: challenge, promise: promise)
       self.reader.begin(alert: alert) { result in
         self.queue.async {
           switch result {
           case let .failure(error):
-            self.finish(run, error: error)
+            self.end(promise, error: error)
           case let .success(uid):
+            // One Seal per tap, chosen here once. A region with no pin is no
+            // connection at all: nothing is sent, and no other region is tried.
+            guard let destination = Self.destination(target, uid: uid),
+                  SealPins.shared.allows(destination.base)
+            else {
+              self.end(promise, error: SealUnreachableException())
+              return
+            }
+            let run = Run(flow: flow, base: destination.base, region: destination.region, challenge: challenge, promise: promise)
             run.uid = uid
             run.started = DispatchTime.now().uptimeNanoseconds
             self.reader.update(alert: flow.working)
+            // The one start request of this tap.
             self.post(run, path: flow.path, body: flow.startBody(uid: uid, challenge: challenge))
           }
         }
@@ -314,11 +418,43 @@ final class SealRelay {
     }
   }
 
+  /// The Seal a flow is sent to: a typed address as it is (no region), or the
+  /// card's home region, chosen by the native core over the whole listed list.
+  private static func destination(_ target: Target, uid: Data) -> (base: URL, region: String)? {
+    switch target {
+    case let .typed(base):
+      return (base, "")
+    case let .home(regions):
+      guard let home = homeRegion(uid: uid, regions: regions) else { return nil }
+      return (home.url, home.id)
+    }
+  }
+
+  /// The card's home region of `regions` (ghost_wallet_seal_home_region, the
+  /// Seal's own rule), or nil when the core finds none.
+  private static func homeRegion(uid: Data, regions: [SealRegion]) -> SealRegion? {
+    let ids = Data(regions.map(\.id).joined(separator: "\n").utf8)
+    let index = uid.withUnsafeBytes { uidBytes in
+      ids.withUnsafeBytes { idBytes in
+        ghost_wallet_seal_home_region(
+          uidBytes.bindMemory(to: UInt8.self).baseAddress,
+          UInt(uidBytes.count),
+          idBytes.bindMemory(to: UInt8.self).baseAddress,
+          UInt(idBytes.count)
+        )
+      }
+    }
+    guard index >= 0, index < regions.count else { return nil }
+    return regions[index]
+  }
+
   // MARK: The relay loop (on `queue`)
 
   private final class Run {
     let flow: Flow
     let base: URL
+    /// The id of the region the flow runs in; empty for a typed address.
+    let region: String
     let challenge: Data
     let promise: Promise
     var uid = Data()
@@ -327,9 +463,10 @@ final class SealRelay {
     var steps = 0
     var rounds: [[String: Any]] = []
 
-    init(flow: Flow, base: URL, challenge: Data, promise: Promise) {
+    init(flow: Flow, base: URL, region: String, challenge: Data, promise: Promise) {
       self.flow = flow
       self.base = base
+      self.region = region
       self.challenge = challenge
       self.promise = promise
     }
@@ -407,6 +544,7 @@ final class SealRelay {
         "signature": Self.hex(signature),
         "rounds": run.rounds,
         "totalMs": run.elapsedMs,
+        "region": run.region,
       ]
       switch run.flow {
       case .fill:
@@ -456,10 +594,15 @@ final class SealRelay {
   }
 
   private func finish(_ run: Run, error: Exception) {
+    end(run.promise, error: error)
+  }
+
+  /// Ends the tap with `error`: nothing more is sent for it.
+  private func end(_ promise: Promise, error: Exception) {
     let cancelled = error is NfcCancelledException || error is NfcUnavailableException
     reader.end(alert: nil, error: cancelled ? nil : error.reason)
     running = false
-    run.promise.reject(error)
+    promise.reject(error)
   }
 
   // MARK: Helpers
@@ -497,11 +640,13 @@ final class SealRelay {
     case "spent": return SealSpentException()
     case "wrong-state": return SealWrongStateException()
     case "fill-pending": return SealFillPendingException()
+    // The `homeRegion` the Seal names is ignored: the relay never follows it.
+    case "wrong-region": return SealWrongRegionException()
     default: return SealRefusedException((fields["message"] as? String) ?? "no reason given")
     }
   }
 
-  private static func baseUrl(_ text: String) -> URL? {
+  static func baseUrl(_ text: String) -> URL? {
     let trimmed = text.trimmingCharacters(in: .whitespaces)
     guard let url = URL(string: trimmed.hasSuffix("/") ? trimmed : trimmed + "/"),
           url.scheme?.lowercased() == "https",

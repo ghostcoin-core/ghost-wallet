@@ -30,8 +30,8 @@ jest.mock(
   { virtual: true },
 );
 jest.mock('../../lib/seal/trusted-seal', () => ({
-  trustedSeal: () => require('./fake-seal').world.current.trusted(),
-  refreshTrustedSeal: async () => require('./fake-seal').world.current.refreshed(),
+  trustedSeal: (region: string) => require('./fake-seal').world.current.trustedSeal(region),
+  refreshTrustedSeals: async () => require('./fake-seal').world.current.refreshed(),
 }));
 jest.mock('../../lib/seal/pinned-measurements', () => {
   const actual = jest.requireActual('../../lib/seal/pinned-measurements');

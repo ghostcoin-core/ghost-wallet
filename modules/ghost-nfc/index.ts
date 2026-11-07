@@ -55,6 +55,18 @@ export type GhostNfcSealPinNative = {
   setSealPin(sealUrl: string, certSha256: string): void;
 };
 
+/**
+ * The relay's list of live Seal regions (ios/SealRelay.swift), beside the pin. JavaScript only
+ * hands the list over; the native relay chooses each card's home region from it.
+ */
+export type GhostNfcSealRegionsNative = {
+  /**
+   * Keeps `regionsJson`, the ordered list `[{ "id", "url" }]`, in native memory for the relay's
+   * home-region flows. False, with the list cleared, for a list that does not parse.
+   */
+  setSealRegions(regionsJson: string): boolean;
+};
+
 /** Thrown when the person closes the card sheet. */
 export class CardCancelled extends Error {
   constructor() {
