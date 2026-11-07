@@ -15,7 +15,10 @@ use ghost_seal::attestation::{
     DEFAULT_MAX_AGE_SECS, NitroVerifier, NsmDevice, NsmSource, document_hash, encode_cose_sign1,
 };
 use ghost_seal::measurements::{MeasurementList, MeasurementRefused};
-use ghost_seal::phone_attestation::{self, ANSWER_KEY_BYTES, KEM_KEY_BYTES, PhoneAttestationRejected};
+use ghost_seal::phone_attestation::{
+    self, ANSWER_KEY_BYTES, CERTIFICATE_HASH_BYTES, KEM_KEY_BYTES, PhoneAttestationRejected,
+};
+use ghost_seal::primitives::sha3_256;
 use ghost_seal::{Clock, MasterKey, PhoneSecret};
 
 const FIXTURE: &str = include_str!("fixtures/measurements.json");
@@ -382,45 +385,76 @@ fn kem_key() -> Vec<u8> {
     PhoneSecret::from_seed(&mut [0x24; 64]).public_key()
 }
 
+/// The SHA-256 of a TLS certificate the tests' Seal serves (a stand-in
+/// value: the hash is all the attestation carries).
+const CERT_HASH: [u8; 32] = [0xc3; 32];
+
 #[test]
-fn a_phone_attestation_binds_both_keys_and_the_challenge() {
+fn a_phone_attestation_binds_both_keys_the_certificate_and_the_challenge() {
     let authority = Rc::new(Authority::new(0x21));
     let list = MeasurementList::parse(FIXTURE).unwrap();
     let (answer, kem) = (answer_key(), kem_key());
     assert_eq!((answer.len(), kem.len()), (ANSWER_KEY_BYTES, KEM_KEY_BYTES));
     let challenge = [0x5a; 32];
     let mut source = AuthoritySource::new(authority.clone(), allowed_new());
-    let bytes = phone_attestation::make(&mut source, &answer, &kem, &challenge).unwrap();
-    let seal = phone_attestation::verify(&bytes, &challenge, &authority.verifier(), &list, NOW).unwrap();
+    let bytes = phone_attestation::make(&mut source, &answer, &kem, &CERT_HASH, &challenge).unwrap();
+
+    // The layout: GPA2, the document's length, the document, both keys and the certificate hash.
+    assert_eq!(&bytes[..4], b"GPA2");
+    let length = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    assert_eq!(bytes.len(), 8 + length + ANSWER_KEY_BYTES + KEM_KEY_BYTES + CERTIFICATE_HASH_BYTES);
+    assert_eq!(&bytes[8 + length..8 + length + ANSWER_KEY_BYTES], &answer[..]);
+    assert_eq!(&bytes[8 + length + ANSWER_KEY_BYTES..bytes.len() - CERTIFICATE_HASH_BYTES], &kem[..]);
+    assert_eq!(&bytes[bytes.len() - CERTIFICATE_HASH_BYTES..], &CERT_HASH[..]);
+
+    let seal = phone_attestation::verify(&bytes, &challenge, &CERT_HASH, &authority.verifier(), &list, NOW).unwrap();
     assert_eq!(seal.answer_key, answer);
     assert_eq!(seal.kem_key, kem);
+    assert_eq!(seal.certificate_hash, CERT_HASH);
     assert_eq!(seal.build.name, "seal-2026-11-01");
-    assert_eq!(seal.document.user_data.as_deref(), Some(&phone_attestation::binding(&answer, &kem, &challenge)[..]));
+    // user_data = SHA3-256(domain || verifying key || encapsulation key || certificate hash || challenge).
+    let expected = sha3_256(&[b"ghost-seal/v2/phone-attestation", &answer, &kem, &CERT_HASH, &challenge]);
+    assert_eq!(phone_attestation::binding(&answer, &kem, &CERT_HASH, &challenge), expected);
+    assert_eq!(seal.document.user_data.as_deref(), Some(&expected[..]));
 
     // Another challenge: an old attestation replayed.
     assert_eq!(
-        phone_attestation::verify(&bytes, &[0x5b; 32], &authority.verifier(), &list, NOW),
+        phone_attestation::verify(&bytes, &[0x5b; 32], &CERT_HASH, &authority.verifier(), &list, NOW),
         Err(PhoneAttestationRejected::Binding)
     );
-    // A key swapped after the document was made.
-    let mut swapped = bytes.clone();
-    let at = swapped.len() - KEM_KEY_BYTES - 1;
-    swapped[at] ^= 0x01;
+    // The connection used another certificate than the attested one: a man in the middle.
     assert_eq!(
-        phone_attestation::verify(&swapped, &challenge, &authority.verifier(), &list, NOW),
-        Err(PhoneAttestationRejected::Binding)
+        phone_attestation::verify(&bytes, &challenge, &[0xc4; 32], &authority.verifier(), &list, NOW),
+        Err(PhoneAttestationRejected::Certificate)
     );
+    // A key or the certificate hash swapped after the document was made.
+    for at in [8 + length + 7, bytes.len() - CERTIFICATE_HASH_BYTES - 1, bytes.len() - 1] {
+        let mut swapped = bytes.clone();
+        swapped[at] ^= 0x01;
+        let connection_hash: [u8; 32] = swapped[swapped.len() - 32..].try_into().unwrap();
+        assert_eq!(
+            phone_attestation::verify(&swapped, &challenge, &connection_hash, &authority.verifier(), &list, NOW),
+            Err(PhoneAttestationRejected::Binding)
+        );
+    }
     // The app's pinned list is empty until the first build is published: every Seal is refused.
     assert_eq!(
-        phone_attestation::verify(&bytes, &challenge, &authority.verifier(), &MeasurementList::empty(), NOW),
+        phone_attestation::verify(&bytes, &challenge, &CERT_HASH, &authority.verifier(), &MeasurementList::empty(), NOW),
         Err(PhoneAttestationRejected::Measurement(MeasurementRefused::NotListed))
     );
     assert!(matches!(
-        phone_attestation::verify(&bytes, &challenge, &Authority::new(0x51).verifier(), &list, NOW),
+        phone_attestation::verify(&bytes, &challenge, &CERT_HASH, &Authority::new(0x51).verifier(), &list, NOW),
         Err(PhoneAttestationRejected::Document(AttestationRejected::WrongRoot))
     ));
     assert!(matches!(
-        phone_attestation::verify(&bytes[..bytes.len() - 1], &challenge, &authority.verifier(), &list, NOW),
+        phone_attestation::verify(&bytes[..bytes.len() - 1], &challenge, &CERT_HASH, &authority.verifier(), &list, NOW),
+        Err(PhoneAttestationRejected::Malformed(_))
+    ));
+    // The old layout is not taken.
+    let mut old = bytes.clone();
+    old[..4].copy_from_slice(b"GPA1");
+    assert!(matches!(
+        phone_attestation::verify(&old, &challenge, &CERT_HASH, &authority.verifier(), &list, NOW),
         Err(PhoneAttestationRejected::Malformed(_))
     ));
 }
@@ -437,12 +471,12 @@ fn a_phone_attestation_from_a_revoked_or_unlisted_build_is_refused() {
         (pcrs(0, 0, 0), MeasurementRefused::DebugMode),
     ] {
         let mut source = AuthoritySource::new(authority.clone(), measured);
-        let bytes = phone_attestation::make(&mut source, &answer_key(), &kem_key(), &challenge).unwrap();
+        let bytes = phone_attestation::make(&mut source, &answer_key(), &kem_key(), &CERT_HASH, &challenge).unwrap();
         assert_eq!(
-            phone_attestation::verify(&bytes, &challenge, &authority.verifier(), &list, NOW),
+            phone_attestation::verify(&bytes, &challenge, &CERT_HASH, &authority.verifier(), &list, NOW),
             Err(PhoneAttestationRejected::Measurement(why))
         );
     }
     let mut source = AuthoritySource::new(authority, allowed_old());
-    assert!(phone_attestation::make(&mut source, &[0; 10], &kem_key(), &challenge).is_err());
+    assert!(phone_attestation::make(&mut source, &[0; 10], &kem_key(), &CERT_HASH, &challenge).is_err());
 }

@@ -193,14 +193,22 @@ offline, and the running enclaves have been given the signed list
 
 ## Attestation for phones (`seal/src/phone_attestation.rs`)
 
-`GPA1` || document length (u32 BE) || Nitro document || the Seal's ML-DSA-65
-verifying key (1952, derived from M as every answer signature is) || the
-enclave's ML-KEM-768 encapsulation key (1184). The document's `user_data` is
-SHA3-256(`ghost-seal/v1/phone-attestation` || verifying key || encapsulation
-key || the phone's 32-byte challenge). `verify` is the reference check: the
-document against the pinned root, its PCRs against the pinned list, the
-binding, and both keys well formed. The app's own check, in native code, is a
-later step.
+`GPA2` || document length (u32 BE) || Nitro document || the Seal's ML-DSA-65
+verifying key (1952, derived from M as every answer signature is) || its
+ML-KEM-768 encapsulation key (1184) || the SHA-256 of the DER of the TLS
+certificate the enclave serves (32 bytes). The document's `user_data` is
+SHA3-256(`ghost-seal/v2/phone-attestation` || verifying key || encapsulation
+key || certificate hash || the phone's 32-byte challenge). `make` takes the
+certificate hash; `verify` is the reference check: the document against the
+pinned root, its PCRs against the pinned list, the binding, both keys well
+formed, and the certificate hash equal to the one the caller's connection
+used; it returns the hash with the keys. A phone attestation whose
+certificate hash differs from the certificate of the connection it came over
+is refused. (`GPA1`, without the certificate hash, is gone: nothing used it.)
+The app's own check, in native code, is a later step.
+
+A phone gets it either over TLS (`POST /v1/attestation`, below) or as a
+framed request on the service port.
 
 ## The parent proxy (`seal/src/proxy.rs`, `seal_proxy`)
 
@@ -244,8 +252,60 @@ loop, and a handler that panics leaves its worker running. The parent proxy
 likewise closes a connection it has no thread for instead of panicking. The
 handover a joining enclave makes has 60 seconds in all.
 
-Serving Check, Fill and Open to phones from the enclave (TLS ended inside the
-enclave) is a later step.
+## Serving phones (`seal/src/enclave_serve.rs`)
+
+One public port. The service port 5001 serves both phones and other
+enclaves; the first byte of a connection picks the protocol:
+
+- `0x16` (a TLS handshake record): TLS ended inside the enclave, then the
+  relay's HTTP routes (`docs/seal-relay.md`);
+- `0x00` (the top byte of a frame length of at most 64 KiB): the framed
+  protocol above (key share, phone attestation);
+- anything else: the connection is closed unanswered.
+
+The pool of 4 workers, the queue of 8, the 30 second connection time and the
+handover rules are the bounded service's above; a slow TLS handshake counts
+against the same connection time. The parent proxy still carries only
+ciphertext.
+
+### TLS inside the enclave (`seal/src/enclave_tls.rs`)
+
+`rustls` (exact-pinned, default features off, only `std` and its `ring`
+provider: no TLS 1.2 code and no other provider), TLS 1.3 only, no client
+certificate, no session tickets, no 0-RTT. At each start the enclave makes a
+fresh ECDSA P-256 key pair and a self-signed certificate (subject name
+`ghost-seal`, a fixed wide validity window so no clock is needed) with
+`rcgen` (exact-pinned, `ring` backend only). Both live in enclave memory only
+and are never written anywhere; a restart makes new ones. The key is
+transport authentication only and holds no GHOST: card traffic is already end
+to end between the chip and the Seal, and an Open's release is ML-KEM to the
+phone's key. The certificate is not trusted on a name: the phone trusts it
+only through `GPA2`, which binds its SHA-256 to the enclave's measurement, so
+a man in the middle cannot swap the phone key of an Open. No elliptic-curve
+code is written here. The `ring` crate's C and assembly are built with fixed
+flags and a file-prefix map, so `enclave/scripts/check-reproducible.sh` still
+gets the same binary twice.
+
+### The routes (`seal/src/relay_http.rs`)
+
+HTTP/1.1 heads are parsed with `httparse`, bodies (at most 4096 bytes) as
+JSON. The routes are the relay's (`/v1/check/start`, `/v1/fill/start`,
+`/v1/fill/confirm`, `/v1/open/start`, `/v1/relay/step`, `/v1/relay/abort`)
+plus `POST /v1/attestation` with `{ "challenge": "<64 hex digits>" }`, which
+answers `{ "status": "ok", "attestation": "<GPA2 as hex>" }`. No path, header
+or body is logged; the service log is a fixed set of events with no field for
+carried bytes.
+
+### Fail closed
+
+The flows are served only when the enclave holds M **and** a chain status
+check, a card registry and a durable journal (not a memory-only one) have been
+installed into it (`ServiceDeps`). The enclave program installs none of the
+three yet, so every flow request (start, step and abort) is answered HTTP 503
+`unavailable` with the message "This Seal is not ready to answer cards", and
+no card traffic is sent; the attestation route still works once M is held. A
+Seal built without the three is never reachable from the network. The tests
+install fakes for the three to prove the flows.
 
 ## What is still trusted
 
@@ -270,5 +330,7 @@ real PCR values (they need a Nitro-capable builder), the release key (made
 offline by the release owner; its public half goes into `RELEASE_KEY_HEX`
 before the first image is built, and its signature into
 `enclave/measurements.json` each time a build is published), the reproducibility check
-in CI, the enclave serving phones, and the app's check of the phone
-attestation.
+in CI, the three things the enclave needs before it answers a card (the chain
+check over the host's vsock port 5003, a durable sealed journal kept outside
+the enclave, and the card registry loaded into the enclave), and the app's
+check of the phone attestation and of the TLS certificate it binds.

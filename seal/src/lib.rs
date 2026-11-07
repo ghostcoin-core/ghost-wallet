@@ -19,7 +19,10 @@
 //! asking for attestation documents (`attestation`), the handover of M
 //! between attested enclaves, the only way M ever leaves one, and only
 //! encrypted to an attested copy (`key_share`), the document phones get
-//! (`phone_attestation`) and the parent proxy (`proxy`). Its design is in
+//! (`phone_attestation`), the parent proxy (`proxy`), and the relay served
+//! to phones from the enclave: its HTTP routes (`relay_http`), TLS ended
+//! inside the enclave (`enclave_tls`) and the service port that carries both
+//! TLS and the framed key-share protocol (`enclave_serve`). Its design is in
 //! `docs/seal-enclave.md`.
 //!
 //! The phone carries the Seal's card traffic (`relay`): each APDU and each
@@ -38,6 +41,10 @@ pub mod apdu;
 pub mod attestation;
 pub mod card_keys;
 pub mod chain_check;
+#[cfg(feature = "nitro")]
+pub mod enclave_serve;
+#[cfg(feature = "nitro")]
+pub mod enclave_tls;
 pub mod error;
 pub mod flows;
 pub mod journal;
@@ -54,6 +61,8 @@ pub mod proxy;
 pub mod record;
 pub mod registry;
 pub mod relay;
+#[cfg(feature = "nitro")]
+pub mod relay_http;
 pub mod release;
 pub mod secrets;
 pub mod session;
@@ -73,7 +82,9 @@ pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest
 pub use journal::{EntryKind, Journal, MemoryJournal};
 pub use record::CardState;
 pub use registry::{CardRegistry, FileRegistry, MemoryRegistry, RegistryEntry};
-pub use relay::{Relay, RelayError, RelayLimits, SessionId, Step};
+pub use relay::{
+    Finished, FlowStep, KeyMakerFactory, PaymentCheckFactory, Relay, RelayError, RelayLimits, SessionId, Step,
+};
 pub use setup::{SetupReport, SetupRequest, set_up_card};
 pub use release::PhoneSecret;
 pub use secrets::{MasterKey, PhantomKey, Pin};

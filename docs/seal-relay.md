@@ -27,9 +27,11 @@ the phone (and anyone between the phone and the Seal) sees only what the
 relay sees: commands and answers encrypted and MACed under session keys the
 phone never has.
 
-The protocol is implemented in `seal/src/relay.rs`, served over HTTP by the
-development test server (`seal/src/test_server.rs`), and carried on the phone
-by `modules/ghost-nfc/ios/SealRelay.swift`.
+The protocol is implemented in `seal/src/relay.rs`, served over HTTPS by the
+Seal's enclave (`seal/src/relay_http.rs`, TLS ended inside the enclave; see
+`docs/seal-enclave.md`, "Serving phones"), served for Check only by the
+development test server (below), and carried on the phone by
+`modules/ghost-nfc/ios/SealRelay.swift`.
 
 ## Sessions
 
@@ -116,8 +118,24 @@ A refusal: `{ "status": "error", "error": "<code>", "message": "<plain text>" }`
 | 422 | `card-dropped` | the Seal's flow stopped as a dropped connection |
 | 422 | `refused` | the Seal refused the card (wrong keys, a torn record, …) |
 | 503 | `busy` | too many sessions |
+| 503 | `unavailable` | the Seal is not ready to answer cards (the enclave only) |
 
 Messages never carry a key, a PIN or card traffic.
+
+The enclave answers every flow request (the starts, step and abort)
+`unavailable` with the message "This Seal is not ready to answer cards"
+until it holds M and a chain status check, a card registry and a durable
+journal are installed into it; it sends no card command before then.
+
+### The Seal's attestation (the enclave only)
+
+`POST /v1/attestation` with `{ "challenge": "<64 hex digits>" }` answers
+`{ "status": "ok", "attestation": "<GPA2 as hex>" }`: the Nitro attestation
+binding the Seal's ML-DSA-65 and ML-KEM-768 keys and the SHA-256 of the TLS
+certificate of this connection to its measurement and to the challenge
+(`docs/seal-enclave.md`, "Attestation for phones"). The phone trusts the
+certificate only when that hash equals the certificate it is connected to.
+Before the enclave holds M it is refused `unavailable`.
 
 ## What the phone checks
 
@@ -139,8 +157,9 @@ the relay.
 ## Fill, its confirmation and Open
 
 They use the same sessions, step requests, abort and answers as Check,
-started from their own paths. Serving them from the Seal is a later piece of
-work (the development test server answers Check only); the phone side is
+started from their own paths (`start_fill`, `start_confirm_fill` and
+`start_open` beside `start_check` in `seal/src/relay.rs`). The Seal's enclave
+serves them; the development test server answers Check only. The phone side is
 `modules/ghost-nfc/ios/SealRelay.swift` and `modules/ghost-nfc/relay.ts`.
 
 ### Start a Fill
