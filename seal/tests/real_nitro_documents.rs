@@ -359,15 +359,307 @@ fn the_decoder_reports_the_byte_of_the_item_that_breaks_a_rule() {
     // {1: 0, 1: 0}: the second key.
     let error = cbor::decode(&[0xa2, 0x01, 0x00, 0x01, 0x00]).unwrap_err();
     assert_eq!((error.reason, error.at), ("a map key appears twice", 3));
-    // An indefinite-length array.
-    let error = cbor::decode(&[0x82, 0x01, 0x9f, 0xff]).unwrap_err();
+    // An array of reserved length (additional information 30).
+    let error = cbor::decode(&[0x82, 0x01, 0x9e, 0xff]).unwrap_err();
     assert_eq!((error.reason, error.at), ("indefinite or reserved length", 2));
+    // A break in place of a map's value.
+    let error = cbor::decode(&[0x82, 0x01, 0xbf, 0x01, 0xff, 0xff]).unwrap_err();
+    assert_eq!((error.reason, error.at), ("a break outside an indefinite-length item", 4));
     // A half float.
     let error = cbor::decode(&[0x81, 0xf9, 0x3c, 0x00]).unwrap_err();
     assert_eq!((error.reason, error.at), ("a float or simple value", 1));
     // Text that is not UTF-8.
     let error = cbor::decode(&[0x82, 0x00, 0x62, 0xc3, 0x28]).unwrap_err();
     assert_eq!((error.reason, error.at), ("text is not UTF-8", 2));
+}
+
+// ---------------------------------------------------------------------------
+// Indefinite-length items, as the NSM's CBOR library writes them.
+
+/// An indefinite-length byte string of `bytes`, cut into chunks at `cuts`
+/// (with an empty chunk first).
+fn chunked_bytes(bytes: &[u8], cuts: &[usize]) -> Vec<u8> {
+    let mut out = vec![0x5f, 0x40];
+    let mut from = 0;
+    for &to in cuts.iter().chain([bytes.len()].iter()) {
+        out.extend(cbor::encode(&Value::Bytes(bytes[from..to].to_vec())));
+        from = to;
+    }
+    out.push(0xff);
+    out
+}
+
+/// A payload map written indefinite-length: the map itself, `pcrs` as an
+/// indefinite map, `cabundle` as an indefinite array with its second
+/// certificate an indefinite byte string, and `module_id` as an indefinite
+/// text string. Every other item as `cbor::encode` writes it.
+fn indefinite_payload(fields: &[(Value, Value)]) -> Vec<u8> {
+    let mut out = vec![0xbf];
+    for (key, value) in fields {
+        out.extend(cbor::encode(key));
+        let Value::Text(name) = key else { panic!("a payload key is text") };
+        match (name.as_str(), value) {
+            ("pcrs", Value::Map(pcrs)) => {
+                out.push(0xbf);
+                for (index, pcr) in pcrs {
+                    out.extend(cbor::encode(index));
+                    out.extend(cbor::encode(pcr));
+                }
+                out.push(0xff);
+            }
+            ("cabundle", Value::Array(certificates)) => {
+                out.push(0x9f);
+                for (i, certificate) in certificates.iter().enumerate() {
+                    match certificate {
+                        Value::Bytes(der) if i == 1 => out.extend(chunked_bytes(der, &[1, 200])),
+                        other => out.extend(cbor::encode(other)),
+                    }
+                }
+                out.push(0xff);
+            }
+            ("module_id", Value::Text(id)) => {
+                out.push(0x7f);
+                out.extend(cbor::encode(&Value::Text(id[..5].into())));
+                out.extend(cbor::encode(&Value::Text(String::new())));
+                out.extend(cbor::encode(&Value::Text(id[5..].into())));
+                out.push(0xff);
+            }
+            _ => out.extend(cbor::encode(value)),
+        }
+    }
+    out.push(0xff);
+    out
+}
+
+impl AwsShapedAuthority {
+    /// An untagged document carrying `payload` exactly as given, signed over
+    /// `signed` (the same bytes, unless a test says otherwise).
+    fn sign_payload(&self, payload: &[u8], signed: &[u8]) -> Vec<u8> {
+        let protected = es384_protected_header();
+        let signature: Signature = self.leaf_key.sign(&sig_structure(&protected, signed));
+        cbor::encode(&Value::Array(vec![
+            Value::Bytes(protected),
+            Value::Map(Vec::new()),
+            Value::Bytes(payload.to_vec()),
+            Value::Bytes(signature.to_bytes().to_vec()),
+        ]))
+    }
+}
+
+/// A real document's payload fields, with the test authority's chain and a
+/// time inside it in place of AWS's (which no test can sign for).
+fn real_fields_for_the_test_authority(real: &RealDocument, authority: &AwsShapedAuthority) -> Vec<(Value, Value)> {
+    let document = real.bytes();
+    let (start, length) = payload_span(&document);
+    let Ok(Value::Map(mut fields)) = cbor::decode(&document[start..start + length]) else {
+        panic!("{}: the payload decodes to a map", real.name)
+    };
+    for (key, value) in &mut fields {
+        let Value::Text(name) = key else { panic!("{}: a payload key is text", real.name) };
+        match name.as_str() {
+            "certificate" => *value = Value::Bytes(authority.leaf.clone()),
+            "cabundle" => *value = Value::Array(authority.bundle.iter().map(|c| Value::Bytes(c.clone())).collect()),
+            "timestamp" => *value = Value::Unsigned(NOW * 1000 + 417),
+            _ => {}
+        }
+    }
+    fields
+}
+
+#[test]
+fn a_real_document_with_an_indefinite_map_payload_verifies() {
+    let authority = aws_shaped();
+    for real in REAL {
+        let fields = real_fields_for_the_test_authority(real, &authority);
+        let definite = cbor::encode(&Value::Map(fields.clone()));
+        let indefinite = indefinite_payload(&fields);
+        // The shape the NSM wrote on real hardware: an indefinite map first.
+        assert_eq!(indefinite[0], 0xbf, "{}", real.name);
+        assert_eq!(definite[0], 0xa9, "{}", real.name);
+        assert_ne!(indefinite, definite, "{}", real.name);
+        // The same value either way.
+        assert_eq!(cbor::decode(&indefinite), cbor::decode(&definite), "{}", real.name);
+        assert_eq!(cbor::decode(&indefinite), Ok(Value::Map(fields.clone())), "{}", real.name);
+
+        let definite_document = authority.sign_payload(&definite, &definite);
+        let indefinite_document = authority.sign_payload(&indefinite, &indefinite);
+        let from_definite = authority.verifier().verify(&definite_document, NOW).unwrap();
+        let attested = authority
+            .verifier()
+            .verify(&indefinite_document, NOW)
+            .unwrap_or_else(|why| panic!("{}: {why}", real.name));
+        // The same fields as the definite form, and the real document's own.
+        let without_hash = |d: &AttestedDocument| AttestedDocument { hash: [0; 32], ..d.clone() };
+        assert_eq!(without_hash(&attested), without_hash(&from_definite), "{}", real.name);
+        assert_eq!(attested.module_id, real.module_id, "{}", real.name);
+        assert_eq!(attested.timestamp_ms, NOW * 1000 + 417, "{}", real.name);
+        assert_eq!(attested.pcrs.pcr0[..4], real.pcr0_starts, "{}", real.name);
+        assert_eq!(attested.public_key.as_ref().map(Vec::len), real.public_key_bytes, "{}", real.name);
+        assert_eq!(attested.user_data.as_ref().map(Vec::len), real.user_data_bytes, "{}", real.name);
+        assert_eq!(attested.nonce, None, "{}", real.name);
+        // The hash is of the document as carried.
+        assert_eq!(attested.hash, ghost_seal::attestation::document_hash(&indefinite_document), "{}", real.name);
+
+        // The signature covers the payload's bytes as carried, not a
+        // re-encoding: signed over the definite form, the indefinite
+        // payload is refused, and the other way round.
+        let swapped = authority.sign_payload(&indefinite, &definite);
+        assert_eq!(authority.verifier().verify(&swapped, NOW), Err(AttestationRejected::BadSignature), "{}", real.name);
+        let swapped = authority.sign_payload(&definite, &indefinite);
+        assert_eq!(authority.verifier().verify(&swapped, NOW), Err(AttestationRejected::BadSignature), "{}", real.name);
+        // A byte of PCR15 changed inside the indefinite map is still caught.
+        let mut changed = indefinite_document.clone();
+        let (start, length) = payload_span(&changed);
+        assert_eq!(&changed[start..start + length], &indefinite[..], "{}", real.name);
+        let pcr15 = start + find(&changed[start..start + length], &[0x0f, 0x58, 0x30]) + 3;
+        changed[pcr15] ^= 0x80;
+        assert_eq!(authority.verifier().verify(&changed, NOW), Err(AttestationRejected::BadSignature), "{}", real.name);
+
+        // The whole document indefinite too: the COSE array, and the payload
+        // byte string in chunks. The signature is over the payload's bytes.
+        let protected = es384_protected_header();
+        let signature: Signature = authority.leaf_key.sign(&sig_structure(&protected, &indefinite));
+        let mut outer = vec![0x9f];
+        outer.extend(cbor::encode(&Value::Bytes(protected)));
+        outer.push(0xbf);
+        outer.push(0xff);
+        outer.extend(chunked_bytes(&indefinite, &[700, 2000]));
+        outer.extend(cbor::encode(&Value::Bytes(signature.to_bytes().to_vec())));
+        outer.push(0xff);
+        let whole = authority.verifier().verify(&outer, NOW).unwrap_or_else(|why| panic!("{}: {why}", real.name));
+        assert_eq!(without_hash(&whole), without_hash(&from_definite), "{}", real.name);
+
+        // The phone's port takes it too.
+        use ghost_wallet_core::seal_attestation::check_nitro_document;
+        assert_eq!(check_nitro_document(&indefinite_document, &authority.root_fingerprint(), NOW), Ok(()), "{}", real.name);
+        assert_eq!(check_nitro_document(&outer, &authority.root_fingerprint(), NOW), Ok(()), "{}", real.name);
+    }
+}
+
+#[test]
+fn indefinite_items_keep_the_decoders_limits_and_rules() {
+    let error = |bytes: &[u8]| {
+        let e = cbor::decode(bytes).expect_err("refused");
+        assert_eq!(e.length, bytes.len());
+        (e.reason, e.at)
+    };
+    const RESERVED: &str = "indefinite or reserved length";
+    const STRAY: &str = "a break outside an indefinite-length item";
+    const CHUNK: &str = "a chunk is not a definite-length string of its string's type";
+
+    // What it takes.
+    assert_eq!(cbor::decode(&[0x9f, 0xff]), Ok(Value::Array(Vec::new())));
+    assert_eq!(cbor::decode(&[0xbf, 0xff]), Ok(Value::Map(Vec::new())));
+    assert_eq!(cbor::decode(&[0x7f, 0xff]), Ok(Value::Text(String::new())));
+    assert_eq!(cbor::decode(&[0x7f, 0x62, b'h', b'i', 0x60, 0x61, b'!', 0xff]), Ok(Value::Text("hi!".into())));
+    assert_eq!(cbor::decode(&[0x5f, 0x41, 0x01, 0x40, 0x42, 0x02, 0x03, 0xff]), Ok(Value::Bytes(vec![1, 2, 3])));
+    assert_eq!(
+        cbor::decode(&[0x9f, 0xbf, 0x61, b'k', 0x5f, 0x41, 0x01, 0x41, 0x02, 0xff, 0xff, 0xf6, 0x82, 0x9f, 0xff, 0xf5, 0xff]),
+        Ok(Value::Array(vec![
+            Value::Map(vec![(Value::Text("k".into()), Value::Bytes(vec![1, 2]))]),
+            Value::Null,
+            Value::Array(vec![Value::Array(Vec::new()), Value::Bool(true)]),
+        ]))
+    );
+    assert_eq!(cbor::decode(&[0xd2, 0x9f, 0x01, 0xff]), Ok(Value::Tag(18, Box::new(Value::Array(vec![Value::Unsigned(1)])))));
+
+    // Additional information 28 to 30 stays reserved, on every major type.
+    for info in 28..=30u8 {
+        for major in 0..=6u8 {
+            assert_eq!(error(&[0x82, 0x00, major << 5 | info, 0x00]), (RESERVED, 2), "major {major}, info {info}");
+        }
+        assert_eq!(error(&[0x82, 0x00, 0xe0 | info, 0x00]), ("a float or simple value", 2), "major 7, info {info}");
+    }
+    // Integers and tags have no indefinite form.
+    assert_eq!(error(&[0x1f]), (RESERVED, 0));
+    assert_eq!(error(&[0x81, 0x3f]), (RESERVED, 1));
+    assert_eq!(error(&[0x9f, 0xdf, 0x00, 0xff]), (RESERVED, 1));
+
+    // A break only ends an indefinite item, and a map's only where a key
+    // would start.
+    assert_eq!(error(&[0xff]), (STRAY, 0));
+    assert_eq!(error(&[0x81, 0xff]), (STRAY, 1));
+    assert_eq!(error(&[0xa1, 0x01, 0xff]), (STRAY, 2));
+    assert_eq!(error(&[0xbf, 0x01, 0xff]), (STRAY, 2));
+    assert_eq!(error(&[0xbf, 0x01, 0x02, 0x03, 0xff, 0xff]), (STRAY, 4));
+    assert_eq!(error(&[0xd2, 0xff]), (STRAY, 1));
+    // A break after the value is data after it.
+    assert_eq!(error(&[0x9f, 0xff, 0xff]), ("data after the value", 2));
+    assert_eq!(error(&[0x9f, 0xff, 0x00]), ("data after the value", 2));
+
+    // Duplicate keys, inside an indefinite map as in a definite one.
+    assert_eq!(error(&[0xbf, 0x61, b'a', 0x01, 0x61, b'a', 0x02, 0xff]), ("a map key appears twice", 4));
+    assert_eq!(error(&[0xbf, 0x61, b'a', 0x01, 0x7f, 0x61, b'a', 0xff, 0x02, 0xff]), ("a map key appears twice", 4));
+    assert_eq!(error(&[0x81, 0xbf, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0xff]), ("a map key appears twice", 6));
+
+    // A chunk is a definite-length string of its string's type.
+    assert_eq!(error(&[0x5f, 0x61, b'a', 0xff]), (CHUNK, 1));
+    assert_eq!(error(&[0x7f, 0x41, b'a', 0xff]), (CHUNK, 1));
+    assert_eq!(error(&[0x5f, 0x41, 0x00, 0x5f, 0xff, 0xff]), (CHUNK, 3));
+    assert_eq!(error(&[0x7f, 0x7f, 0xff, 0xff]), (CHUNK, 1));
+    assert_eq!(error(&[0x5f, 0x00, 0xff]), (CHUNK, 1));
+    assert_eq!(error(&[0x5f, 0x80, 0xff]), (CHUNK, 1));
+    assert_eq!(error(&[0x5f, 0x5c, 0xff]), (RESERVED, 1));
+
+    // Text is UTF-8, each chunk whole (a character is never split).
+    assert_eq!(error(&[0x7f, 0x61, b'a', 0x62, 0xc3, 0x28, 0xff]), ("text is not UTF-8", 3));
+    assert_eq!(error(&[0x7f, 0x61, 0xc3, 0x61, 0xa9, 0xff]), ("text is not UTF-8", 1));
+
+    // Floats and simple values other than false, true and null.
+    assert_eq!(error(&[0x9f, 0xf9, 0x3c, 0x00, 0xff]), ("a float or simple value", 1));
+    assert_eq!(error(&[0xbf, 0x01, 0xf7, 0xff]), ("a float or simple value", 2));
+
+    // Truncation: a break that never comes, a chunk or a field cut short.
+    assert_eq!(error(&[0x9f]), ("truncated", 1));
+    assert_eq!(error(&[0x9f, 0x01]), ("truncated", 2));
+    assert_eq!(error(&[0xbf]), ("truncated", 1));
+    assert_eq!(error(&[0xbf, 0x01]), ("truncated", 2));
+    assert_eq!(error(&[0x5f, 0x41, 0x00]), ("truncated", 3));
+    assert_eq!(error(&[0x7f]), ("truncated", 1));
+    // No chunk longer than what is left: the whole is never longer than the input.
+    assert_eq!(error(&[0x5f, 0x43, 0x00, 0xff]), ("a length runs past the end", 1));
+    assert_eq!(error(&[0x5f, 0x5a, 0xff, 0xff, 0xff, 0xff, 0xff]), ("a length runs past the end", 1));
+    assert_eq!(error(&[0x5f, 0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]), ("a length runs past the end", 1));
+    // Many empty chunks are still nothing.
+    let empty = [&[0x5f][..], &[0x40; 1000], &[0xff]].concat();
+    assert_eq!(cbor::decode(&empty), Ok(Value::Bytes(Vec::new())));
+
+    // Nesting: 16 levels below the top, indefinite or not, and no deeper.
+    let nested = |levels: usize, open: &[u8]| -> Vec<u8> {
+        [open.repeat(levels), vec![0x00], vec![0xff; levels]].concat()
+    };
+    assert!(cbor::decode(&nested(16, &[0x9f])).is_ok());
+    assert_eq!(error(&nested(17, &[0x9f])), ("nested too deep", 17));
+    assert_eq!(error(&nested(40, &[0x9f])), ("nested too deep", 17));
+    // Maps of one key 0 whose value is the next map: the 17th map's key is too deep.
+    assert!(cbor::decode(&nested(16, &[0xbf, 0x00])).is_ok());
+    assert_eq!(error(&nested(17, &[0xbf, 0x00])), ("nested too deep", 33));
+    // Indefinite and definite levels count alike.
+    assert_eq!(error(&nested(9, &[0x9f, 0x81])[..]).0, "nested too deep");
+
+    // Through the verifier: a real payload, indefinite, with a key twice.
+    let authority = aws_shaped();
+    let fields = real_fields_for_the_test_authority(&SUI, &authority);
+    let payload = indefinite_payload(&fields);
+    let end = payload.len() - 1;
+    assert_eq!(payload[end], 0xff);
+    let refusal = |payload: &[u8]| {
+        authority.verifier().verify(&authority.sign_payload(payload, payload), NOW).unwrap_err().to_string()
+    };
+    let not_cbor = "malformed attestation document: the payload is not CBOR";
+    // `digest` again, before the break.
+    let digest = [cbor::encode(&Value::Text("digest".into())), cbor::encode(&Value::Text("SHA384".into()))].concat();
+    let twice = [&payload[..end], &digest, &[0xff]].concat();
+    assert_eq!(refusal(&twice), format!("{not_cbor}: a map key appears twice at byte {end} of {}", twice.len()));
+    // A key whose value is the break.
+    let stray = [&payload[..end], &cbor::encode(&Value::Text("extra".into())), &[0xff]].concat();
+    assert_eq!(refusal(&stray), format!("{not_cbor}: {STRAY} at byte {} of {}", stray.len() - 1, stray.len()));
+    // Cut before its break.
+    let cut = &payload[..end];
+    assert_eq!(refusal(cut), format!("{not_cbor}: truncated at byte {end} of {end}"));
+    // A byte after its break.
+    let after = [&payload[..], &[0x00]].concat();
+    assert_eq!(refusal(&after), format!("{not_cbor}: data after the value at byte {} of {}", payload.len(), after.len()));
 }
 
 // ---------------------------------------------------------------------------
