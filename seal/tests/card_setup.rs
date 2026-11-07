@@ -19,7 +19,7 @@ use ghost_seal::{
 use card_support::{
     BATCH, DATE, assert_set_up, commands, expected_set_up, request, run_setup, sent_command, snapshot,
 };
-use support::{DropStyle, SimCard, TestClock, TestRandom, UID, contains, master, seal, sealed_card};
+use support::{DropStyle, SettledCheck, SimCard, TestClock, TestRandom, UID, contains, master, seal_with, sealed_card};
 
 const OTHER_UID: CardUid = CardUid([0x04, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
 
@@ -147,7 +147,7 @@ fn a_set_up_card_checks_empty_with_the_registry_installed() {
     run_setup(&mut card, &mut registry.clone(), 6).unwrap();
     let journal = MemoryJournal::new();
     let clock = TestClock::new();
-    let mut seal = seal(&journal, &clock, 7).with_registry(Box::new(registry));
+    let mut seal = seal_with(&journal, &clock, 7, Box::new(SettledCheck), Box::new(registry));
     let answer = seal.check(&mut card, &CheckRequest { uid: UID, challenge: [3u8; 32] }).expect("check");
     assert_eq!((answer.body.state, answer.body.generation, answer.body.amount_wei), (CardState::Empty, 0, 0));
 }

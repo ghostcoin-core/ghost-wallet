@@ -3,8 +3,8 @@
 //! secret and nothing derived from M.
 //!
 //! The card setup records a UID only after every step of the setup was
-//! verified on the card. A Seal with a registry installed
-//! ([`crate::Seal::with_registry`]) refuses any other UID with
+//! verified on the card. Every Seal is built with a registry
+//! ([`crate::Seal::new`] takes one) and refuses any other UID with
 //! [`SealError::NotAGhostCard`] before it sends the card anything.
 //!
 //! [`FileRegistry`] keeps the registry as an append-only text file, one card
@@ -16,6 +16,19 @@
 //! || the line's text before the check), in lowercase hex. Only lines that
 //! end in a newline and pass their check are read: a line torn by a crash
 //! mid-write is ignored, and the next append starts on a fresh line.
+//!
+//! [`LoadedRegistry`] is the enclave's registry: the host loads it, the text
+//! of the registry file as [`FileRegistry`] writes it, in a control frame
+//! (kind 4). It is empty and not [`LoadedRegistry::loaded`] until the first
+//! load. A load keeps only whole lines that pass their check, and is refused
+//! whole (nothing changes) if it leaves out a card already held or changes a
+//! held card's entry; otherwise it adds the new cards. Loads may come any
+//! number of times, so cards set up later are added without a restart.
+//!
+//! A line's check is unkeyed: it catches torn and damaged lines, not the
+//! host. The host can add a UID or leave one out of its first load. Adding
+//! one is harmless (the Seal still refuses a card whose keys it does not
+//! derive from M); leaving one out only stops service to that card.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -23,6 +36,8 @@ use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::card_keys::CardUid;
 use crate::error::SealError;
@@ -209,19 +224,7 @@ impl FileRegistry {
             Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
             Err(_) => return Err(SealError::Registry("the registry file cannot be read")),
         };
-        let mut entries = BTreeMap::new();
-        // Only lines that end in a newline: whatever follows the last newline
-        // is a torn write.
-        let whole = match text.iter().rposition(|b| *b == b'\n') {
-            Some(end) => &text[..end],
-            None => &text[..0],
-        };
-        for line in whole.split(|b| *b == b'\n') {
-            let Ok(line) = core::str::from_utf8(line) else { continue };
-            if let Some(entry) = RegistryEntry::from_line(line) {
-                entries.entry(entry.uid).or_insert(entry);
-            }
-        }
+        let (entries, _) = read_lines(&text);
         Ok(FileRegistry { path, entries })
     }
 
@@ -263,5 +266,144 @@ impl CardRegistry for FileRegistry {
         file.sync_all().map_err(failed)?;
         self.entries.insert(entry.uid, entry.clone());
         Ok(())
+    }
+}
+
+/// Reads registry text: the entries of its whole, checked lines (the first
+/// entry of a UID listed twice), and how many lines were left out. Only
+/// lines that end in a newline count: whatever follows the last newline is a
+/// torn write.
+fn read_lines(text: &[u8]) -> (BTreeMap<CardUid, RegistryEntry>, usize) {
+    let mut entries = BTreeMap::new();
+    let Some(end) = text.iter().rposition(|b| *b == b'\n') else {
+        return (entries, usize::from(!text.is_empty()));
+    };
+    let mut ignored = usize::from(end + 1 < text.len());
+    for line in text[..end].split(|b| *b == b'\n') {
+        match core::str::from_utf8(line).ok().and_then(RegistryEntry::from_line) {
+            Some(entry) => {
+                entries.entry(entry.uid).or_insert(entry);
+            }
+            None => ignored += 1,
+        }
+    }
+    (entries, ignored)
+}
+
+/// What a registry load did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadReport {
+    /// How many cards the registry holds now.
+    pub cards: usize,
+    /// How many of them this load added.
+    pub added: usize,
+    /// How many lines of the text were left out: torn, damaged or failing
+    /// their check.
+    pub ignored_lines: usize,
+}
+
+/// Why a registry load was refused. A refused load changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryLoadRefused {
+    /// The text leaves out a card the registry already holds.
+    DropsCard(CardUid),
+    /// The text gives a card the registry already holds another entry.
+    ChangesEntry(CardUid),
+}
+
+impl core::fmt::Display for RegistryLoadRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            RegistryLoadRefused::DropsCard(uid) => {
+                write!(f, "the registry leaves out card {}, which is already held", hex(&uid.0))
+            }
+            RegistryLoadRefused::ChangesEntry(uid) => {
+                write!(f, "the registry changes the entry of card {}, which is already held", hex(&uid.0))
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistryLoadRefused {}
+
+/// The enclave's card registry, loaded from the host (see the module
+/// notes). Clones share the same entries: every session's Seal looks cards
+/// up in the one map, and a later load reaches them at once.
+#[derive(Clone, Default)]
+pub struct LoadedRegistry {
+    shared: Arc<Loaded>,
+}
+
+#[derive(Default)]
+struct Loaded {
+    entries: RwLock<BTreeMap<CardUid, RegistryEntry>>,
+    loaded: AtomicBool,
+}
+
+impl LoadedRegistry {
+    /// An empty registry, not loaded yet.
+    pub fn new() -> LoadedRegistry {
+        LoadedRegistry::default()
+    }
+
+    /// Whether a load has been taken.
+    pub fn loaded(&self) -> bool {
+        self.shared.loaded.load(Ordering::SeqCst)
+    }
+
+    /// Takes `text`, the registry file as [`FileRegistry`] writes it: keeps
+    /// its whole, checked lines, refuses the whole load if it leaves out or
+    /// changes a held card, and otherwise adds its new cards.
+    pub fn load(&self, text: &str) -> Result<LoadReport, RegistryLoadRefused> {
+        let (incoming, ignored_lines) = read_lines(text.as_bytes());
+        let mut held = self.shared.entries.write().unwrap_or_else(PoisonError::into_inner);
+        for (uid, entry) in held.iter() {
+            match incoming.get(uid) {
+                None => return Err(RegistryLoadRefused::DropsCard(*uid)),
+                Some(other) if other != entry => return Err(RegistryLoadRefused::ChangesEntry(*uid)),
+                Some(_) => {}
+            }
+        }
+        let added = incoming.len() - held.len();
+        *held = incoming;
+        self.shared.loaded.store(true, Ordering::SeqCst);
+        Ok(LoadReport { cards: held.len(), added, ignored_lines })
+    }
+
+    /// Every entry held, by UID.
+    pub fn entries(&self) -> Vec<RegistryEntry> {
+        self.shared.entries.read().unwrap_or_else(PoisonError::into_inner).values().cloned().collect()
+    }
+
+    /// The registry a session's Seal looks cards up in: the shared entries.
+    pub fn view(&self) -> LoadedView {
+        LoadedView { shared: Arc::clone(&self.shared) }
+    }
+}
+
+/// A Seal's view of a [`LoadedRegistry`]. Nothing records through it: the
+/// enclave's registry changes only by a load from the host.
+pub struct LoadedView {
+    shared: Arc<Loaded>,
+}
+
+impl CardRegistry for LoadedView {
+    fn lookup(&self, uid: &CardUid) -> Option<RegistryEntry> {
+        self.shared.entries.read().unwrap_or_else(PoisonError::into_inner).get(uid).cloned()
+    }
+
+    fn record(&mut self, _entry: &RegistryEntry) -> Result<(), SealError> {
+        Err(SealError::Registry("the enclave's registry changes only by a load from the host"))
+    }
+}
+
+#[cfg(feature = "nitro")]
+impl crate::enclave_serve::RegistrySource for LoadedRegistry {
+    fn registry(&self) -> Box<dyn CardRegistry> {
+        Box::new(self.view())
+    }
+
+    fn loaded(&self) -> bool {
+        LoadedRegistry::loaded(self)
     }
 }

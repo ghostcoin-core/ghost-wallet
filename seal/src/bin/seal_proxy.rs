@@ -6,6 +6,7 @@
 //! seal_proxy outbound <vsock port> <upstream host:port> [--max-connections N] [--idle-secs N]
 //! seal_proxy start <enclave CID> genesis|join <measurements list file>
 //! seal_proxy list <enclave CID> <signed measurements list file>
+//! seal_proxy registry <enclave CID> <registry file>
 //! ```
 //!
 //! `inbound` takes TCP connections from the internet (phones, and other
@@ -18,12 +19,18 @@
 //! if the release key compiled into its image signed it. `list` offers a
 //! later signed list. The host cannot make an enclave trust a list: an
 //! unsigned one is refused, and the start of a join carries none.
+//! `registry` sends the enclave the card registry file (control frame 4),
+//! after the start: the whole file each time, so a card set up since is
+//! added. The enclave refuses a file that leaves out or changes a card it
+//! already holds.
 
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ghost_seal::key_share::{CONTROL_GENESIS, CONTROL_JOIN, CONTROL_SIGNED_LIST, read_frame, write_frame};
+use ghost_seal::key_share::{
+    CONTROL_GENESIS, CONTROL_JOIN, CONTROL_REGISTRY, CONTROL_SIGNED_LIST, read_frame, write_control_frame,
+};
 use ghost_seal::proxy::{Proxy, ProxyEvent, ProxyLimits, ProxyLog, TcpConnector, VsockConnector};
 use vsock::{VMADDR_CID_ANY, VsockListener, VsockStream};
 
@@ -39,14 +46,15 @@ impl ProxyLog for StderrLog {
     }
 }
 
-const USAGE: &str = "usage:\n  seal_proxy inbound <listen address:port> <enclave CID> <enclave port> [--max-connections N] [--idle-secs N]\n  seal_proxy outbound <vsock port> <upstream host:port> [--max-connections N] [--idle-secs N]\n  seal_proxy start <enclave CID> genesis|join <measurements list file>\n  seal_proxy list <enclave CID> <signed measurements list file>";
+const USAGE: &str = "usage:\n  seal_proxy inbound <listen address:port> <enclave CID> <enclave port> [--max-connections N] [--idle-secs N]\n  seal_proxy outbound <vsock port> <upstream host:port> [--max-connections N] [--idle-secs N]\n  seal_proxy start <enclave CID> genesis|join <measurements list file>\n  seal_proxy list <enclave CID> <signed measurements list file>\n  seal_proxy registry <enclave CID> <registry file>";
 
 /// Sends one control frame and returns the enclave's answer.
 fn control(cid: u32, frame: &[u8]) -> String {
     let mut stream = VsockStream::connect_with_cid_port(cid, CONTROL_PORT)
         .unwrap_or_else(|e| fail(&format!("cannot reach the enclave's control port: {e}")));
     let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
-    write_frame(&mut stream, frame).unwrap_or_else(|e| fail(&format!("cannot send the control frame: {e}")));
+    write_control_frame(&mut stream, frame)
+        .unwrap_or_else(|e| fail(&format!("cannot send the control frame: {e}")));
     let answer = read_frame(&mut stream).unwrap_or_else(|e| fail(&format!("no answer from the enclave: {e}")));
     let answer = String::from_utf8_lossy(&answer).into_owned();
     eprintln!("seal_proxy: the enclave answered: {answer}");
@@ -74,6 +82,13 @@ fn start(cid: u32, mode: &str, list_file: &str) -> ! {
 fn list(cid: u32, list_file: &str) -> ! {
     let list = std::fs::read(list_file).unwrap_or_else(|e| fail(&format!("cannot read {list_file}: {e}")));
     let answer = control(cid, &[&[CONTROL_SIGNED_LIST][..], &list].concat());
+    std::process::exit(if answer.starts_with("ok") { 0 } else { 1 });
+}
+
+/// Sends the enclave the card registry file.
+fn registry(cid: u32, registry_file: &str) -> ! {
+    let text = std::fs::read(registry_file).unwrap_or_else(|e| fail(&format!("cannot read {registry_file}: {e}")));
+    let answer = control(cid, &[&[CONTROL_REGISTRY][..], &text].concat());
     std::process::exit(if answer.starts_with("ok") { 0 } else { 1 });
 }
 
@@ -130,6 +145,9 @@ fn main() {
         }
         ["start", cid, mode, list_file] => start(number(Some(&cid.to_string()), "the enclave CID"), mode, list_file),
         ["list", cid, list_file] => list(number(Some(&cid.to_string()), "the enclave CID"), list_file),
+        ["registry", cid, registry_file] => {
+            registry(number(Some(&cid.to_string()), "the enclave CID"), registry_file)
+        }
         _ => fail("unknown command"),
     };
     if let Err(error) = result {

@@ -21,7 +21,9 @@ networking), plus `enclave/` (image, scripts, deploy files) and
 vsock ports of the enclave: **5000** control (the host only; the proxy never
 forwards to it), **5001** service (the inbound proxy forwards the internet to
 it). Ports on the host, for the enclave to reach out: **5002** to a giving
-region's proxy (key share), **5003** to a Ghost node (the chain check).
+region's proxy (key share), **5003** and **5004** to the two Ghost nodes of
+the compiled-in release node list (the chain check; TLS to each ends inside
+the enclave).
 
 ## Build and measurements
 
@@ -227,15 +229,86 @@ its release key.
 
 ## Enclave program protocol
 
-Frames are a u32 big-endian length and the bytes (at most 64 KiB). Control
-port: a start frame, 1 (genesis) optionally followed by a signed list, or 2
-(join; anything after it is ignored); after the start, 3 || a signed list.
-The answer is a status text. A second start is refused, so an enclave whose
-join failed stays without M until it is restarted; a list that is not signed
-by the compiled-in release key is refused. Service port: kind (1 key-share
-request, 2 phone attestation with a 32-byte challenge) || body; the answer is
-0 || body, or 1 || why it was refused. Before it holds M, the enclave refuses
-every service request.
+Frames are a u32 big-endian length and the bytes (at most 64 KiB on the
+service port, 8 MiB on the control port). Control port: a start frame, 1
+(genesis) optionally followed by a signed list, or 2 (join; anything after it
+is ignored); after the start, 3 || a signed list, or 4 || the card registry
+(below). The answer is a status text. A second start is refused, so an
+enclave whose join failed stays without M until it is restarted; a list that
+is not signed by the compiled-in release key is refused. Service port: kind
+(1 key-share request, 2 phone attestation with a 32-byte challenge) || body;
+the answer is 0 || body, or 1 || why it was refused. Before it holds M, the
+enclave refuses every service request.
+
+### The card registry in the enclave
+
+The enclave's registry (`LoadedRegistry`, `seal/src/registry.rs`) is empty,
+and counts as not loaded, until the host sends it, after the start, as
+control frame 4: the text of the registry file exactly as the card setup's
+`FileRegistry` writes it (`seal_proxy registry <enclave CID> <registry
+file>`). The enclave keeps only whole lines that pass their check (a torn or
+damaged line is left out). It refuses the whole frame, and changes nothing,
+if the frame leaves out a card it already holds or gives one another entry;
+otherwise it adds the new cards. The host sends the whole file each time, any
+number of times, so a card set up later is served without a restart. No
+flow is served until the first load; when it arrives after M, the routes are
+rebuilt (`EnclaveService::refresh_flows`).
+
+A registry line's check is unkeyed: it catches torn and damaged lines, not a
+host that writes its own. So the host can add a UID or leave one out of its
+first load. Adding one is harmless: the Seal still refuses a card whose keys
+it does not derive from M, so a card the setup never made gets nothing.
+Leaving one out only stops service to that card ("Not a Ghost card") until a
+load includes it; once held, a card can never be dropped by the host.
+
+### The chain check in the enclave
+
+The release node list is compiled in (`seal/src/node_list.rs`): the Ghost
+public test network (chain id 6777972 and the hash of its block 0, as the
+node project publishes it) and two nodes mirroring the app's
+`RELEASE_NODE_URLS` (`lib/network/build-network.ts`; a jest test keeps them
+equal), each reached through its own vsock port on the host (5003 and 5004),
+which the host's outbound proxy carries to the node's HTTPS port. The list's
+reader refuses fewer than two nodes and a name, host or port listed twice,
+as `NodeChainCheck` does. Both nodes are run by one operator today: the code
+needs two entries that agree but does not try to prove that they are
+independent.
+
+Each node is an `RpcNode` (`seal/src/node_rpc.rs`): JSON-RPC over HTTP/1.1,
+one request per connection (`Connection: close`), with the calls the wallet
+already makes (`eth_chainId`, `eth_getBlockByNumber`, `eth_getBlockReceipts`,
+`ghost_getPageRoots`, `ghost_getPageSet`, `ghost_getTreePage`), heads read
+with `httparse` and bodies with `serde_json`. Every reply is at most 1 MiB and
+every exchange has 10 seconds in all; a refused, malformed, oversized or slow
+reply is "can't check right now", never a guess.
+
+TLS 1.3 to every node ends inside the enclave, with `rustls` (`ring`
+provider, no TLS 1.2 code). The only trust anchor compiled in is the ISRG
+Root X1 certificate (a test checks its SHA-256 against the published
+fingerprint); the server's certificate is checked by rustls's own
+`WebPkiServerVerifier` over that one root, for the node entry's host name.
+No other certificate check, no public CA bundle, no pinned certificate hash.
+
+A Vanish is found by its fingerprint with a bounded scan: the node reads the
+chain forward from block 1 (`eth_getBlockByNumber` and
+`eth_getBlockReceipts`; a block is read again with its transactions only when
+its receipts show one to the coin commit entry), at most 500 blocks per call.
+What it finds in blocks more than 128 below the tip it keeps in enclave
+memory, shared by every session, per node; the newer blocks are read again
+on every call, so a reorganisation among them is seen (one deeper than 128
+blocks starts the scan over). Until it has caught up with the tip it answers
+"can't check right now", and the next Check carries on from where it
+stopped. This is correct and bounded but slow on a long chain; a faster
+lookup is later work. A Vanish's leaf position is found among the leaves its
+block added, from the coin tree as of its block and of its parent. The
+1 MiB reply limit also bounds what can be read: a block with a Vanish whose
+reply passes 1 MiB, or a coin tree page whose entries do, cannot be read, and
+the answer for such a coin is "can't check right now".
+
+A Fill confirmation's payment check (`ChainCheck`) in the enclave defers to
+the session Seal's own chain status check, which every Seal is built with:
+the card names its coin by hash only, and only the Seal's Fill journal entry
+holds its commit data and spend marker.
 
 ### Bounded service
 
@@ -299,13 +372,20 @@ carried bytes.
 ### Fail closed
 
 The flows are served only when the enclave holds M **and** a chain status
-check, a card registry and a durable journal (not a memory-only one) have been
-installed into it (`ServiceDeps`). The enclave program installs none of the
-three yet, so every flow request (start, step and abort) is answered HTTP 503
-`unavailable` with the message "This Seal is not ready to answer cards", and
-no card traffic is sent; the attestation route still works once M is held. A
-Seal built without the three is never reachable from the network. The tests
-install fakes for the three to prove the flows.
+check, a card registry that has been loaded and a durable journal (not a
+memory-only one) have been installed into it (`ServiceDeps`). `Seal::new` is
+the only way to build a Seal and takes the chain status check and the card
+registry, so no Seal anywhere answers Sealed unchecked or serves an
+unregistered card.
+
+The enclave program installs the chain status check (`NodeChainStatus`: the
+`RpcNode`s of the compiled-in release node list, over vsock to the host) and
+the card registry the host loads (`LoadedRegistry`). It installs no durable
+journal yet, and no `KeyMakerSource` (a Fill needs one), so every flow
+request (start, step and abort) is still answered HTTP 503 `unavailable` with
+the message "This Seal is not ready to answer cards", and no card traffic is
+sent; the attestation route still works once M is held. The tests install
+fakes for the journal and the key maker to prove the flows.
 
 ## What is still trusted
 
@@ -330,7 +410,10 @@ real PCR values (they need a Nitro-capable builder), the release key (made
 offline by the release owner; its public half goes into `RELEASE_KEY_HEX`
 before the first image is built, and its signature into
 `enclave/measurements.json` each time a build is published), the reproducibility check
-in CI, the three things the enclave needs before it answers a card (the chain
-check over the host's vsock port 5003, a durable sealed journal kept outside
-the enclave, and the card registry loaded into the enclave), and the app's
-check of the phone attestation and of the TLS certificate it binds.
+in CI, what the enclave still needs before it answers a card (a durable
+sealed journal kept outside the enclave, and the `KeyMakerSource` for a
+Fill; the chain check over the host's vsock ports 5003 and 5004 and the card
+registry loaded by the host are installed), a faster Vanish lookup than the
+bounded block scan, nodes of independent operators in the release node list,
+and the app's check of the phone attestation and of the TLS certificate it
+binds.

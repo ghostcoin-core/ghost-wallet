@@ -19,7 +19,7 @@ use authority::{Authority, AuthoritySource, NOW, allowed_new, allowed_old, pcrs,
 use ghost_seal::attestation::fake::{FakeSource, FakeVerifier};
 use ghost_seal::attestation::{AttestationRejected, AttestationVerifier};
 use ghost_seal::key_share::{
-    self, CONTROL_GENESIS, CONTROL_JOIN, CONTROL_SIGNED_LIST, ControlFrame, GiverContext, KEM_KEY_BYTES, NONCE_BYTES,
+    self, CONTROL_GENESIS, CONTROL_JOIN, CONTROL_REGISTRY, CONTROL_SIGNED_LIST, ControlFrame, GiverContext, KEM_KEY_BYTES, NONCE_BYTES,
     Receiver, ShareRefused, read_frame, write_frame,
 };
 use ghost_seal::measurements::{ListError, MeasurementRefused, OWN_BUILD_NAME, TrustedList};
@@ -287,7 +287,14 @@ fn a_join_ignores_any_list_the_host_passes() {
     assert_eq!(ControlFrame::parse(&[CONTROL_GENESIS]), Ok(ControlFrame::Genesis { signed_list: None }));
     let later = [&[CONTROL_SIGNED_LIST][..], host_list.as_bytes()].concat();
     assert_eq!(ControlFrame::parse(&later), Ok(ControlFrame::SignedList(host_list.as_str())));
-    for bad in [&[][..], &[0][..], &[4][..], &[CONTROL_SIGNED_LIST, 0xff][..]] {
+    // Kind 4 carries the card registry's text.
+    let registry = [&[CONTROL_REGISTRY][..], b"04518dfaa96180 2026-11-06 lot-1 0011223344556677\n"].concat();
+    assert_eq!(
+        ControlFrame::parse(&registry),
+        Ok(ControlFrame::Registry("04518dfaa96180 2026-11-06 lot-1 0011223344556677\n"))
+    );
+    assert_eq!(ControlFrame::parse(&[CONTROL_REGISTRY]), Ok(ControlFrame::Registry("")));
+    for bad in [&[][..], &[0][..], &[5][..], &[CONTROL_SIGNED_LIST, 0xff][..], &[CONTROL_REGISTRY, 0xff][..]] {
         assert!(ControlFrame::parse(bad).is_err());
     }
 

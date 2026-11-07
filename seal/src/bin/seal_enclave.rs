@@ -34,18 +34,28 @@
 //!   included; a connection that finds the queue full is closed.
 //! - It makes its TLS key pair and self-signed certificate fresh at each
 //!   start, inside itself, and keeps them in memory only.
-//! - It installs no chain status check, card registry or durable journal
-//!   yet, so it answers every Check, Fill, Fill confirmation and Open
-//!   `unavailable` and sends no card traffic.
+//! - It installs the chain status check: the compiled-in release node list
+//!   (`ghost_seal::node_list`), each node an `RpcNode` (JSON-RPC over TLS
+//!   1.3 ended inside the enclave, trusting only the compiled-in ISRG Root
+//!   X1) reached through a vsock stream to the parent on the node's own port
+//!   (5003, 5004), which the host's outbound proxy carries to the node.
+//! - It installs the card registry the host loads (a `LoadedRegistry`):
+//!   empty until the first control frame 4, after the start; later frames
+//!   add cards and may never drop or change one. No flow is served until
+//!   the first load.
+//! - It installs no durable journal yet, so it still answers every Check,
+//!   Fill, Fill confirmation and Open `unavailable` and sends no card
+//!   traffic. Nor a `KeyMakerSource`, which a Fill needs.
 //!
 //! It never writes M anywhere, and no frame it sends carries M except a
 //! key-share package, encrypted to the receiving enclave.
 //!
-//! Frames are a 4-byte big-endian length and the bytes. Control frames: 1
-//! (genesis) [|| signed list JSON], 2 (join; anything after is ignored), 3
-//! (a signed list JSON); answer: a status text. Service request: kind (1 key
-//! share, 2 phone attestation) || body; service answer: 0 || body, or 1 ||
-//! why it was refused.
+//! Frames are a 4-byte big-endian length and the bytes. Control frames (at
+//! most 8 MiB): 1 (genesis) [|| signed list JSON], 2 (join; anything after
+//! is ignored), 3 (a signed list JSON), 4 (the card registry's text);
+//! answer: a status text. Service request: kind (1 key share, 2 phone
+//! attestation) || body; service answer: 0 || body, or 1 || why it was
+//! refused.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -60,15 +70,17 @@ use ghost_seal::attestation::{
     AttestationError, AttestationSource, AttestationVerifier, NitroVerifier, NsmDevice, NsmSource,
 };
 use ghost_seal::enclave_serve::{
-    ANSWER_OK, ANSWER_REFUSED, EnclaveAttestation, EnclaveService, KIND_KEY_SHARE, ServiceConfig, ServiceDeps,
-    ServiceEvent, ServiceLog,
+    ANSWER_OK, ANSWER_REFUSED, ChainStatus, EnclaveAttestation, EnclaveService, KIND_KEY_SHARE, NodeChainStatus,
+    RegistrySource, ServiceConfig, ServiceDeps, ServiceEvent, ServiceLog,
 };
 use ghost_seal::enclave_tls::EnclaveTls;
 use ghost_seal::flows::ANSWER_LIFETIME_SECS;
-use ghost_seal::key_share::{ControlFrame, Receiver, read_frame, write_frame};
+use ghost_seal::key_share::{ControlFrame, Receiver, read_control_frame, read_frame, write_frame};
 use ghost_seal::measurements::{ReleaseKey, TrustedList};
+use ghost_seal::node_list::NodeList;
+use ghost_seal::node_rpc::{NodeAddress, RpcNode, VsockTransport};
 use ghost_seal::proxy::{BoundedService, DeadlineStream, ServiceLimits};
-use ghost_seal::{Clock, MasterKey, RelayLimits, SealRandom, SystemClock, SystemRandom};
+use ghost_seal::{Clock, LoadedRegistry, MasterKey, RelayLimits, SealRandom, SystemClock, SystemRandom};
 use ml_kem::{DecapsulationKey, KeyExport, MlKem768};
 use vsock::{VMADDR_CID_ANY, VsockListener, VsockStream};
 
@@ -208,9 +220,25 @@ fn main() {
         }
     };
 
-    // No chain status check, card registry or durable journal is installed
-    // yet: every Check, Fill, Fill confirmation and Open is refused
-    // `unavailable` until they are.
+    // The chain status check over the compiled-in release nodes, each
+    // through its own vsock port on the parent.
+    let chain = match chain_status() {
+        Ok(chain) => chain,
+        Err(why) => {
+            status(&format!("no chain check: {why}"));
+            std::process::exit(1);
+        }
+    };
+    // The card registry, empty until the host loads it.
+    let registry = LoadedRegistry::new();
+    // No durable journal is installed yet: every Check, Fill, Fill
+    // confirmation and Open is still refused `unavailable` until it is.
+    let deps = ServiceDeps {
+        chain: Some(Arc::new(chain) as Arc<dyn ChainStatus>),
+        registry: Some(Arc::new(registry.clone()) as Arc<dyn RegistrySource>),
+        journal: None,
+        key_maker: None,
+    };
     let config = ServiceConfig {
         measurement,
         answer_lifetime_secs: ANSWER_LIFETIME_SECS,
@@ -222,7 +250,7 @@ fn main() {
         kem.encapsulation_key().to_bytes().to_vec(),
         trusted,
         Arc::new(Nitro),
-        ServiceDeps::none(),
+        deps,
         config,
         Arc::new(StatusLog),
     ));
@@ -250,8 +278,8 @@ fn main() {
         };
         let _ = stream.set_read_timeout(Some(CONTROL_TIMEOUT));
         let _ = stream.set_write_timeout(Some(CONTROL_TIMEOUT));
-        let answer = match read_frame(&mut stream) {
-            Ok(frame) => control_frame(&frame, &service),
+        let answer = match read_control_frame(&mut stream) {
+            Ok(frame) => control_frame(&frame, &service, &registry),
             Err(error) => format!("refused: {error}"),
         };
         status(&answer);
@@ -276,10 +304,43 @@ fn serve_port(service: Arc<EnclaveService>) {
     }
 }
 
+/// The chain status check over the release node list: an `RpcNode` per
+/// entry, over a vsock stream to the parent on the entry's port.
+fn chain_status() -> Result<NodeChainStatus, String> {
+    let list = NodeList::release();
+    let nodes = list
+        .nodes
+        .iter()
+        .map(|entry| {
+            let transport = Arc::new(VsockTransport { cid: PARENT_CID, port: entry.vsock_port });
+            RpcNode::new(NodeAddress::from_entry(entry), transport)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    NodeChainStatus::new(list.network, nodes).map_err(|e| e.to_string())
+}
+
 /// Handles one control frame.
-fn control_frame(frame: &[u8], service: &EnclaveService) -> String {
+fn control_frame(frame: &[u8], service: &EnclaveService, registry: &LoadedRegistry) -> String {
     match ControlFrame::parse(frame) {
         Err(why) => format!("refused: {why}"),
+        Ok(ControlFrame::Registry(text)) => {
+            if !service.state().started {
+                return "refused: the registry comes after the start".into();
+            }
+            match registry.load(text) {
+                Ok(report) => {
+                    let serves = service.refresh_flows();
+                    format!(
+                        "ok: took the card registry ({} cards, {} new, {} lines left out){}",
+                        report.cards,
+                        report.added,
+                        report.ignored_lines,
+                        if serves { "" } else { "; not answering cards yet" }
+                    )
+                }
+                Err(why) => format!("refused: {why}"),
+            }
+        }
         Ok(ControlFrame::SignedList(text)) => {
             let mut held = service.state();
             if !held.started {

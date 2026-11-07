@@ -17,7 +17,11 @@
 //!   reached, or any disagreement, is [`CoinStatus::CantCheckNow`].
 //!
 //! A node is a [`ChainNode`]: a trait, so the enclave reaches its nodes
-//! through its outside proxy. Nothing here opens a socket.
+//! through its outside proxy. Nothing here opens a socket; the real node,
+//! JSON-RPC over TLS, is `node_rpc` (features `nitro` and `test-server`).
+//!
+//! Every Seal is built with a [`CoinStatusCheck`] ([`crate::Seal::new`]
+//! takes one): there is no Seal that answers Sealed unchecked.
 
 use core::fmt;
 
@@ -266,8 +270,8 @@ impl NodeChainCheck {
 
     /// Hands over the commit data and spend marker of a coin this check will
     /// confirm as a [`ChainCheck`], which names the coin by its hash only.
-    /// (A Seal with [`crate::Seal::with_chain_status`] hands them over itself,
-    /// from its journal.)
+    /// (A Seal hands them over itself, from its journal, to the status check
+    /// [`crate::Seal::new`] takes.)
     pub fn with_coin(mut self, coin: CoinQuery) -> NodeChainCheck {
         self.coins.retain(|known| known.coin() != coin.coin());
         self.coins.push(coin);

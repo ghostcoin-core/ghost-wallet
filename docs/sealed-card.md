@@ -389,11 +389,17 @@ unreachable node, a node whose data fails its check, or any disagreement is
 `ChainCheck`: exact and settled and unspent is Paid; filling and can't check
 now are NotYet; a wrong payment or a spent coin is Mismatch.
 
-`Seal::with_chain_status` installs it in the Seal. Installed, it gates every
+`Seal::new`, the only way to build a Seal, takes the chain status check and
+the card registry: there is no Seal without them. The check gates every
 Sealed answer of Check and of Fill's confirmation, with the commit data and
 spend marker from the Fill journal entry (the card holds only the coin's
-hash). It is not yet required by `Seal::new`; production entry points
-install it.
+hash); the registry refuses an unregistered UID ("Not a Ghost card") before
+any card traffic. The enclave builds its check over the compiled-in release
+node list (`seal/src/node_list.rs`), each node an `RpcNode`
+(`seal/src/node_rpc.rs`: JSON-RPC over TLS 1.3 ended inside the enclave,
+`docs/seal-enclave.md`), and its registry from the file the host loads; the
+development test server over the nodes it is given and its registry file
+(`docs/seal-relay.md`).
 
 ## Journal
 

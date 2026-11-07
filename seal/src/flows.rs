@@ -150,6 +150,9 @@ pub struct OpenOutcome {
 }
 
 /// The Seal.
+///
+/// [`Seal::new`] is the only way to build one, and it takes the chain status
+/// check and the card registry: there is no Seal without them.
 pub struct Seal {
     master: MasterKey,
     signer: AnswerSigner,
@@ -157,55 +160,50 @@ pub struct Seal {
     random: Box<dyn SealRandom>,
     clock: Box<dyn Clock>,
     journal: Box<dyn Journal>,
-    chain_status: Option<Box<dyn CoinStatusCheck>>,
-    registry: Option<Box<dyn CardRegistry>>,
+    chain_status: Box<dyn CoinStatusCheck>,
+    registry: Box<dyn CardRegistry>,
 }
 
 impl Seal {
-    /// Installs the card registry: from now on Check, Fill and Open refuse a
-    /// UID the card setup never registered ([`SealError::NotAGhostCard`])
-    /// before they send the card anything. Without one, every UID is let
-    /// through as before.
-    pub fn with_registry(mut self, registry: Box<dyn CardRegistry>) -> Seal {
-        self.registry = Some(registry);
-        self
-    }
-
-    fn require_registered(&self, uid: &CardUid) -> Result<(), SealError> {
-        match &self.registry {
-            Some(registry) if !registry.contains(uid) => Err(SealError::NotAGhostCard),
-            _ => Ok(()),
-        }
-    }
-
-    /// A Seal holding `master`.
+    /// A Seal holding `master`, with its random source, clock and journal,
+    /// the chain status check and the card registry.
+    ///
+    /// - `chain_status`: no answer says Sealed unless it finds the card's
+    ///   coin (its commit data and spend marker from the Fill journal entry)
+    ///   paid exactly, settled and unspent. Check and Fill's confirmation
+    ///   refuse with [`SealError::NotSettled`], [`SealError::CoinSpent`],
+    ///   [`SealError::CantCheckNow`] or [`SealError::PaymentMismatch`]
+    ///   instead.
+    /// - `registry`: Check, Fill and Open refuse a UID the card setup never
+    ///   registered ([`SealError::NotAGhostCard`]) before they send the card
+    ///   anything.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         master: MasterKey,
         config: SealConfig,
         random: Box<dyn SealRandom>,
         clock: Box<dyn Clock>,
         journal: Box<dyn Journal>,
+        chain_status: Box<dyn CoinStatusCheck>,
+        registry: Box<dyn CardRegistry>,
     ) -> Seal {
         let signer = AnswerSigner::derive(&master);
-        Seal { master, signer, config, random, clock, journal, chain_status: None, registry: None }
+        Seal { master, signer, config, random, clock, journal, chain_status, registry }
     }
 
-    /// Installs the chain status check. From then on no answer says Sealed
-    /// unless `check` finds the card's coin (its commit data and spend marker
-    /// from the Fill journal entry) paid exactly, settled and unspent: Check
-    /// and Fill's confirmation refuse with [`SealError::NotSettled`],
-    /// [`SealError::CoinSpent`], [`SealError::CantCheckNow`] or
-    /// [`SealError::PaymentMismatch`] instead.
-    pub fn with_chain_status(mut self, check: Box<dyn CoinStatusCheck>) -> Seal {
-        self.chain_status = Some(check);
-        self
+    fn require_registered(&self, uid: &CardUid) -> Result<(), SealError> {
+        if self.registry.contains(uid) { Ok(()) } else { Err(SealError::NotAGhostCard) }
     }
 
-    /// With a chain status check installed: whether the card's coin is
-    /// exact, settled and unspent. Without one: always.
+    /// Whether the card's coin is exact, settled and unspent.
     fn confirm_chain_status(&self, uid: &CardUid, header: &Header) -> Result<(), SealError> {
-        let Some(check) = &self.chain_status else { return Ok(()) };
-        require_sealable(check.as_ref(), self.load_fill(uid)?, header.generation, header.coin, header.amount_wei)
+        require_sealable(
+            self.chain_status.as_ref(),
+            self.load_fill(uid)?,
+            header.generation,
+            header.coin,
+            header.amount_wei,
+        )
     }
 
     /// The Seal's encoded ML-DSA-65 public key, which phones pin.
@@ -358,9 +356,9 @@ impl Seal {
     ///
     /// A Sealed card whose Open PIN has no tries left can never be opened, so
     /// it is never certified: Check refuses it with [`SealError::PinLocked`].
-    /// With a chain status check installed ([`Seal::with_chain_status`]), a
-    /// Sealed card is answered Sealed only while its coin is exact, settled
-    /// and unspent. A journaled Open still comes first (Opening or Opened).
+    /// A Sealed card is answered Sealed only while the chain status check
+    /// finds its coin exact, settled and unspent. A journaled Open still
+    /// comes first (Opening or Opened).
     pub fn check(&mut self, card: &mut dyn CardTransport, request: &CheckRequest) -> Result<SignedAnswer, SealError> {
         let uid = request.uid;
         self.require_registered(&uid)?;

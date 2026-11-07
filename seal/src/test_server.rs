@@ -6,13 +6,26 @@
 //! SHA3-256(`ghost-seal/dev-test-master/v1`), which anyone can derive: a
 //! card set up with it protects nothing. Its answers carry an all-zero code
 //! measurement, so a phone that pins a real Seal's measurement never takes
-//! one. There is no enclave, no journal on disk and no card registry: it
-//! answers a Check for any card set up with the test M.
+//! one. There is no enclave and no journal on disk.
+//!
+//! Its Seal is built like every Seal, by `Seal::new` with a chain status
+//! check and a card registry: the card registry file the card setup writes
+//! (`--registry FILE`, a `FileRegistry`, read again for each Check, so cards
+//! set up later are served without a restart), and the chain check over two
+//! or more real nodes (`--node URL`, each an `RpcNode`: `https://` and any
+//! host, or `http://` and a loopback address only, a development
+//! convenience) on the release network, or the one `--network` names. A
+//! card the registry does not hold is refused "Not a Ghost card"
+//! (`not-a-ghost-card`) before any card traffic. Its journal is in memory,
+//! one per session, so it holds no Fill entry: a Sealed card is refused
+//! rather than answered Sealed unchecked.
 //!
 //! It refuses to start unless it is given `--dev-test-seal` and the
-//! environment variable `GHOST_DEV_TEST_SEAL=1`. It serves HTTPS when given
-//! `--tls-cert` and `--tls-key` (PEM files); without them it serves plain
-//! HTTP, and only on a loopback address.
+//! environment variable `GHOST_DEV_TEST_SEAL=1`, `--registry` and at least
+//! two `--node`s. It serves HTTPS when given `--tls-cert` and `--tls-key`
+//! (PEM files); without them it serves plain HTTP, and only on a loopback
+//! address. [`TestSealServer::start_with`] takes the nodes and the registry
+//! from the caller (the tests), with no network.
 //!
 //! Every request must arrive whole in time: its body within
 //! `--body-ms` (5 seconds by default) of its head, and each head within
@@ -34,10 +47,14 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, SslConfig};
 
 use crate::card_keys::CardUid;
+use crate::chain_check::{ChainNode, CoinQuery, CoinStatus, CoinStatusCheck, Network, NodeChainCheck};
 use crate::error::SealError;
 use crate::flows::{Seal, SealConfig};
 use crate::journal::MemoryJournal;
+use crate::node_list::NodeList;
+use crate::node_rpc::{NodeAddress, RpcNode, TcpTransport};
 use crate::primitives::sha3_256;
+use crate::registry::{CardRegistry, FileRegistry, MemoryRegistry};
 use crate::relay::{Relay, RelayError, RelayLimits, SessionId, Step, from_hex, to_hex};
 use crate::secrets::MasterKey;
 use crate::traits::{SystemClock, SystemRandom};
@@ -82,7 +99,8 @@ const MAX_IN_FLIGHT: usize = 2 * MAX_CONNECTIONS;
 const WATCH_TICK: Duration = Duration::from_millis(20);
 
 /// The usage line.
-pub const USAGE: &str = "usage: GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-test-seal [--listen ADDR:PORT] \
+pub const USAGE: &str = "usage: GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-test-seal --registry FILE \
+--node URL --node URL [--node URL ...] [--network CHAIN_ID:GENESIS_HEX] [--listen ADDR:PORT] \
 [--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N] [--total-ms N] [--max-sessions N] [--body-ms N]";
 
 /// The test M's bytes. Public by design: SHA3-256 of
@@ -97,16 +115,78 @@ pub fn dev_test_master() -> MasterKey {
     MasterKey::take(&mut bytes)
 }
 
-/// A Seal holding the test M, with the system's random source and clock and
-/// a journal in memory only.
-pub fn dev_test_seal() -> Seal {
+/// A Seal holding the test M, with the system's random source and clock, a
+/// journal in memory only, and `chain_status` and `registry`.
+pub fn dev_test_seal(chain_status: Box<dyn CoinStatusCheck>, registry: Box<dyn CardRegistry>) -> Seal {
     Seal::new(
         dev_test_master(),
         SealConfig { measurement: DEV_MEASUREMENT, answer_lifetime_secs: DEV_ANSWER_LIFETIME_SECS },
         Box::new(SystemRandom),
         Box::new(SystemClock),
         Box::new(MemoryJournal::new()),
+        chain_status,
+        registry,
     )
+}
+
+/// Makes the nodes a session's chain check asks, on the session's thread.
+pub type NodesFactory = Arc<dyn Fn() -> Vec<Box<dyn ChainNode>> + Send + Sync>;
+/// Makes the registry a session's Seal looks cards up in, on the session's
+/// thread.
+pub type RegistryFactory = Arc<dyn Fn() -> Box<dyn CardRegistry> + Send + Sync>;
+
+/// The chain check and the registry the server's Seals are built with.
+#[derive(Clone)]
+pub struct Installed {
+    /// The network the nodes must follow.
+    pub network: Network,
+    /// The nodes: at least two, each named once.
+    pub nodes: NodesFactory,
+    /// The card registry.
+    pub registry: RegistryFactory,
+}
+
+impl Installed {
+    /// What `options` name: [`RpcNode`]s over TCP for its `--node`s and
+    /// its `--registry` file, read again for each session.
+    pub fn from_options(options: &Options) -> Result<Installed, StartError> {
+        let nodes = options
+            .nodes
+            .iter()
+            .map(|address| RpcNode::new(address.clone(), Arc::new(TcpTransport)))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StartError::Usage)?;
+        let path = options.registry.clone();
+        if !path.is_file() || FileRegistry::open(&path).is_err() {
+            return Err(StartError::Missing(format!("cannot read the registry file {}", path.display())));
+        }
+        Ok(Installed {
+            network: options.network,
+            nodes: Arc::new(move || nodes.iter().map(|node| Box::new(node.clone()) as Box<dyn ChainNode>).collect()),
+            registry: Arc::new(move || match FileRegistry::open(&path) {
+                Ok(registry) => Box::new(registry) as Box<dyn CardRegistry>,
+                // A file that cannot be read now registers no card.
+                Err(_) => Box::new(MemoryRegistry::new()),
+            }),
+        })
+    }
+
+    /// A session's chain status check.
+    fn status_check(&self) -> Box<dyn CoinStatusCheck> {
+        match NodeChainCheck::new(self.network, (self.nodes)()) {
+            Ok(check) => Box::new(check),
+            Err(_) => Box::new(NoCheck),
+        }
+    }
+}
+
+/// A check that could not be made: it never answers Sealed.
+struct NoCheck;
+
+impl CoinStatusCheck for NoCheck {
+    fn coin_status(&self, _query: &CoinQuery) -> CoinStatus {
+        CoinStatus::CantCheckNow
+    }
 }
 
 /// Why the server would not start.
@@ -114,6 +194,8 @@ pub fn dev_test_seal() -> Seal {
 pub enum StartError {
     /// `--dev-test-seal` or `GHOST_DEV_TEST_SEAL=1` is missing.
     NotDevelopment(&'static str),
+    /// The card registry or the nodes are missing or unusable.
+    Missing(String),
     /// The arguments are wrong.
     Usage(String),
     /// Plain HTTP was asked for on an address that is not loopback.
@@ -130,6 +212,7 @@ impl fmt::Display for StartError {
             StartError::NotDevelopment(what) => {
                 write!(f, "refusing to start: {what} (this server is for development only)")
             }
+            StartError::Missing(what) => write!(f, "refusing to start: {what}"),
             StartError::Usage(what) => write!(f, "{what}"),
             StartError::PlainNotLoopback(addr) => write!(
                 f,
@@ -160,13 +243,17 @@ pub struct Options {
     tls: Option<TlsFiles>,
     limits: RelayLimits,
     body_deadline: Duration,
+    registry: PathBuf,
+    nodes: Vec<NodeAddress>,
+    network: Network,
 }
 
 impl Options {
     /// Reads the command line (`args`, without the program name) and the
     /// value of `GHOST_DEV_TEST_SEAL` (`dev_env`). Refuses unless both
-    /// development flags are given, and refuses plain HTTP on any address
-    /// that is not loopback.
+    /// development flags are given, without `--registry` or with fewer than
+    /// two `--node`s, and refuses plain HTTP on any address that is not
+    /// loopback.
     pub fn from_args(args: &[String], dev_env: Option<&str>) -> Result<Options, StartError> {
         if !args.iter().any(|a| a == DEV_FLAG) {
             return Err(StartError::NotDevelopment("--dev-test-seal is missing"));
@@ -179,6 +266,9 @@ impl Options {
         let mut key = None;
         let mut limits = RelayLimits::default();
         let mut body_deadline = DEFAULT_BODY_DEADLINE;
+        let mut registry = None;
+        let mut nodes: Vec<NodeAddress> = Vec::new();
+        let mut network = NodeList::release().network;
         let mut at = 0;
         while at < args.len() {
             let flag = args[at].as_str();
@@ -188,6 +278,10 @@ impl Options {
             }
             let value = args.get(at + 1).ok_or_else(|| StartError::Usage(format!("{flag} needs a value")))?;
             match flag {
+                "--registry" => registry = Some(PathBuf::from(value)),
+                // A node is named by its URL: the same URL twice is one node.
+                "--node" => nodes.push(NodeAddress::from_url(value, value).map_err(StartError::Usage)?),
+                "--network" => network = parse_network(value)?,
                 "--listen" => listen = value.clone(),
                 "--tls-cert" => cert = Some(PathBuf::from(value)),
                 "--tls-key" => key = Some(PathBuf::from(value)),
@@ -198,6 +292,15 @@ impl Options {
                 _ => return Err(StartError::Usage(format!("unknown argument {flag}"))),
             }
             at += 2;
+        }
+        let registry = registry.ok_or_else(|| {
+            StartError::Missing("--registry FILE is missing (the card registry the card setup writes)".into())
+        })?;
+        if nodes.len() < crate::chain_check::MIN_NODES {
+            return Err(StartError::Missing("at least two --node URL are needed for the chain check".into()));
+        }
+        if nodes.iter().enumerate().any(|(i, node)| nodes[..i].iter().any(|other| other.name == node.name)) {
+            return Err(StartError::Missing("a --node is given twice; the chain check needs two nodes".into()));
         }
         if body_deadline.is_zero() || body_deadline > MAX_BODY_DEADLINE {
             return Err(StartError::Usage("--body-ms must be more than zero and at most 30 seconds".into()));
@@ -221,7 +324,22 @@ impl Options {
         if tls.is_none() && !listen.ip().is_loopback() {
             return Err(StartError::PlainNotLoopback(listen));
         }
-        Ok(Options { listen, tls, limits, body_deadline })
+        Ok(Options { listen, tls, limits, body_deadline, registry, nodes, network })
+    }
+
+    /// The card registry file.
+    pub fn registry(&self) -> &std::path::Path {
+        &self.registry
+    }
+
+    /// The nodes the chain check asks.
+    pub fn nodes(&self) -> &[NodeAddress] {
+        &self.nodes
+    }
+
+    /// The network the nodes must follow.
+    pub fn network(&self) -> Network {
+        self.network
     }
 
     /// The address to listen on.
@@ -247,6 +365,15 @@ impl Options {
 
 fn number(flag: &str, value: &str) -> Result<u64, StartError> {
     value.parse().map_err(|_| StartError::Usage(format!("{flag} is not a number")))
+}
+
+/// `CHAIN_ID:GENESIS_HEX`: a chain id and block 0's hash (64 hex digits).
+fn parse_network(value: &str) -> Result<Network, StartError> {
+    let bad = || StartError::Usage("--network is CHAIN_ID:GENESIS_HEX (block 0's hash, 64 hex digits)".into());
+    let (chain_id, genesis) = value.split_once(':').ok_or_else(bad)?;
+    let chain_id = chain_id.parse::<u64>().ok().filter(|id| *id > 0).ok_or_else(bad)?;
+    let genesis = from_hex(genesis.trim_start_matches("0x")).and_then(|g| g.try_into().ok()).ok_or_else(bad)?;
+    Ok(Network { chain_id, genesis })
 }
 
 /// A running test server. Stops when dropped.
@@ -277,8 +404,19 @@ struct Shared {
 }
 
 impl TestSealServer {
-    /// Starts serving the relay protocol on `options`' address.
+    /// Starts serving the relay protocol on `options`' address, with the
+    /// chain check over its `--node`s and its `--registry` file.
     pub fn start(options: &Options) -> Result<TestSealServer, StartError> {
+        TestSealServer::start_with(options, Installed::from_options(options)?)
+    }
+
+    /// Starts serving the relay protocol on `options`' address, with the
+    /// chain check and the registry of `installed` (the tests' fakes);
+    /// `options`' nodes and registry file are not used.
+    pub fn start_with(options: &Options, installed: Installed) -> Result<TestSealServer, StartError> {
+        if NodeChainCheck::new(installed.network, (installed.nodes)()).is_err() {
+            return Err(StartError::Missing("the chain check needs at least two nodes, each named once".into()));
+        }
         // Checked again here: plain HTTP never leaves the machine.
         if options.tls.is_none() && !options.listen.ip().is_loopback() {
             return Err(StartError::PlainNotLoopback(options.listen));
@@ -304,8 +442,11 @@ impl TestSealServer {
         let front = TcpListener::bind(options.listen).map_err(|e| StartError::Listen(e.to_string()))?;
         let addr = front.local_addr().map_err(|e| StartError::Listen(e.to_string()))?;
 
+        // Each session's Seal: the test M, its own check over the nodes and
+        // the registry as it stands.
+        let factory = move || dev_test_seal(installed.status_check(), (installed.registry)());
         let shared = Arc::new(Shared {
-            relay: Relay::new(Arc::new(dev_test_seal), options.limits),
+            relay: Relay::new(Arc::new(factory), options.limits),
             links: Links::default(),
             body_deadline: options.body_deadline,
             in_flight: AtomicUsize::new(0),
@@ -803,6 +944,12 @@ fn refusal(error: &RelayError) -> Reply {
         RelayError::Busy => Reply::error(503, "busy", &message),
         RelayError::BadRequest(_) => Reply::error(400, "bad-request", &message),
         RelayError::Seal(SealError::Dropped) => Reply::error(422, "card-dropped", &message),
+        // As the enclave's routes answer it: refused, with the reason the
+        // phone shows as "Not a Ghost card".
+        RelayError::Seal(SealError::NotAGhostCard) => Reply {
+            status: 422,
+            body: json!({ "status": "error", "error": "refused", "reason": "not-a-ghost-card", "message": message }),
+        },
         RelayError::Seal(_) => Reply::error(422, "refused", &message),
     }
 }
