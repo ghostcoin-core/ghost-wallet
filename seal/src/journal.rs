@@ -13,6 +13,11 @@
 //! The store sees only sealed bytes: AES-256-CBC under a fresh IV, then
 //! HMAC-SHA3-256 over the entry kind, the UID, the IV and the ciphertext,
 //! with both keys derived from M ([`JOURNAL_LABEL`]).
+//!
+//! A real Seal's [`Journal`] is `journal_log::JournalLog`: each save appends
+//! one record, sealed again under its own keys and chained by counter and
+//! tag, to a log the parent host keeps; loads answer from the log as it was
+//! verified in enclave memory, never from the host.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

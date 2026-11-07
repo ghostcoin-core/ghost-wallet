@@ -6,7 +6,7 @@
 //! SHA3-256(`ghost-seal/dev-test-master/v1`), which anyone can derive: a
 //! card set up with it protects nothing. Its answers carry an all-zero code
 //! measurement, so a phone that pins a real Seal's measurement never takes
-//! one. There is no enclave and no journal on disk.
+//! one. There is no enclave.
 //!
 //! Its Seal is built like every Seal, by `Seal::new` with a chain status
 //! check and a card registry: the card registry file the card setup writes
@@ -16,13 +16,20 @@
 //! host, or `http://` and a loopback address only, a development
 //! convenience) on the release network, or the one `--network` names. A
 //! card the registry does not hold is refused "Not a Ghost card"
-//! (`not-a-ghost-card`) before any card traffic. Its journal is in memory,
-//! one per session, so it holds no Fill entry: a Sealed card is refused
+//! (`not-a-ghost-card`) before any card traffic.
+//!
+//! Its journal is the enclave's log code (`journal_log`) over the host's
+//! file store (`host_journal::HostStore`) in this process, under the test M:
+//! the file `--journal FILE` (created mode 0600), read and verified whole at
+//! the start, shared by every session, so a Fill or an Open cut off before
+//! a restart is finished after it on the same file. A Sealed card whose
+//! Fill entry is not in that file (sealed by another Seal) is refused
 //! rather than answered Sealed unchecked.
 //!
 //! It refuses to start unless it is given `--dev-test-seal` and the
-//! environment variable `GHOST_DEV_TEST_SEAL=1`, `--registry` and at least
-//! two `--node`s. It serves HTTPS when given `--tls-cert` and `--tls-key`
+//! environment variable `GHOST_DEV_TEST_SEAL=1`, `--registry`, at least two
+//! `--node`s and `--journal`, and refuses a journal file that fails its
+//! checks. It serves HTTPS when given `--tls-cert` and `--tls-key`
 //! (PEM files); without them it serves plain HTTP, and only on a loopback
 //! address. [`TestSealServer::start_with`] takes the nodes and the registry
 //! from the caller (the tests), with no network.
@@ -50,7 +57,9 @@ use crate::card_keys::CardUid;
 use crate::chain_check::{ChainNode, CoinQuery, CoinStatus, CoinStatusCheck, Network, NodeChainCheck};
 use crate::error::SealError;
 use crate::flows::{Seal, SealConfig};
-use crate::journal::MemoryJournal;
+use crate::host_journal::HostStore;
+use crate::journal::{Journal, MemoryJournal};
+use crate::journal_log::JournalLog;
 use crate::node_list::NodeList;
 use crate::node_rpc::{NodeAddress, RpcNode, TcpTransport};
 use crate::primitives::sha3_256;
@@ -100,7 +109,7 @@ const WATCH_TICK: Duration = Duration::from_millis(20);
 
 /// The usage line.
 pub const USAGE: &str = "usage: GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-test-seal --registry FILE \
---node URL --node URL [--node URL ...] [--network CHAIN_ID:GENESIS_HEX] [--listen ADDR:PORT] \
+--node URL --node URL [--node URL ...] --journal FILE [--network CHAIN_ID:GENESIS_HEX] [--listen ADDR:PORT] \
 [--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N] [--total-ms N] [--max-sessions N] [--body-ms N]";
 
 /// The test M's bytes. Public by design: SHA3-256 of
@@ -118,15 +127,34 @@ pub fn dev_test_master() -> MasterKey {
 /// A Seal holding the test M, with the system's random source and clock, a
 /// journal in memory only, and `chain_status` and `registry`.
 pub fn dev_test_seal(chain_status: Box<dyn CoinStatusCheck>, registry: Box<dyn CardRegistry>) -> Seal {
+    dev_test_seal_with(chain_status, registry, Box::new(MemoryJournal::new()))
+}
+
+/// A Seal holding the test M, with the system's random source and clock,
+/// and `chain_status`, `registry` and `journal`.
+pub fn dev_test_seal_with(
+    chain_status: Box<dyn CoinStatusCheck>,
+    registry: Box<dyn CardRegistry>,
+    journal: Box<dyn Journal>,
+) -> Seal {
     Seal::new(
         dev_test_master(),
         SealConfig { measurement: DEV_MEASUREMENT, answer_lifetime_secs: DEV_ANSWER_LIFETIME_SECS },
         Box::new(SystemRandom),
         Box::new(SystemClock),
-        Box::new(MemoryJournal::new()),
+        journal,
         chain_status,
         registry,
     )
+}
+
+/// The journal log in the file at `path` (made mode 0600 if missing),
+/// opened and verified with the test M.
+pub fn open_dev_journal(path: &std::path::Path) -> Result<JournalLog, StartError> {
+    let store = HostStore::open(path)
+        .map_err(|e| StartError::Journal(format!("cannot open the journal file {}: {e}", path.display())))?;
+    JournalLog::open(&dev_test_master(), Box::new(store))
+        .map_err(|e| StartError::Journal(format!("the journal file {} is refused: {e}", path.display())))
 }
 
 /// Makes the nodes a session's chain check asks, on the session's thread.
@@ -194,8 +222,10 @@ impl CoinStatusCheck for NoCheck {
 pub enum StartError {
     /// `--dev-test-seal` or `GHOST_DEV_TEST_SEAL=1` is missing.
     NotDevelopment(&'static str),
-    /// The card registry or the nodes are missing or unusable.
+    /// The card registry, the nodes or the journal are missing or unusable.
     Missing(String),
+    /// The journal file could not be opened, or failed its checks.
+    Journal(String),
     /// The arguments are wrong.
     Usage(String),
     /// Plain HTTP was asked for on an address that is not loopback.
@@ -212,7 +242,7 @@ impl fmt::Display for StartError {
             StartError::NotDevelopment(what) => {
                 write!(f, "refusing to start: {what} (this server is for development only)")
             }
-            StartError::Missing(what) => write!(f, "refusing to start: {what}"),
+            StartError::Missing(what) | StartError::Journal(what) => write!(f, "refusing to start: {what}"),
             StartError::Usage(what) => write!(f, "{what}"),
             StartError::PlainNotLoopback(addr) => write!(
                 f,
@@ -246,14 +276,15 @@ pub struct Options {
     registry: PathBuf,
     nodes: Vec<NodeAddress>,
     network: Network,
+    journal: PathBuf,
 }
 
 impl Options {
     /// Reads the command line (`args`, without the program name) and the
     /// value of `GHOST_DEV_TEST_SEAL` (`dev_env`). Refuses unless both
-    /// development flags are given, without `--registry` or with fewer than
-    /// two `--node`s, and refuses plain HTTP on any address that is not
-    /// loopback.
+    /// development flags are given, without `--registry`, with fewer than
+    /// two `--node`s or without `--journal`, and refuses plain HTTP on any
+    /// address that is not loopback.
     pub fn from_args(args: &[String], dev_env: Option<&str>) -> Result<Options, StartError> {
         if !args.iter().any(|a| a == DEV_FLAG) {
             return Err(StartError::NotDevelopment("--dev-test-seal is missing"));
@@ -267,6 +298,7 @@ impl Options {
         let mut limits = RelayLimits::default();
         let mut body_deadline = DEFAULT_BODY_DEADLINE;
         let mut registry = None;
+        let mut journal = None;
         let mut nodes: Vec<NodeAddress> = Vec::new();
         let mut network = NodeList::release().network;
         let mut at = 0;
@@ -279,6 +311,7 @@ impl Options {
             let value = args.get(at + 1).ok_or_else(|| StartError::Usage(format!("{flag} needs a value")))?;
             match flag {
                 "--registry" => registry = Some(PathBuf::from(value)),
+                "--journal" => journal = Some(PathBuf::from(value)),
                 // A node is named by its URL: the same URL twice is one node.
                 "--node" => nodes.push(NodeAddress::from_url(value, value).map_err(StartError::Usage)?),
                 "--network" => network = parse_network(value)?,
@@ -302,6 +335,9 @@ impl Options {
         if nodes.iter().enumerate().any(|(i, node)| nodes[..i].iter().any(|other| other.name == node.name)) {
             return Err(StartError::Missing("a --node is given twice; the chain check needs two nodes".into()));
         }
+        let journal = journal.ok_or_else(|| {
+            StartError::Missing("--journal FILE is missing (the file the test Seal keeps its journal in)".into())
+        })?;
         if body_deadline.is_zero() || body_deadline > MAX_BODY_DEADLINE {
             return Err(StartError::Usage("--body-ms must be more than zero and at most 30 seconds".into()));
         }
@@ -324,12 +360,17 @@ impl Options {
         if tls.is_none() && !listen.ip().is_loopback() {
             return Err(StartError::PlainNotLoopback(listen));
         }
-        Ok(Options { listen, tls, limits, body_deadline, registry, nodes, network })
+        Ok(Options { listen, tls, limits, body_deadline, registry, nodes, network, journal })
     }
 
     /// The card registry file.
     pub fn registry(&self) -> &std::path::Path {
         &self.registry
+    }
+
+    /// The journal file.
+    pub fn journal(&self) -> &std::path::Path {
+        &self.journal
     }
 
     /// The nodes the chain check asks.
@@ -393,6 +434,20 @@ pub struct TestSealServer {
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    sessions: SessionSeals,
+}
+
+/// How the server's Seals are made.
+#[derive(Clone)]
+struct SessionSeals {
+    installed: Installed,
+    journal: JournalLog,
+}
+
+impl SessionSeals {
+    fn seal(&self) -> Seal {
+        dev_test_seal_with(self.installed.status_check(), (self.installed.registry)(), Box::new(self.journal.clone()))
+    }
 }
 
 /// What the server's threads share.
@@ -412,7 +467,9 @@ impl TestSealServer {
 
     /// Starts serving the relay protocol on `options`' address, with the
     /// chain check and the registry of `installed` (the tests' fakes);
-    /// `options`' nodes and registry file are not used.
+    /// `options`' nodes and registry file are not used. Its journal is
+    /// `options`' journal file, verified with the test M before anything is
+    /// served: a file that fails is [`StartError::Journal`].
     pub fn start_with(options: &Options, installed: Installed) -> Result<TestSealServer, StartError> {
         if NodeChainCheck::new(installed.network, (installed.nodes)()).is_err() {
             return Err(StartError::Missing("the chain check needs at least two nodes, each named once".into()));
@@ -442,9 +499,15 @@ impl TestSealServer {
         let front = TcpListener::bind(options.listen).map_err(|e| StartError::Listen(e.to_string()))?;
         let addr = front.local_addr().map_err(|e| StartError::Listen(e.to_string()))?;
 
-        // Each session's Seal: the test M, its own check over the nodes and
-        // the registry as it stands.
-        let factory = move || dev_test_seal(installed.status_check(), (installed.registry)());
+        // The journal file, read and verified whole before anything is
+        // served.
+        let journal = open_dev_journal(&options.journal)?;
+
+        // Each session's Seal: the test M, its own check over the nodes, the
+        // registry as it stands and the one shared journal.
+        let sessions = SessionSeals { installed, journal };
+        let seals = sessions.clone();
+        let factory = move || seals.seal();
         let shared = Arc::new(Shared {
             relay: Relay::new(Arc::new(factory), options.limits),
             links: Links::default(),
@@ -478,7 +541,15 @@ impl TestSealServer {
                 }
             }));
         }
-        Ok(TestSealServer { addr, https: options.tls.is_some(), shared, stop, threads })
+        Ok(TestSealServer { addr, https: options.tls.is_some(), shared, stop, threads, sessions })
+    }
+
+    /// A Seal as each of the server's sessions runs: the test M, the chain
+    /// check, the registry and the server's journal. For the tests and
+    /// development tools that run a flow the server does not serve over
+    /// HTTP (a Fill) on the same journal.
+    pub fn seal(&self) -> Seal {
+        self.sessions.seal()
     }
 
     /// The address it listens on.

@@ -140,6 +140,15 @@ name = "registry_load"
 path = "tests/registry_load.rs"
 required-features = ["nitro"]
 
+[[test]]
+name = "journal_log"
+path = "tests/journal_log.rs"
+
+[[test]]
+name = "host_journal"
+path = "tests/host_journal.rs"
+required-features = ["nitro"]
+
 # The lattice signatures and key encapsulation are slow unoptimised; build the
 # dependencies optimised in the tests too, without debug info, so that linking
 # the test programs side by side stays small.

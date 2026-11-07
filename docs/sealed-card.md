@@ -171,8 +171,11 @@ is refused.
 - **M**: whoever holds M can derive every card's keys. M exists only inside
   the Seal; there is no function that exports it or backs it up.
 - **The journal store**: it must keep entries durably. It sees only sealed
-  bytes, but deleting an Open entry after the key slot was wiped would lose
-  that key.
+  bytes, and a store that changes, drops, repeats or reorders records, or
+  rolls the log back while the Seal runs, is caught and refused. But it can
+  delete the log, or cut its tail while the Seal is stopped (the shorter log
+  still verifies at the next start), and deleting an Open entry after the
+  key slot was wiped would lose that key.
 - **The chain nodes**: that the nodes of the release node list do not all
   lie the same way at once. One node that is wrong, behind or unreachable
   only stops the answer.
@@ -210,8 +213,12 @@ Next:
 
 - Key 3 is kept for SUN messages, so a Check can also prove the tap is live.
 - Rate-limit Opens and Checks per card in the Seal.
-- Sealed journal entries replicated with the Seal across regions, with
-  rollback protection.
+- The sealed journal log replicated to the other regions, with rollback
+  protection: its head (last counter and tag) kept where the host cannot
+  touch it, so a host that cuts the tail of the log while the enclave is
+  stopped is caught at the next start (today only a cut while it runs is),
+  and a journal that survives the host instance being replaced. Each region
+  keeps its own log for now.
 
 ## Card keys
 
@@ -411,6 +418,49 @@ fresh IV, then HMAC-SHA3-256 over `ghost-seal/v1/journal` || entry kind ||
 UID || IV || ciphertext, both keys from HKDF(M) with the label
 `ghost-seal/v1/journal`.
 
+Under that, the journal is an append-only log (`seal/src/journal_log.rs`)
+that the parent host keeps (`seal/src/host_journal.rs`,
+`/var/lib/seal/journal.log`, served on vsock port 5005 by `seal_proxy
+journal`). Each save of an entry appends one record:
+
+```text
+counter (u64, from 1, +1 each save)
+record = IV (16) || AES-256-CBC(entry kind (1) || UID (7) || sealed entry, ISO 9797-1 padding 2) || tag (32)
+tag    = HMAC-SHA3-256(ghost-seal/v1/host-journal || counter || previous record's tag || IV || ciphertext)
+```
+
+The previous tag of record 1 is 32 zero bytes. Both keys are HKDF(M) with
+the label `ghost-seal/v1/host-journal` (salt and info), the first 32 bytes
+for AES-256, the next 32 for HMAC. The host holds counters and ciphertext
+only: no UID, entry kind, card data or key, and never M. A record is at most
+4096 bytes.
+
+- **Open.** The Seal reads every record in order and refuses the whole log
+  (no flow is served) on a counter that is not the previous one plus 1 (a
+  gap, a repeat or a reorder), a bad tag, a tag chained to another previous
+  record, a record that does not decode, or another M. It keeps the latest
+  entry per card and kind in enclave memory, and loads answer from that
+  verified map, never from the host.
+- **Save.** It appends the next record and waits for the host to confirm it
+  is on disk (flushed with its directory); only then is the map changed and
+  the save `Ok`, and the Seal changes a card only after that. Any store
+  error is a journal error. An append whose answer was lost is taken as
+  written if a later read of the host's log shows exactly it at the end.
+- **Rollback.** While it runs, the Seal remembers the last counter and tag
+  it wrote. A later read of the host's log (at each session) that has fewer
+  records, more, or another tail is a rollback: refused, and no save is
+  taken again until a restart.
+- One log per Seal, behind one lock, shared by every session, so counters
+  never collide.
+
+What it does not catch: a host that cuts the tail of the log while the Seal
+is stopped, then starts it, shows it a shorter log that is still valid; the
+checks cannot see records that were never shown to it. A cut while the Seal
+runs is caught. Closing that needs the log's head kept where the host cannot
+touch it (the other regions): "Next" above. The log is not compacted, and
+it survives the enclave and the host restarting, not the host instance
+being replaced.
+
 ## Every derivation label
 
 | Label | Derives |
@@ -419,6 +469,7 @@ UID || IV || ciphertext, both keys from HKDF(M) with the label
 | `ghost-seal/v1/answer-signing-key` | the ML-DSA-65 seed of the answer key |
 | `ghost-seal/v1/open-pin` | the key of the Open PIN hash (info: label, UID, generation); the hash is HMAC-SHA3-256 over the label and the PIN, first 16 bytes |
 | `ghost-seal/v1/journal` | the journal's AES-256 and HMAC keys |
+| `ghost-seal/v1/host-journal` | the journal log's AES-256 and HMAC keys (salt and info), and the first part of each record's tag |
 | `ghost-seal/v1/open-release` | the release's AES-256 and HMAC keys, from the ML-KEM shared secret |
 | `ghost-seal/v1/record-check` | the check of each record frame |
 | `ghost-seal/v1/phone-key` | the hash of a bound phone key |

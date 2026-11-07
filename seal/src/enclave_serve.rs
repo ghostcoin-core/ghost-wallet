@@ -21,9 +21,19 @@
 //! status check and the registry: there is no other way to build one.
 //!
 //! The enclave program installs the chain status check over the release
-//! node list ([`NodeChainStatus`]) and the registry the host loads
-//! (`LoadedRegistry`); when the first registry load arrives after M,
-//! [`EnclaveService::refresh_flows`] rebuilds the routes.
+//! node list ([`NodeChainStatus`]), the registry the host loads
+//! (`LoadedRegistry`) and the durable journal: the append-only sealed log
+//! (`journal_log::SharedLog`) over the parent's store
+//! (`host_journal::HostJournal`). When the first registry load arrives
+//! after M, [`EnclaveService::refresh_flows`] rebuilds the routes.
+//!
+//! The journal is opened and verified once, with the M just installed
+//! ([`DurableJournal::journal`]). A journal that cannot be read, fails its
+//! checks (a gap, a repeat, a reorder, a bad tag, another M) leaves every
+//! flow 503 and logs [`ServiceEvent::JournalRefused`]; `refresh_flows`
+//! tries again. Each session's Seal gets a handle to the same log, after
+//! the host's log is read again: a rollback seen then refuses that session
+//! (and every later save), and is logged the same way.
 //!
 //! The service log ([`ServiceLog`]) takes a fixed set of events with no
 //! field for carried bytes: no path, header, body, PIN or key is ever
@@ -36,12 +46,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
 use crate::attestation::{AttestationSource, AttestationVerifier};
+use crate::card_keys::CardUid;
 use crate::chain_check::{
     ChainNode, CoinQuery, CoinStatus, CoinStatusCheck, Network, NodeChainCheck, NodeListError,
 };
 use crate::enclave_tls::EnclaveTls;
+use crate::error::SealError;
 use crate::flows::{Seal, SealConfig};
-use crate::journal::Journal;
+use crate::journal::{EntryKind, Journal};
+use crate::journal_log::SharedLog;
 use crate::key_share::{self, GiverContext, read_frame, write_frame};
 use crate::measurements::TrustedList;
 use crate::node_rpc::RpcNode;
@@ -148,8 +161,36 @@ impl ChainStatus for NodeChainStatus {
 /// in enclave memory only is not one). Every session's Seal writes to the
 /// same store.
 pub trait DurableJournal: Send + Sync {
-    /// The journal a session's Seal is built with.
-    fn journal(&self) -> Box<dyn Journal>;
+    /// The journal a session's Seal holding `master` is built with. The
+    /// first call opens and verifies the journal with `master` (the M just
+    /// installed); every later call hands out a handle to the same journal.
+    /// An error leaves the flows unserved.
+    fn journal(&self, master: &MasterKey) -> Result<Box<dyn Journal>, SealError>;
+}
+
+/// The enclave's durable journal: the append-only log (`journal_log`) over
+/// the parent host's store (`host_journal::HostJournal`), opened once with
+/// M and shared by every session behind one lock. Each later call reads the
+/// host's log again and refuses a rollback.
+impl DurableJournal for SharedLog {
+    fn journal(&self, master: &MasterKey) -> Result<Box<dyn Journal>, SealError> {
+        SharedLog::journal(self, master).map(|log| Box::new(log) as Box<dyn Journal>)
+    }
+}
+
+/// The journal of a session whose journal could not be handed out (the
+/// host's log was rolled back, or could not be read): it holds nothing and
+/// takes no save, so its Seal changes no card.
+struct RefusedJournal;
+
+impl Journal for RefusedJournal {
+    fn load(&self, _uid: &CardUid, _kind: EntryKind) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn save(&mut self, _uid: &CardUid, _kind: EntryKind, _sealed: Vec<u8>) -> Result<(), SealError> {
+        Err(SealError::Journal("the journal is refused"))
+    }
 }
 
 /// The wallet core's Phantom Key derivation, which a Fill needs.
@@ -159,8 +200,11 @@ pub trait KeyMakerSource: Send + Sync {
 }
 
 /// What the enclave must be given before it may answer a card. The enclave
-/// program installs the chain status check and the registry; with no
-/// durable journal yet it still answers every flow request `unavailable`.
+/// program installs the chain status check, the registry and the durable
+/// journal (the sealed log over the parent's store); until the journal has
+/// been opened and verified with M it still answers every flow request
+/// `unavailable`. It installs no key maker yet, so a Fill stays
+/// `unavailable`.
 #[derive(Clone, Default)]
 pub struct ServiceDeps {
     /// The chain status check.
@@ -215,6 +259,9 @@ pub enum ServiceEvent {
         /// The receiving build's name, as the list names it.
         build: String,
     },
+    /// The durable journal could not be opened or verified with M (or a
+    /// session's could not be handed out): no flow is served on it.
+    JournalRefused,
     /// A key-share request was refused.
     KeyShareRefused,
     /// A connection began with neither a TLS record nor a frame, and was
@@ -231,6 +278,9 @@ impl fmt::Display for ServiceEvent {
             ),
             ServiceEvent::FlowsServed => f.write_str("serves the flows from now on"),
             ServiceEvent::HandedMaster { build } => write!(f, "handed M to build {build}"),
+            ServiceEvent::JournalRefused => {
+                f.write_str("the durable journal was refused (unreadable, failed its checks or rolled back)")
+            }
             ServiceEvent::KeyShareRefused => f.write_str("refused a key-share request"),
             ServiceEvent::UnknownProtocol => f.write_str("closed a connection of no known protocol"),
         }
@@ -429,11 +479,20 @@ impl EnclaveService {
     }
 
     /// The flows over Seals holding `master`, with the installed deps; none
-    /// until all three are installed and the registry is loaded.
+    /// until all three are installed, the registry is loaded and the
+    /// durable journal opened and verified with `master`.
     fn flows(&self, master: &MasterKey) -> Option<Flows> {
         let chain = self.deps.chain.clone()?;
         let registry = self.deps.registry.clone().filter(|r| r.loaded())?;
         let journal = self.deps.journal.clone()?;
+        // Opens and verifies the journal once, with the M just installed. A
+        // journal that fails leaves every flow unserved (HTTP 503); the next
+        // `refresh_flows` tries again.
+        if journal.journal(master).is_err() {
+            self.shared.log.record(ServiceEvent::JournalRefused);
+            return None;
+        }
+        let log = Arc::clone(&self.shared.log);
         // Each session's Seal holds its own copy of M, wiped when it is
         // dropped; the copies live in enclave memory only.
         let held = Arc::new(Zeroizing::new(*master.derive_from()));
@@ -446,12 +505,18 @@ impl EnclaveService {
         let factory: SealFactory = Arc::new(move || {
             let mut bytes = **held;
             let master = MasterKey::take(&mut bytes);
+            // The same shared journal for every session, checked again for a
+            // rollback each time; a session it is refused to changes no card.
+            let session_journal = journal.journal(&master).unwrap_or_else(|_| {
+                log.record(ServiceEvent::JournalRefused);
+                Box::new(RefusedJournal)
+            });
             Seal::new(
                 master,
                 seal_config.clone(),
                 Box::new(SystemRandom),
                 Box::new(SharedClock(Arc::clone(&clock))),
-                journal.journal(),
+                session_journal,
                 session_chain.status_check(),
                 registry.registry(),
             )

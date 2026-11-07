@@ -379,13 +379,55 @@ registry, so no Seal anywhere answers Sealed unchecked or serves an
 unregistered card.
 
 The enclave program installs the chain status check (`NodeChainStatus`: the
-`RpcNode`s of the compiled-in release node list, over vsock to the host) and
-the card registry the host loads (`LoadedRegistry`). It installs no durable
-journal yet, and no `KeyMakerSource` (a Fill needs one), so every flow
-request (start, step and abort) is still answered HTTP 503 `unavailable` with
-the message "This Seal is not ready to answer cards", and no card traffic is
-sent; the attestation route still works once M is held. The tests install
-fakes for the journal and the key maker to prove the flows.
+`RpcNode`s of the compiled-in release node list, over vsock to the host),
+the card registry the host loads (`LoadedRegistry`) and the durable
+journal: the append-only sealed log (`seal/src/journal_log.rs`, a
+`SharedLog`) over the parent's store (`seal/src/host_journal.rs`, below).
+With M, the three and a loaded registry, `ServiceDeps::ready()` is true and
+Check, Fill confirmation and Open are served. It installs no
+`KeyMakerSource` yet (a Fill needs one), so a Fill start is still answered
+HTTP 503 `unavailable`.
+
+The journal is opened once, with the M just installed
+(`DurableJournal::journal(&master)`): the enclave reads every record from
+the host and refuses the log on a counter that is not the previous one plus
+1 (a gap, a repeat or a reorder), a bad tag, a tag chained to another
+record, a record that does not decode, or another M. A refused or
+unreachable journal leaves every flow request (start, step and abort)
+answered HTTP 503 `unavailable` with the message "This Seal is not ready to
+answer cards", sends no card traffic, and logs one fixed event (`the durable
+journal was refused`, no bytes); the enclave tries again every minute and at
+each registry load. The attestation route still works once M is held. Each
+session's Seal then gets a handle to the same log, behind one lock: before
+it, the host's log is read again, and a log shorter, longer or with another
+tail than the one the enclave wrote is a rollback, refused for good (no save
+is taken, so no card changes) and logged the same way. Loads answer from the
+log as verified in enclave memory, never from the host. The tests install
+the log over a store in memory they can corrupt, and fakes for the rest.
+
+### The journal store on the host (`seal/src/host_journal.rs`, `seal_proxy journal`)
+
+The parent keeps the log in one file, `/var/lib/seal/journal.log` (the
+`seal-journal` unit's systemd state directory, created mode 0600), and serves
+it to the enclave on vsock port 5005 with `seal_proxy journal 5005
+/var/lib/seal/journal.log`: the deployed proxy binary, no new artifact.
+Requests are frames: 1 || counter || record (append) and 2 (read all). The
+host takes an append only with the next counter and a record of at most 4096
+bytes, writes `counter || length || record || check`, flushes the file and
+its directory (`fsync`), and only then answers ok; a torn last record is
+dropped when it opens the file. The enclave connects to the parent (CID 3)
+port 5005 for each request, with 10 seconds per request; any failure, refusal
+or timeout is a journal error, and the Seal changes a card only after a save
+succeeded. The host sees counters and ciphertext only, and is not trusted for
+integrity: the enclave checks the log itself.
+
+The file survives the enclave and the host restarting, not the host instance
+being replaced (`enclave/RUNBOOK.md`). Each region keeps its own log. What
+this does not catch: a host that cuts the tail of the log while the enclave
+is stopped shows it a shorter log that is still valid at the next start (the
+checks cannot see records never shown to it). A cut while the enclave runs
+is caught. Closing the restart case needs the log's head kept where the host
+cannot touch it, in the other regions (`docs/sealed-card.md`, "Next").
 
 ## What is still trusted
 
@@ -410,10 +452,12 @@ real PCR values (they need a Nitro-capable builder), the release key (made
 offline by the release owner; its public half goes into `RELEASE_KEY_HEX`
 before the first image is built, and its signature into
 `enclave/measurements.json` each time a build is published), the reproducibility check
-in CI, what the enclave still needs before it answers a card (a durable
-sealed journal kept outside the enclave, and the `KeyMakerSource` for a
-Fill; the chain check over the host's vsock ports 5003 and 5004 and the card
-registry loaded by the host are installed), a faster Vanish lookup than the
+in CI, what the enclave still needs before it answers every flow (the
+`KeyMakerSource` for a Fill; the chain check over the host's vsock ports 5003
+and 5004, the card registry loaded by the host and the durable sealed journal
+on the host's vsock port 5005 are installed), the journal's head kept where
+the host cannot touch it (so a tail cut while the enclave is stopped is
+caught) and a journal that survives a replaced host, a faster Vanish lookup than the
 bounded block scan, nodes of independent operators in the release node list,
 and the app's check of the phone attestation and of the TLS certificate it
 binds.
