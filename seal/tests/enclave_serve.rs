@@ -44,7 +44,8 @@ use ghost_seal::enclave_serve::{
 use ghost_seal::journal_anchor::{
     Anchor, PEER_PORTS, Peer, PeerLink, PeerLogs, RELEASE_REGIONS, Regions, WRONG_REGION_MESSAGE, home_region,
 };
-use ghost_seal::journal_log::LogStore;
+use ghost_seal::MasterKey;
+use ghost_seal::journal_log::{HeadAnchor, LogStore};
 use ghost_seal::proxy::TcpConnector;
 use ghost_seal::journal_log::{JournalLog, MemoryLogStore, SharedLog};
 use ghost_seal::{EntryKind, Journal};
@@ -485,6 +486,31 @@ fn reread(store: &MemoryLogStore) -> JournalLog {
     JournalLog::open(&support::master(), Box::new(store.clone())).expect("the log verifies")
 }
 
+/// An anchor that asks no peer (test only): reads a region's log as its own
+/// enclave does, every tag bound to that region.
+struct ReadOnly(&'static str);
+
+impl HeadAnchor for ReadOnly {
+    fn origin(&self) -> &str {
+        self.0
+    }
+
+    fn restore(&mut self, _: &MasterKey, _: &[(u64, Vec<u8>)]) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
+        Ok(Vec::new())
+    }
+
+    fn anchor(&mut self, _: u64, _: &[u8], _: &mut dyn LogStore) -> Result<(), SealError> {
+        Err(SealError::Journal("a read-only log takes no save"))
+    }
+}
+
+/// Region `origin`'s anchored log as its enclave reads it from `store`.
+fn reread_in(store: &MemoryLogStore, origin: &'static str) -> JournalLog {
+    let anchor = Box::new(ReadOnly(origin));
+    JournalLog::open_anchored(&support::master(), Box::new(store.clone()), Box::new(Random(0)), anchor)
+        .expect("the log verifies")
+}
+
 /// Fills card `card` through `service` and has the fake chain pay and the
 /// confirmation seal it; the commit data.
 fn fill_and_seal(service: &EnclaveService, fakes: &enclave::Fakes, card: &mut SimCard, seen: &mut Vec<Value>) -> Vec<u8> {
@@ -818,15 +844,26 @@ fn assert_wrong_region(answer: &(u16, Value), home: &str) {
 }
 
 /// Begins an Open of `card` on `service` and cuts it off at the first card
-/// command after it was journaled in `store`.
-fn begin_open_cut_off(service: &EnclaveService, store: &MemoryLogStore, card: &mut SimCard, open: &Value) {
+/// command after it was journaled in `store`, the log of region `origin`
+/// (`None`: a log anchored nowhere).
+fn begin_open_cut_off(
+    service: &EnclaveService,
+    store: &MemoryLogStore,
+    origin: Option<&'static str>,
+    card: &mut SimCard,
+    open: &Value,
+) {
     let mut step = 0;
     loop {
         card.drop_from(step, support::DropStyle::AfterCard);
         let ended = carry_or_drop(service, card, post(service, "/v1/open/start", open));
         card.reconnect();
         assert!(ended.is_none() || ended.as_ref().is_some_and(|a| a.0 != 200), "step {step}: cut off");
-        if reread(store).load(&UID, EntryKind::Open).is_some() {
+        let log = match origin {
+            Some(origin) => reread_in(store, origin),
+            None => reread(store),
+        };
+        if log.load(&UID, EntryKind::Open).is_some() {
             return;
         }
         step += 1;
@@ -848,7 +885,7 @@ fn an_open_begun_at_home_is_refused_wrong_region_elsewhere_touching_nothing_and_
     let commit_data = fill_and_seal(&home, &home_fakes, &mut card, &mut Vec::new());
     let phone = support::phone(0x71);
     let open = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x72; 32]), "phoneKey": to_hex(&phone.public_key()) });
-    begin_open_cut_off(&home, &home_store, &mut card, &open);
+    begin_open_cut_off(&home, &home_store, None, &mut card, &open);
 
     // The phone tries the other region: its Open, and a Check, a Fill and a
     // Fill confirmation of the same card, are refused, naming the home.
@@ -985,7 +1022,7 @@ fn the_journal_is_anchored_in_the_peer_enclaves_over_the_service_port() {
         assert!(service.serves_flows());
         assert_eq!(*log.0.lock().unwrap(), vec![ServiceEvent::MasterInstalled { serves_flows: true }]);
         let commit_data = fill_and_seal(&service, &fakes, &mut card, &mut Vec::new());
-        begin_open_cut_off(&service, &store, &mut card, &open);
+        begin_open_cut_off(&service, &store, Some(HOME), &mut card, &open);
         (commit_data, fakes)
         // The host instance is lost here, with its store.
     };

@@ -447,10 +447,14 @@ journal`). Each save of an entry appends one record:
 ```text
 counter (u64, from 1, +1 each save)
 record = IV (16) || AES-256-CBC(entry kind (1) || UID (7) || sealed entry, ISO 9797-1 padding 2) || tag (32)
-tag    = HMAC-SHA3-256(ghost-seal/v1/host-journal || counter || previous record's tag || IV || ciphertext)
+tag    = HMAC-SHA3-256(ghost-seal/v1/host-journal || origin length (1) || origin || counter
+                       || previous record's tag || IV || ciphertext)
 ```
 
-The previous tag of record 1 is 32 zero bytes. Both keys are HKDF(M) with
+The origin is the id of the region whose log it is (empty for a log
+anchored nowhere, as in the dev test server), so a record of one region's
+log never verifies as another region's: not on a host, not in a peer's log
+of another origin, not in a restore. The previous tag of record 1 is 32 zero bytes. Both keys are HKDF(M) with
 the label `ghost-seal/v1/host-journal` (salt and info), the first 32 bytes
 for AES-256, the next 32 for HMAC. The host holds counters and ciphertext
 only: no UID, entry kind, card data or key, and never M. A record is at most
@@ -482,9 +486,13 @@ the log's head is anchored in the other regions (`seal/src/journal_anchor.rs`):
   region's log, ciphertext only, in a log per origin region on its own host
   (`/var/lib/seal/peer-<region>.log`, the same store and checks, the same
   vsock port 5005). It checks each record with M before it keeps it: the
-  next counter, a good tag chained to the last record it holds, and that it
-  decodes. A peer never holds a UID, an entry kind, card data, a key or M in
-  the clear.
+  next counter, a good tag chained to the last record it holds and bound to
+  the origin the request names, and that it decodes. A peer never holds a
+  UID, an entry kind, card data, a key or M in the clear. Requests carry no
+  caller authentication: anyone reaching the service port can fetch a log's
+  ciphertext, but a record fetched from region A's log appended as region
+  B's (as B's record 1 or any later one) fails its tag and is refused, the
+  peer's log of B unchanged.
 - **Save.** After the host's append is durable, the record goes to every
   peer (service request kind 3 over the service port, through the parent's
   vsock ports 5006 and 5007 and the host's proxy to the peer region's
@@ -527,8 +535,9 @@ region list (compiled into the image, `RELEASE_REGIONS`: `us-east-1`,
 `eu-central-1`, `ap-southeast-1`), the region id whose
 SHA3-256(`ghost-seal/v1/home-region` || region id || UID) is the greatest,
 compared as big-endian bytes (on a tie, the earlier region). Each enclave's
-own region id is compiled into its image too (`SEAL_REGION` at build time),
-never taken from the host. A Check, Fill, Fill confirmation or Open start of
+own region id is compiled into its image too (the `SEAL_REGION` build
+argument of `enclave/Dockerfile`, one image and one set of PCRs per region,
+each on the signed measurements list), never taken from the host. A Check, Fill, Fill confirmation or Open start of
 a card whose home is another region is refused HTTP 422 with the reason
 `wrong-region` and the home region in `homeRegion` (`docs/seal-relay.md`),
 before any session: no card command, no journal read or write, no log line.

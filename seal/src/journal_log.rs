@@ -8,14 +8,19 @@
 //!
 //! ```text
 //! record = IV (16) || AES-256-CBC(entry kind (1) || UID (7) || sealed entry, padded) || tag (32)
-//! tag    = HMAC-SHA3-256(ghost-seal/v1/host-journal || counter (u64, big endian)
-//!                        || the previous record's tag || IV || ciphertext)
+//! tag    = HMAC-SHA3-256(ghost-seal/v1/host-journal || origin length (1) || origin
+//!                        || counter (u64, big endian) || the previous record's tag
+//!                        || IV || ciphertext)
 //! ```
 //!
-//! The previous tag of record 1 is 32 zero bytes. Both keys come from HKDF
-//! over M with the label [`HOST_JOURNAL_LABEL`]. The store holds the
-//! counters and the records only: it sees no UID, no entry kind, no card
-//! data and no key, and it never holds M.
+//! The origin is the id of the region whose log it is (the anchor's region,
+//! [`HeadAnchor::origin`]; empty for a log anchored nowhere), so a record of
+//! one region's log never verifies as another region's: not on its host,
+//! not in a peer's log of another origin, not in a restore. The previous tag
+//! of record 1 is 32 zero bytes. Both keys come from HKDF over M with the
+//! label [`HOST_JOURNAL_LABEL`]. The store holds the counters and the
+//! records only: it sees no UID, no entry kind, no card data and no key, and
+//! it never holds M.
 //!
 //! Opening the log ([`JournalLog::open`]) reads every record in order and
 //! refuses the whole log on a counter that is not the previous one plus 1
@@ -158,6 +163,8 @@ impl LogStore for MemoryLogStore {
 /// Keeps a log's head where its store's host cannot touch it (the other
 /// regions, `journal_anchor::Anchor`).
 pub trait HeadAnchor: Send {
+    /// The region whose log this is: bound into every record's tag.
+    fn origin(&self) -> &str;
     /// Called once, when the log is opened with `master`, with every record
     /// of the store, already checked: the records the anchor's peers hold
     /// past them, in order, which the log appends to the store before it is
@@ -180,9 +187,10 @@ pub struct Chain {
 }
 
 impl Chain {
-    /// An empty chain under the keys of `master`.
-    pub fn new(master: &MasterKey) -> Chain {
-        Chain { keys: LogKeys::derive(master), counter: 0, tag: [0u8; TAG_BYTES] }
+    /// An empty chain of region `origin`'s log under the keys of `master`:
+    /// it takes only records written for that origin.
+    pub fn new(master: &MasterKey, origin: &str) -> Chain {
+        Chain { keys: LogKeys::derive(master, origin), counter: 0, tag: [0u8; TAG_BYTES] }
     }
 
     /// The counter of the last record taken (0: none).
@@ -214,26 +222,37 @@ pub fn record_tag(record: &[u8]) -> Option<[u8; TAG_BYTES]> {
     (record.len() >= MIN_RECORD_BYTES).then(|| tag_of(record))
 }
 
-/// The log's two keys, derived from M.
+/// The longest origin a tag binds (a region id).
+const MAX_ORIGIN_BYTES: usize = 32;
+
+/// The log's two keys, derived from M, and the origin region its tags bind.
 #[derive(Clone)]
 struct LogKeys {
     enc: Zeroizing<[u8; 32]>,
     mac: Zeroizing<[u8; 32]>,
+    origin: Vec<u8>,
 }
 
 impl LogKeys {
-    fn derive(master: &MasterKey) -> LogKeys {
+    fn derive(master: &MasterKey, origin: &str) -> LogKeys {
         let mut okm = Zeroizing::new([0u8; 64]);
         hkdf_sha3_256(HOST_JOURNAL_LABEL, master.derive_from(), &[HOST_JOURNAL_LABEL], &mut okm[..]);
         let mut enc = Zeroizing::new([0u8; 32]);
         let mut mac = Zeroizing::new([0u8; 32]);
         enc.copy_from_slice(&okm[..32]);
         mac.copy_from_slice(&okm[32..]);
-        LogKeys { enc, mac }
+        // A region id is at most 32 bytes (`journal_anchor::valid_region`);
+        // a longer one is cut, so its length always fits its one byte.
+        let origin = origin.as_bytes()[..origin.len().min(MAX_ORIGIN_BYTES)].to_vec();
+        LogKeys { enc, mac, origin }
     }
 
     fn tag(&self, counter: u64, previous: &[u8; TAG_BYTES], iv_and_body: &[u8]) -> [u8; TAG_BYTES] {
-        hmac_sha3_256(&self.mac[..], &[HOST_JOURNAL_LABEL, &counter.to_be_bytes(), previous, iv_and_body])
+        let length = [self.origin.len() as u8];
+        hmac_sha3_256(
+            &self.mac[..],
+            &[HOST_JOURNAL_LABEL, &length, &self.origin, &counter.to_be_bytes(), previous, iv_and_body],
+        )
     }
 
     /// Record `counter`, chained to `previous`, holding `sealed` for card
@@ -479,21 +498,22 @@ impl JournalLog {
         mut store: Box<dyn LogStore>,
         random: Box<dyn SealRandom + Send>,
     ) -> Result<JournalLog, SealError> {
-        let keys = LogKeys::derive(master);
+        let keys = LogKeys::derive(master, "");
         let verified = verify(&keys, &store.read_all()?)?;
         Ok(JournalLog::from_verified(store, keys, random, None, verified))
     }
 
     /// [`JournalLog::open_with`] with the log's head kept by `anchor`: the
-    /// records its peers hold past the store's end are restored to the store
-    /// first, and each later save is `Ok` only once every peer holds it.
+    /// log of the anchor's origin region (bound into every tag), the records
+    /// its peers hold past the store's end restored to the store first, and
+    /// each later save `Ok` only once every peer holds it.
     pub fn open_anchored(
         master: &MasterKey,
         mut store: Box<dyn LogStore>,
         random: Box<dyn SealRandom + Send>,
         mut anchor: Box<dyn HeadAnchor>,
     ) -> Result<JournalLog, SealError> {
-        let keys = LogKeys::derive(master);
+        let keys = LogKeys::derive(master, anchor.origin());
         let verified = settle_open(master, &keys, store.as_mut(), Some(anchor.as_mut()))?;
         Ok(JournalLog::from_verified(store, keys, random, Some(anchor), verified))
     }
@@ -551,7 +571,7 @@ impl JournalLog {
 
     /// Whether the log was opened with `master`.
     pub fn opened_with(&self, master: &MasterKey) -> bool {
-        ct_eq(&self.lock().keys.mac[..], &LogKeys::derive(master).mac[..])
+        ct_eq(&self.lock().keys.mac[..], &LogKeys::derive(master, "").mac[..])
     }
 }
 
@@ -632,7 +652,7 @@ impl SharedLog {
             return Ok(log.clone());
         }
         let (store, _, anchor) = opening.waiting.as_mut().ok_or(SealError::Journal("the log has no store"))?;
-        let keys = LogKeys::derive(master);
+        let keys = LogKeys::derive(master, anchor.as_ref().map_or("", |anchor| anchor.origin()));
         let verified = settle_open(master, &keys, store.as_mut(), anchor.as_deref_mut())?;
         let (store, random, anchor) = opening.waiting.take().ok_or(SealError::Journal("the log has no store"))?;
         let log = JournalLog::from_verified(store, keys, random, anchor, verified);

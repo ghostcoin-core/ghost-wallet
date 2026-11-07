@@ -20,6 +20,9 @@ Short operating notes for the Seal on AWS Nitro Enclaves. The design is in
   Keep at least two regions running at all times.
 - Never stop a region for long: every Fill and Open waits for both other
   regions to take its journal record. Keep every region running.
+- Never run one region's EIF in another region's stack, nor one EIF in two
+  regions. Each region's image has its region id compiled in;
+  `deploy.sh` takes one EIF per region and refuses one EIF for two regions.
 
 ## Needs
 
@@ -88,24 +91,42 @@ the images trust only the key compiled into them.
 
 ## Publish a build
 
+Each region runs its own image: the enclave's region id is the
+`SEAL_REGION` build argument of `enclave/Dockerfile`, compiled into
+`seal_enclave`, so the host can never change it. A release is one image per
+region of `enclave/deploy/regions.json`, each with its own PCRs and its own
+entry on the signed list. The Dockerfile refuses to build an enclave image
+without `SEAL_REGION` or with one that is not on the compiled region list
+(`RELEASE_REGIONS` in `seal/src/journal_anchor.rs`).
+
 1. On the builder, at the release commit: `bash enclave/scripts/check-reproducible.sh`.
-2. `bash enclave/scripts/compute-pcrs.sh seal-YYYY-MM-DD`. It writes
-   `enclave/out/seal.eif` and its SHA-256, and adds the build to
-   `enclave/measurements.json`.
-3. Export the host proxy:
+   It builds each region's program twice and fails unless each region's
+   two builds match and no two regions' builds are the same.
+2. `bash enclave/scripts/compute-pcrs.sh seal-YYYY-MM-DD`. For each region
+   it builds the image with `--build-arg SEAL_REGION=<region>`, writes
+   `enclave/out/seal-<region>.eif` and its SHA-256, and adds one build per
+   region, named `seal-YYYY-MM-DD-<region>`, to `enclave/measurements.json`
+   (all at once, and only if no two regions share a PCR0).
+3. Export the host proxy (the same for every region):
    `docker build --platform linux/arm64 -f enclave/Dockerfile --target proxy -o enclave/out .`
 4. Have a second person rebuild from the same commit and compare the three
-   PCRs. The release owner signs the list offline (above). Commit the signed
-   list; add the same entry to `lib/seal/pinned-measurements.ts` in the app
-   release that should accept it.
-5. Upload `seal.eif`, `seal_proxy` and the committed `measurements.json` to
-   an HTTPS location, and note the SHA-256 of each.
+   PCRs of every region. The release owner signs the list offline (above).
+   Commit the signed list; add every region's entry to
+   `lib/seal/pinned-measurements.ts` in the app release that should accept
+   it.
+5. Upload each region's `seal-<region>.eif`, `seal_proxy` and the committed
+   `measurements.json` to an HTTPS location, and note the SHA-256 of each.
 
 ## First deploy
 
 `bash enclave/scripts/deploy.sh` prints the plan. Then run it again with
-`--apply` and the URLs and hashes from above plus `--ghost-node HOST:PORT`
-and `--ghost-node-2 HOST:PORT`: the two nodes of the release node list
+`--apply` and the URLs and hashes from above: each region's own EIF as
+`--eif-url <region>=URL --eif-sha256 <region>=HEX`, one of each for every
+region of `regions.json` (for example
+`--eif-url us-east-1=https://.../seal-us-east-1.eif --eif-sha256 us-east-1=<hex>`),
+plus `--ghost-node HOST:PORT` and `--ghost-node-2 HOST:PORT`. `deploy.sh`
+refuses when any region's EIF URL or hash is missing, names a region not in
+`regions.json`, or gives one EIF to two regions. The two nodes of the release node list
 compiled into the image (`seal/src/node_list.rs`), in its order, each at its
 HTTPS port 443. The host carries the enclave's vsock port 5003 to the first
 (unit `seal-node`) and 5004 to the second (unit `seal-node-2`); the bytes stay
@@ -116,13 +137,18 @@ chain check ("can't check right now"). The first region in
 the peer listed for it. Check each host's `/ghost-seal/<stack>` log group for
 `ok: made M (genesis)` and `ok: received M from a running enclave`.
 
-Each image is built for one region: `SEAL_REGION` (one of the region list
-compiled into it, `RELEASE_REGIONS` in `seal/src/journal_anchor.rs`) is set
-when the enclave program is built, so each region has its own build and
-PCRs on the signed list. An image built without it logs
-`no region was compiled into this image; not answering cards`.
-`enclave/Dockerfile` and `compute-pcrs.sh` do not pass `SEAL_REGION` yet:
-until they do, an image they build answers no card.
+Each image is built for one region (see "Publish a build"), so each stack
+runs its own region's EIF and PCRs, each on the signed list. Each enclave
+logs `serves the cards whose home region is <region>` at its start; check it
+names the stack's region. An image built some other way without a region
+logs `no region was compiled into this image; not answering cards` and
+serves no card. Because the regions run different images, a joining
+enclave trusts its giver in another region only through the release's
+signed list: `seal_proxy start` offers `measurements.json` before the start
+frame (the enclave answers `ok: took a signed list before the start`). The
+release key must exist and the list must be signed before the first deploy;
+an unsigned list is refused and the join then fails
+(`refused: join failed`).
 `regions.json` must list exactly the compiled region list, in its order;
 `deploy.sh` refuses otherwise. Each stack gets the two other regions as its
 journal anchor peers (`AnchorPeerRegion`, `AnchorPeerRegion2`) and their
@@ -216,14 +242,16 @@ starts empty: load it again after its start.
 
 ## Upgrade to a new build
 
-1. Build the new image with the running build in `COMPILED_BUILDS`
-   (`seal/src/measurements.rs`), so it takes M from it. Publish it (above)
-   with status `allowed`, keeping the running build allowed.
+1. Build the new images (one per region) with the running builds (every
+   region's) in `COMPILED_BUILDS` (`seal/src/measurements.rs`), so they take
+   M from them. Publish them (above) with status `allowed`, keeping the
+   running builds allowed.
 2. On every running host, give the enclave the signed list:
    `/opt/seal/seal_proxy list <enclave CID> measurements.json`. It answers
    `ok: took a signed list` only for a list the release key signed that keeps
    every build it already holds.
-3. Redeploy one region at a time with the new EIF and the new list: each new
+3. Redeploy one region at a time with that region's new EIF and the new list
+   (`deploy.sh` with every region's `--eif-url` and `--eif-sha256`): each new
    host joins from a region still running. Wait for its `ok` before the next.
 4. When every region runs the new build and the app pins it, mark the old
    build `revoked` in a later signed list and give it to every enclave.
@@ -239,8 +267,9 @@ older signed list can bring it back.
 
 ## Replace a lost region
 
-Redeploy its stack: the new host starts in join mode from its peer (or from
-any running region: change its `peer` in `regions.json`). Then load the card
+Redeploy its stack with that region's own EIF (the same `--eif-url` and
+`--eif-sha256` per region as before): the new host starts in join mode from
+its peer (or from any running region: change its `peer` in `regions.json`). Then load the card
 registry into it (above). Its host's journal starts empty and the enclave
 restores it from a peer region before it serves (see "The journal store");
 until one other region answers, it serves no card. Its peer logs of the

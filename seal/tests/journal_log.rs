@@ -296,7 +296,8 @@ fn a_record_that_does_not_decode_is_refused_even_with_a_good_tag() {
         let iv = [0x24u8; 16];
         let mut record = iv.to_vec();
         record.extend(aes256_cbc_encrypt(&enc, &iv, &pad(plain)).unwrap());
-        let tag = hmac_sha3_256(mac, &[HOST_JOURNAL_LABEL, &1u64.to_be_bytes(), &[0u8; 32], &record]);
+        // A log anchored nowhere: its origin is empty (length 0).
+        let tag = hmac_sha3_256(mac, &[HOST_JOURNAL_LABEL, &[0u8], &1u64.to_be_bytes(), &[0u8; 32], &record]);
         record.extend_from_slice(&tag);
         record
     };

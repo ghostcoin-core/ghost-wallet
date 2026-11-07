@@ -17,11 +17,14 @@
 //! - In join mode it gets M from a running enclave through the key-share
 //!   protocol: it sends its request through the parent's outbound proxy
 //!   (vsock [`PEER_PORT`] on the parent) to the giving region and opens the
-//!   package it gets back, checking the giver against its compiled-in builds
-//!   and its own build only. Any list the host sends with a join start is
-//!   ignored.
-//! - After it has started, takes a later list on the control port only if
-//!   it is signed by the compiled-in release key and extends the one held.
+//!   package it gets back, checking the giver against its compiled-in builds,
+//!   a list signed by the compiled-in release key that it took before the
+//!   start, and its own build. Any list the host sends with a join start is
+//!   ignored. Each region runs its own image (its region is compiled in), so
+//!   a giver in another region is never its own build: the release's signed
+//!   list, which `seal_proxy start` offers before the start frame, names it.
+//! - Before and after it has started, takes a list on the control port only
+//!   if it is signed by the compiled-in release key and extends the one held.
 //! - On its service port (vsock [`SERVICE_PORT`], which the parent proxy
 //!   forwards to from the internet, still encrypted) it serves, by each
 //!   connection's first byte, TLS ended inside the enclave and the relay's
@@ -63,8 +66,12 @@
 //!   key maker, Check, Fill, Fill confirmation and Open are served.
 //! - Its region: the release's ordered region list is compiled in
 //!   (`ghost_seal::journal_anchor::RELEASE_REGIONS`), and so is its own
-//!   region id, `SEAL_REGION` at build time ([`OWN_REGION`]), one image per
-//!   region; nothing the host sends names a region. Each card is served by
+//!   region id, `SEAL_REGION` at build time ([`OWN_REGION`]): the build
+//!   argument of `enclave/Dockerfile`, which refuses to build without one on
+//!   the list. One image per region, each with its own PCRs and its own
+//!   entry on the signed list (`enclave/scripts/compute-pcrs.sh`), and each
+//!   region deployed with its own image (`enclave/scripts/deploy.sh`);
+//!   nothing the host sends names a region. Each card is served by
 //!   its home region only; every other region refuses it `wrong-region`
 //!   before any card traffic. An image built without a region on the list
 //!   installs no journal and serves no card.
@@ -88,7 +95,8 @@
 //!
 //! Frames are a 4-byte big-endian length and the bytes. Control frames (at
 //! most 8 MiB): 1 (genesis) [|| signed list JSON], 2 (join; anything after
-//! is ignored), 3 (a signed list JSON), 4 (the card registry's text);
+//! is ignored), 3 (a signed list JSON, before or after the start), 4 (the
+//! card registry's text, after the start);
 //! answer: a status text. Service request: kind (1 key share, 2 phone
 //! attestation, 3 a peer region's journal head request) || body; service
 //! answer: 0 || body, or 1 || why it was refused.
@@ -453,12 +461,14 @@ fn control_frame(frame: &[u8], service: &EnclaveService, registry: &LoadedRegist
             }
         }
         Ok(ControlFrame::SignedList(text)) => {
+            // Before the start too: each region runs its own image, so a
+            // joining enclave's own build is never its giver's. The release
+            // key's signature lets it trust the other regions' builds of
+            // its release (and only what that key signed) before it joins.
             let mut held = service.state();
-            if !held.started {
-                return "refused: a list comes after the start".into();
-            }
+            let when = if held.started { "" } else { " before the start" };
             match install_signed(&mut held.trusted, text) {
-                Ok(()) => "ok: took a signed list".into(),
+                Ok(()) => format!("ok: took a signed list{when}"),
                 Err(why) => format!("refused: {why}"),
             }
         }

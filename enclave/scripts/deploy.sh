@@ -7,9 +7,16 @@
 # (no AWS account or credentials needed). With --apply it runs them with the
 # aws CLI.
 #
-#   bash enclave/scripts/deploy.sh [--apply] --eif-url URL --eif-sha256 HEX \
+#   bash enclave/scripts/deploy.sh [--apply] \
+#     --eif-url REGION=URL --eif-sha256 REGION=HEX (once each per region) \
 #     --proxy-url URL --proxy-sha256 HEX --measurements-url URL \
 #     --measurements-sha256 HEX --ghost-node HOST:PORT --ghost-node-2 HOST:PORT
+#
+# Each region runs its own image (its region id is compiled in, see
+# compute-pcrs.sh), so each region of regions.json gets its own EIF URL and
+# SHA-256: one --eif-url and one --eif-sha256 per region. It refuses when any
+# region's is missing (with --apply, or when only some are given), a region
+# not in regions.json, a region given twice, and one EIF given to two regions.
 #
 # The two Ghost nodes are the two entries of the Seal's compiled-in release
 # node list (seal/src/node_list.rs), in its order: the host carries the
@@ -34,17 +41,19 @@ template="$repo/enclave/deploy/seal-stack.template.json"
 regions="$repo/enclave/deploy/regions.json"
 
 usage() {
-  sed -n '2,28p' "${BASH_SOURCE[0]}" >&2
+  sed -n '2,35p' "${BASH_SOURCE[0]}" >&2
   exit 2
 }
 
 apply=0
-eif_url="" eif_sha256="" proxy_url="" proxy_sha256="" measurements_url="" measurements_sha256="" ghost_node="" ghost_node_2=""
+proxy_url="" proxy_sha256="" measurements_url="" measurements_sha256="" ghost_node="" ghost_node_2=""
+# The --eif-url and --eif-sha256 values as given: REGION=VALUE each.
+eif_url_args=() eif_sha256_args=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --apply) apply=1; shift ;;
-    --eif-url) eif_url="${2:-}"; shift 2 || usage ;;
-    --eif-sha256) eif_sha256="${2:-}"; shift 2 || usage ;;
+    --eif-url) eif_url_args+=("${2:-}"); shift 2 || usage ;;
+    --eif-sha256) eif_sha256_args+=("${2:-}"); shift 2 || usage ;;
     --proxy-url) proxy_url="${2:-}"; shift 2 || usage ;;
     --proxy-sha256) proxy_sha256="${2:-}"; shift 2 || usage ;;
     --measurements-url) measurements_url="${2:-}"; shift 2 || usage ;;
@@ -59,13 +68,13 @@ done
 command -v jq > /dev/null || { echo "deploy: needs jq" >&2; exit 2; }
 if [ "$apply" = 1 ]; then
   command -v aws > /dev/null || { echo "deploy: --apply needs the aws CLI" >&2; exit 2; }
-  for value in "$eif_url" "$eif_sha256" "$proxy_url" "$proxy_sha256" "$measurements_url" "$measurements_sha256" "$ghost_node" "$ghost_node_2"; do
-    [ -n "$value" ] || { echo "deploy: --apply needs every --eif, --proxy, --measurements, --ghost-node and --ghost-node-2 value" >&2; exit 2; }
+  for value in "$proxy_url" "$proxy_sha256" "$measurements_url" "$measurements_sha256" "$ghost_node" "$ghost_node_2"; do
+    [ -n "$value" ] || { echo "deploy: --apply needs every --proxy, --measurements, --ghost-node and --ghost-node-2 value" >&2; exit 2; }
   done
   [ "$ghost_node" != "$ghost_node_2" ] || { echo "deploy: --ghost-node and --ghost-node-2 are the list's two nodes, not one" >&2; exit 2; }
 else
   echo "# deploy: printing only; nothing is run (add --apply to run)."
-  : "${eif_url:=<eif-url>}" "${eif_sha256:=<eif-sha256>}" "${proxy_url:=<proxy-url>}" "${proxy_sha256:=<proxy-sha256>}"
+  : "${proxy_url:=<proxy-url>}" "${proxy_sha256:=<proxy-sha256>}"
   : "${measurements_url:=<measurements-url>}" "${measurements_sha256:=<measurements-sha256>}" "${ghost_node:=<ghost-node>}"
   : "${ghost_node_2:=<ghost-node-2>}"
 fi
@@ -110,6 +119,90 @@ listed="$(jq -r '[.regions[].region] | join(",")' "$regions")"
 if [ "$compiled" != "$listed" ]; then
   echo "deploy: regions.json lists $listed; the image has $compiled compiled in" >&2
   exit 1
+fi
+
+# Each region's own EIF: eif_urls[i] and eif_hashes[i] for regions.json's
+# region i, from the REGION=VALUE arguments.
+region_names=()
+for index in $(seq 0 $((count - 1))); do
+  region_names+=("$(jq -r ".regions[$index].region" "$regions")")
+done
+eif_urls=() eif_hashes=()
+for index in "${!region_names[@]}"; do
+  eif_urls[index]="" eif_hashes[index]=""
+done
+
+# Index of region $1 in regions.json; fails for any other.
+region_index() {
+  local index
+  for index in "${!region_names[@]}"; do
+    if [ "${region_names[index]}" = "$1" ]; then
+      printf '%s' "$index"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Takes one REGION=VALUE argument of flag $1 into the array named $2.
+take_eif() {
+  local flag="$1" into="$2" arg="$3" region value index
+  if [[ "$arg" != *=* ]]; then
+    echo "deploy: $flag takes REGION=VALUE, one per region of regions.json (each region runs its own image), not '$arg'" >&2
+    exit 2
+  fi
+  region="${arg%%=*}" value="${arg#*=}"
+  if ! index="$(region_index "$region")"; then
+    echo "deploy: $flag names $region, which is not in regions.json (${region_names[*]})" >&2
+    exit 2
+  fi
+  if [ -z "$value" ]; then
+    echo "deploy: $flag $region= has no value" >&2
+    exit 2
+  fi
+  if [ "$into" = eif_urls ]; then
+    [ -z "${eif_urls[index]}" ] || { echo "deploy: $flag gives $region twice" >&2; exit 2; }
+    [[ "$value" =~ ^https://.+ ]] || { echo "deploy: $flag $region: the URL must be https://" >&2; exit 2; }
+    eif_urls[index]="$value"
+  else
+    [ -z "${eif_hashes[index]}" ] || { echo "deploy: $flag gives $region twice" >&2; exit 2; }
+    [[ "$value" =~ ^[0-9a-f]{64}$ ]] || { echo "deploy: $flag $region: the SHA-256 must be 64 lowercase hex digits" >&2; exit 2; }
+    eif_hashes[index]="$value"
+  fi
+}
+
+for arg in ${eif_url_args[@]+"${eif_url_args[@]}"}; do
+  take_eif --eif-url eif_urls "$arg"
+done
+for arg in ${eif_sha256_args[@]+"${eif_sha256_args[@]}"}; do
+  take_eif --eif-sha256 eif_hashes "$arg"
+done
+
+# Every region's EIF, or (printing only, with none given) placeholders.
+given=$((${#eif_url_args[@]} + ${#eif_sha256_args[@]}))
+if [ "$apply" = 0 ] && [ "$given" = 0 ]; then
+  for index in "${!region_names[@]}"; do
+    eif_urls[index]="<eif-url-of-${region_names[index]}>"
+    eif_hashes[index]="<eif-sha256-of-${region_names[index]}>"
+  done
+else
+  for index in "${!region_names[@]}"; do
+    if [ -z "${eif_urls[index]}" ] || [ -z "${eif_hashes[index]}" ]; then
+      echo "deploy: no EIF for ${region_names[index]}: give --eif-url ${region_names[index]}=URL and --eif-sha256 ${region_names[index]}=HEX (one of each per region of regions.json)" >&2
+      exit 2
+    fi
+  done
+  # One image per region: the same EIF in two regions would run one
+  # region's id in the other.
+  for index in "${!region_names[@]}"; do
+    for other in "${!region_names[@]}"; do
+      [ "$other" -gt "$index" ] || continue
+      if [ "${eif_hashes[index]}" = "${eif_hashes[other]}" ] || [ "${eif_urls[index]}" = "${eif_urls[other]}" ]; then
+        echo "deploy: ${region_names[index]} and ${region_names[other]} are given the same EIF; each region runs its own image" >&2
+        exit 2
+      fi
+    done
+  done
 fi
 
 # The ProxyAddress of region $1's stack; nothing when it does not exist yet.
@@ -165,7 +258,7 @@ deploy_region() {
     missing+=("$index")
   fi
 
-  echo "# $region: $stack, $start${peer:+ from $peer}; journal anchored in ${others[0]} (5006) and ${others[1]} (5007)"
+  echo "# $region: $stack, $start${peer:+ from $peer}; journal anchored in ${others[0]} (5006) and ${others[1]} (5007); its own EIF ${eif_hashes[index]}"
   run aws cloudformation deploy \
     --region "$region" \
     --stack-name "$stack" \
@@ -175,8 +268,8 @@ deploy_region() {
     --parameter-overrides \
     "VpcId=$vpc" \
     "SubnetId=$subnet" \
-    "EifUrl=$eif_url" \
-    "EifSha256=$eif_sha256" \
+    "EifUrl=${eif_urls[index]}" \
+    "EifSha256=${eif_hashes[index]}" \
     "ProxyUrl=$proxy_url" \
     "ProxySha256=$proxy_sha256" \
     "MeasurementsUrl=$measurements_url" \
