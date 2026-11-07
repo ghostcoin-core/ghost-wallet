@@ -4,9 +4,9 @@
   "Parameters": {
     "InstanceType": {
       "Type": "String",
-      "Default": "c7g.xlarge",
-      "AllowedValues": ["c7g.xlarge", "c7g.2xlarge", "m7g.xlarge", "m7g.2xlarge", "c6g.xlarge", "c6g.2xlarge", "m6g.xlarge", "m6g.2xlarge"],
-      "Description": "An arm64 (Graviton) family with Nitro Enclaves support and no burst credits."
+      "Default": "c7g.large",
+      "AllowedValues": ["c7g.large", "c6g.large", "m7g.large", "c7g.xlarge", "c7g.2xlarge", "m7g.xlarge", "m7g.2xlarge", "c6g.xlarge", "c6g.2xlarge", "m6g.xlarge", "m6g.2xlarge"],
+      "Description": "An arm64 (Graviton) family with Nitro Enclaves support and no burst credits. A large (2 vCPU, 4 GiB) gives the enclave 1 vCPU and 2048 MiB and keeps the rest for the host; an xlarge or larger leaves room for more."
     },
     "ImageId": {
       "Type": "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
@@ -16,7 +16,7 @@
     "VpcId": { "Type": "AWS::EC2::VPC::Id" },
     "SubnetId": { "Type": "AWS::EC2::Subnet::Id", "Description": "A public subnet." },
     "ProxyPort": { "Type": "Number", "Default": 443, "MinValue": 1, "MaxValue": 65535, "Description": "The one inbound port: the parent proxy." },
-    "EnclaveCpuCount": { "Type": "Number", "Default": 2, "MinValue": 2, "MaxValue": 6, "Description": "vCPUs set aside for the enclave." },
+    "EnclaveCpuCount": { "Type": "Number", "Default": 1, "MinValue": 1, "MaxValue": 6, "Description": "vCPUs set aside for the enclave. 1 on a large host, whose other vCPU is the host's own." },
     "EnclaveMemoryMiB": { "Type": "Number", "Default": 2048, "MinValue": 1024, "MaxValue": 12288, "Description": "Memory set aside for the enclave." },
     "EnclaveCid": { "Type": "Number", "Default": 16, "MinValue": 4, "MaxValue": 4294967294 },
     "EifUrl": { "Type": "String", "AllowedPattern": "^https://.+", "Description": "Where to fetch seal.eif (the published build)." },

@@ -14,7 +14,10 @@ networking), plus `enclave/` (image, scripts, deploy files) and
 - **The enclave** runs `seal_enclave`, the only program in the enclave image.
   It has no disk, no network and no console; it talks only over vsock.
 - **The host** (the enclave's parent EC2 instance) runs `seal_proxy`, which
-  relays bytes between TCP and vsock and never reads them.
+  relays bytes between TCP and vsock and never reads them. By default it is a
+  c7g.large (2 vCPU, 4 GiB): the enclave gets 1 vCPU and 2048 MiB, the host
+  keeps the other vCPU and about 2 GiB. A larger size is a redeploy that
+  replaces one region's host at a time (`enclave/RUNBOOK.md`, "Needs").
 - **Regions**: one host and one enclave per region, in the regions of the
   compiled-in region list (`enclave/deploy/regions.json` lists the same, in
   the same order). Every enclave holds the same M.
