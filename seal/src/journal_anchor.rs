@@ -18,8 +18,8 @@
 //!
 //! - after each append, the record (ciphertext only) goes to every peer
 //!   ([`OP_APPEND`]). A peer checks it with M (the next counter, its tag
-//!   chained to the last record it holds for that region, and that it
-//!   decodes), keeps it in its own host's store, in a log per origin
+//!   chained to the last record it holds for that region and bound to that
+//!   region, and that it decodes), keeps it in its own host's store, in a log per origin
 //!   region, and answers its head of that log. The save is `Ok` only once
 //!   every peer answered a head holding the record ([`Anchor`]); a peer that
 //!   is unreachable or refuses fails the save, and the Seal changes no card;
@@ -55,6 +55,15 @@
 //! op 2 head:   rest = nothing                     answer: the head
 //! op 3 fetch:  rest = first counter (u64)         answer: (counter (u64) || length (u32) || record)*
 //! ```
+//!
+//! **Origin bound.** Every record's tag binds the id of the region whose log
+//! it is (`journal_log`: the origin's length and id come first under the
+//! tag), and a peer checks each append against its log of the origin the
+//! request names, from that origin's start. A request needs no caller
+//! authentication: anyone can fetch ciphertext, but a record of region A's
+//! log never verifies as region B's (not as B's record 1, not chained onto
+//! any record of B's), so it cannot be planted in another origin's log; a
+//! refused append leaves the peer's log as it was.
 //!
 //! A fetch answers the records from the first counter on, up to the head,
 //! at most [`MAX_FETCH_BYTES`] of them; the asker fetches again from where
@@ -365,7 +374,9 @@ impl PeerLogs {
         let log = logs.get_mut(request.origin).ok_or("this region keeps no log of that origin")?;
         if log.chain.is_none() {
             let records = log.store.read_all().map_err(|_| "the peer log cannot be read")?;
-            let mut chain = Chain::new(master);
+            // The chain of this origin's log only: a record written for
+            // another region's log never verifies here.
+            let mut chain = Chain::new(master, request.origin);
             for (counter, record) in &records {
                 chain.push(*counter, record).map_err(|_| "the peer log fails its checks")?;
             }
@@ -490,6 +501,10 @@ fn tag_at(log: &[(u64, Vec<u8>)], counter: u64) -> Option<[u8; TAG_BYTES]> {
 }
 
 impl HeadAnchor for Anchor {
+    fn origin(&self) -> &str {
+        &self.origin
+    }
+
     fn restore(&mut self, master: &MasterKey, records: &[(u64, Vec<u8>)]) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
         self.key = Some(HeadKey::derive(master));
         let own = records.len() as u64;
@@ -511,7 +526,7 @@ impl HeadAnchor for Anchor {
         if top > own {
             // A cut tail or an empty host: the missing records from the peer
             // that holds the most, each checked onto the host's chain.
-            let mut chain = Chain::new(master);
+            let mut chain = Chain::new(master, &self.origin);
             for (counter, record) in records {
                 chain.push(*counter, record)?;
             }

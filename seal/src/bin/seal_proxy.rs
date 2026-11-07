@@ -15,11 +15,13 @@
 //! enclave's service port over vsock. `outbound` takes vsock connections
 //! from the enclave and relays each to one fixed upstream: a giving region's
 //! inbound proxy for a key share, or a Ghost node for the chain check.
-//! `start` sends the enclave its one start frame on its control port (the
-//! mode alone) and then offers it the list file, which the enclave takes only
-//! if the release key compiled into its image signed it. `list` offers a
-//! later signed list. The host cannot make an enclave trust a list: an
-//! unsigned one is refused, and the start of a join carries none.
+//! `start` offers the enclave the list file on its control port, which the
+//! enclave takes only if the release key compiled into its image signed it,
+//! and then sends its one start frame (the mode alone): a joining enclave
+//! (its own region's image) trusts a giver in another region through that
+//! list. `list` offers a later signed list. The host cannot make an enclave
+//! trust a list: an unsigned one is refused, and the start of a join carries
+//! none.
 //! `registry` sends the enclave the card registry file (control frame 4),
 //! after the start: the whole file each time, so a card set up since is
 //! added. The enclave refuses a file that leaves out or changes a card it
@@ -107,7 +109,7 @@ fn control(cid: u32, frame: &[u8]) -> String {
     answer
 }
 
-/// Starts the enclave (the mode alone), then offers it the list file.
+/// Offers the enclave the list file, then starts it (the mode alone).
 fn start(cid: u32, mode: &str, list_file: &str) -> ! {
     let mode = match mode {
         "genesis" => CONTROL_GENESIS,
@@ -115,12 +117,14 @@ fn start(cid: u32, mode: &str, list_file: &str) -> ! {
         _ => fail("the mode is genesis or join"),
     };
     let list = std::fs::read(list_file).unwrap_or_else(|e| fail(&format!("cannot read {list_file}: {e}")));
+    // Before the start: each region runs its own image, so a joining enclave
+    // trusts its giver in another region only through the release's signed
+    // list. The enclave takes it only if its release key signed it; a refusal
+    // leaves it on what its image trusts by itself.
+    control(cid, &[&[CONTROL_SIGNED_LIST][..], &list].concat());
     if !control(cid, &[mode]).starts_with("ok") {
         std::process::exit(1);
     }
-    // The enclave takes the list only if it is signed by its release key; a
-    // refusal leaves it running on what its image trusts by itself.
-    control(cid, &[&[CONTROL_SIGNED_LIST][..], &list].concat());
     std::process::exit(0);
 }
 

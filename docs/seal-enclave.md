@@ -31,9 +31,11 @@ regions; one port per peer, in the order of the region list).
 Each card is served by its home region only (`docs/sealed-card.md`, "Home
 region"). The region list is compiled into the image
 (`seal/src/journal_anchor.rs`, `RELEASE_REGIONS`), and so is each image's own
-region (`SEAL_REGION` when the enclave program is built): one build per
-region, each on the signed list. An image built without a region on the list
-installs no journal and answers every card `unavailable`.
+region: the `SEAL_REGION` build argument of `enclave/Dockerfile`, compiled into
+`seal_enclave`. One image per region, each with its own PCRs and its own
+entry on the signed list; the Dockerfile refuses to build an enclave image
+without a region on the compiled list, and an image built some other way
+without one installs no journal and answers every card `unavailable`.
 
 ## Build and measurements
 
@@ -45,16 +47,32 @@ incremental state, no debug info, symbols stripped). The settings live in
 `enclave/build.env`, which the Dockerfile and the reproducibility check both
 read. The enclave image is the program alone on `scratch`;
 `nitro-cli build-enclave` adds the enclave kernel and init. The Dockerfile's
-`proxy` stage builds the host's `seal_proxy` for musl (it is not measured and
-looks up host names, which a static glibc program cannot do reliably).
+`proxy` stage builds the host's `seal_proxy` for musl (it is not measured,
+looks up host names, which a static glibc program cannot do reliably, and is
+the same for every region, so it needs no `SEAL_REGION`).
+
+The enclave image takes the build argument `SEAL_REGION`
+(`docker build --build-arg SEAL_REGION=<region>`), which `seal_enclave`
+compiles in as its own region. The build stops unless it is one of the
+compiled region list (`RELEASE_REGIONS`). It is never in `build.env` and
+never read from the host: each region's image is its own build, measured and
+listed on its own.
 
 - `enclave/scripts/check-reproducible.sh` builds the program twice from two
-  different directories with those settings and fails unless both SHA-256
-  hashes match. It needs neither Docker nor a Nitro tool.
+  different directories with those settings, for each region of
+  `enclave/deploy/regions.json` (which must be the compiled list), and fails
+  unless both SHA-256 hashes of each region match and no two regions' builds
+  are the same. It needs neither Docker nor a Nitro tool.
 - `enclave/scripts/compute-pcrs.sh`, run on a Nitro-capable builder, builds
-  the image and the EIF, reads PCR0, PCR1 and PCR2 from `nitro-cli
-  build-enclave` and `nitro-cli describe-eif`, checks they agree, and appends
-  the build to `enclave/measurements.json`.
+  the image and the EIF of each region of `regions.json`
+  (`enclave/out/seal-<region>.eif`), reads PCR0, PCR1 and PCR2 from
+  `nitro-cli build-enclave` and `nitro-cli describe-eif`, checks they agree
+  and that no two regions share a PCR0, and appends one build per region,
+  named `<build name>-<region>`, to `enclave/measurements.json`.
+- `enclave/scripts/deploy.sh` takes each region's EIF URL and SHA-256
+  (`--eif-url <region>=URL --eif-sha256 <region>=HEX`, one of each per
+  region of `regions.json`), refuses when any region's is missing, and
+  refuses one EIF given to two regions.
 
 PCR0 measures the whole image and is the Seal's answer measurement (SHA-384,
 48 bytes, `MEASUREMENT_BYTES`). PCR1 measures the kernel and boot ramdisk,
@@ -111,15 +129,20 @@ from the host or from another enclave. It is a `TrustedList`
    every revoked build stays revoked. An older signed list cannot roll back a
    newer one in a running enclave.
 3. **Its own build**, read from its own attestation document at start. A copy
-   of the very same image is the same code that already holds M, so regional
-   copies of one build need no list at all.
+   of the very same image is the same code that already holds M: a replaced
+   host in the same region, running that region's image. The regions of one
+   release are different images (each compiles in its own region), so they
+   trust each other through (2).
 
 A build that the compiled-in builds or the signed list mark `revoked` is
 refused, whatever else names it, including the enclave's own build. A list the
 host sends unsigned, or signed by any other key, is refused and changes
 nothing. A join start carries no list: anything the host sends after the join
-byte is ignored, and the joining enclave checks its giver against (1) and (3)
-only. A debug-mode enclave (zero PCRs) is never trusted, not even as its own
+byte is ignored. A signed list may come before the start (control frame 3,
+which `seal_proxy start` sends first), under the same signature and extend
+rules, and the joining enclave checks its giver against (1), (2) and (3). That
+is how a region's image joins from another region's: the release's signed
+list names every region's build. A debug-mode enclave (zero PCRs) is never trusted, not even as its own
 build.
 
 So a host that starts a published image with a list naming its own build
@@ -232,18 +255,21 @@ them: its log is a fixed set of events with no field for carried bytes. It
 limits open connections (256 by default), closes a connection idle for its
 idle timeout (120 seconds by default), and when either side closes, closes the
 other. Everything it carries is encrypted end to end to the enclave (TLS, a
-key-share request or package). `seal_proxy start` sends the enclave its one
-start frame (the mode alone) and then offers it the list file; `seal_proxy
-list` offers a later one. The enclave takes a list only if it is signed by
-its release key.
+key-share request or package). `seal_proxy start` offers the enclave the list
+file and then sends its one start frame (the mode alone); `seal_proxy list`
+offers a later one. The enclave takes a list only if it is signed by its
+release key. The list comes before the start because each region runs its
+own image: a joining enclave's own build is never its giver's (another
+region's image), so it trusts the giver only as a build on the release's
+signed list.
 
 ## Enclave program protocol
 
 Frames are a u32 big-endian length and the bytes (at most 64 KiB on the
 service port, 8 MiB on the control port). Control port: a start frame, 1
 (genesis) optionally followed by a signed list, or 2 (join; anything after it
-is ignored); after the start, 3 || a signed list, or 4 || the card registry
-(below). The answer is a status text. A second start is refused, so an
+is ignored); before or after the start, 3 || a signed list; after the start,
+4 || the card registry (below). The answer is a status text. A second start is refused, so an
 enclave whose join failed stays without M until it is restarted; a list that
 is not signed by the compiled-in release key is refused. Service port: kind
 (1 key-share request, 2 phone attestation with a 32-byte challenge) || body;
@@ -450,7 +476,9 @@ other two (`docs/sealed-card.md`, "Journal", has the formats):
   (ciphertext only) to both peer enclaves as a service request kind 3,
   through vsock ports 5006 and 5007 (`seal_proxy outbound`, units
   `seal-anchor` and `seal-anchor-2`) to their regions' inbound proxies, 10
-  seconds each. A peer checks the record's chain with M, keeps it in its
+  seconds each. A peer checks the record's chain with M from that origin's
+  start (every record's tag binds its origin region, so a record of another
+  region's log never verifies there, whoever sends it), keeps it in its
   host's peer log for that origin, and answers its head MACed under a key
   derived from M (`ghost-seal/v1/journal-head`) over the asker's fresh
   nonce. The save is `Ok` only once both answered a head holding it, so
@@ -495,10 +523,7 @@ real PCR values (they need a Nitro-capable builder), the release key (made
 offline by the release owner; its public half goes into `RELEASE_KEY_HEX`
 before the first image is built, and its signature into
 `enclave/measurements.json` each time a build is published), the reproducibility check
-in CI, the image build passing `SEAL_REGION` for each region's build (the
-enclave program reads it at compile time; `enclave/Dockerfile` and
-`compute-pcrs.sh` do not set it yet, so an image they build answers no card),
-the app and DNS sending each card to its home region, a faster Vanish lookup than the
+in CI, the app and DNS sending each card to its home region, a faster Vanish lookup than the
 bounded block scan, nodes of independent operators in the release node list,
 and the app's check of the phone attestation and of the TLS certificate it
 binds.

@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ghost_seal::journal_anchor::{
-    Anchor, BAD_RESTORE, FORKED, HOME_REGION_LABEL, NO_PEER, NOT_ACKNOWLEDGED, OP_FETCH, OP_HEAD, PEER_PORTS, Peer,
-    PeerLink, PeerLogs, RELEASE_REGIONS, Regions, RegionsRefused, home_region, is_anchor_error, valid_region,
+    Anchor, BAD_RESTORE, FORKED, HOME_REGION_LABEL, NO_PEER, NOT_ACKNOWLEDGED, OP_APPEND, OP_FETCH, OP_HEAD, PEER_PORTS,
+    Peer, PeerLink, PeerLogs, RELEASE_REGIONS, Regions, RegionsRefused, home_region, is_anchor_error, valid_region,
 };
-use ghost_seal::journal_log::{JournalLog, LogStore, MemoryLogStore, SharedLog};
+use ghost_seal::journal_log::{Chain, HeadAnchor, JournalLog, LogStore, MemoryLogStore, SharedLog};
 use ghost_seal::primitives::sha3_256;
 use ghost_seal::{
     CardState, CardUid, CheckRequest, EntryKind, FillRequest, Journal, MasterKey, OpenRequest, Seal, SealConfig,
@@ -141,6 +141,49 @@ impl PeerLink for Link {
     }
 }
 
+/// An anchor that keeps nothing (test only): a log written for `origin`
+/// without any peer, as a host could replay or forge one.
+struct Detached(&'static str);
+
+impl HeadAnchor for Detached {
+    fn origin(&self) -> &str {
+        self.0
+    }
+
+    fn restore(&mut self, _: &MasterKey, _: &[(u64, Vec<u8>)]) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
+        Ok(Vec::new())
+    }
+
+    fn anchor(&mut self, _: u64, _: &[u8], _: &mut dyn LogStore) -> Result<(), SealError> {
+        Ok(())
+    }
+}
+
+/// Region `origin`'s log over `store` under `master`, anchored nowhere.
+fn detached_log(master: &MasterKey, origin: &'static str, store: &MemoryLogStore, seed: u64) -> JournalLog {
+    JournalLog::open_anchored(master, Box::new(store.clone()), Box::new(Random(seed)), Box::new(Detached(origin)))
+        .expect("the log verifies")
+}
+
+/// A service request kind 3 body: op, origin, nonce and the rest.
+fn request(op: u8, origin: &str, nonce: u8, rest: &[u8]) -> Vec<u8> {
+    let mut body = vec![op, origin.len() as u8];
+    body.extend_from_slice(origin.as_bytes());
+    body.extend_from_slice(&[nonce; 32]);
+    body.extend_from_slice(rest);
+    body
+}
+
+/// An append request: record `counter` of `origin`'s log.
+fn append(origin: &str, counter: u64, record: &[u8]) -> Vec<u8> {
+    request(OP_APPEND, origin, 0x42, &[&counter.to_be_bytes()[..], record].concat())
+}
+
+/// The counter of a head answer.
+fn head_counter(answer: &[u8]) -> u64 {
+    u64::from_be_bytes(answer[..8].try_into().unwrap())
+}
+
 /// The two peers of us-east-1.
 struct World {
     eu: Region,
@@ -236,7 +279,7 @@ fn a_tail_cut_while_the_enclave_is_stopped_is_restored_from_a_peer_and_with_no_p
     // The host drops the last two records while the enclave is stopped.
     store.set_records(whole[..2].to_vec());
     // The store alone cannot see it: the shorter log still verifies.
-    let unanchored = JournalLog::open(&support::master(), Box::new(store.clone())).unwrap();
+    let unanchored = detached_log(&support::master(), US, &store, 1);
     assert_eq!(unanchored.counter(), 2);
 
     // No peer reachable: refused, and nothing appended.
@@ -363,10 +406,10 @@ fn a_forked_head_is_refused() {
         let mut log = world.open(&store, 12).unwrap();
         save_four(&mut log);
     }
-    // Another log of the same entries under the same M (other IVs): the same
-    // counters, other tags.
+    // Another log of us-east-1 with the same entries under the same M (other
+    // IVs): the same counters, other tags.
     let fork_store = MemoryLogStore::new();
-    let mut fork = JournalLog::open_with(&support::master(), Box::new(fork_store.clone()), Box::new(Random(99))).unwrap();
+    let mut fork = detached_log(&support::master(), US, &fork_store, 99);
     for (uid, kind, sealed) in [
         (UID, EntryKind::Fill, b"first fill entry".to_vec()),
         (UID, EntryKind::Open, b"an open entry".to_vec()),
@@ -500,28 +543,83 @@ fn peers_see_ciphertext_only() {
 fn a_peer_takes_only_records_chained_under_m_and_only_for_the_other_regions() {
     let peer = Region::new(EU);
     let master = support::master();
-    // A record of a log under another M.
+    // A record of us-east-1's log under another M.
     let foreign_store = MemoryLogStore::new();
     let mut other = [0x77u8; 32];
-    let mut foreign =
-        JournalLog::open_with(&MasterKey::take(&mut other), Box::new(foreign_store.clone()), Box::new(Random(30))).unwrap();
+    let mut foreign = detached_log(&MasterKey::take(&mut other), US, &foreign_store, 30);
     foreign.save(&UID, EntryKind::Fill, b"entry".to_vec()).unwrap();
     let record = foreign_store.records()[0].1.clone();
-    let append = |origin: &str, counter: u64, record: &[u8]| {
-        let mut body = vec![1u8, origin.len() as u8];
-        body.extend_from_slice(origin.as_bytes());
-        body.extend_from_slice(&[0x42; 32]);
-        body.extend_from_slice(&counter.to_be_bytes());
-        body.extend_from_slice(record);
-        body
-    };
     assert!(peer.logs.answer(&master, &append(US, 1, &record)).is_err(), "another M's record");
+    // A log anchored nowhere (no origin) is no region's either.
+    let unanchored_store = MemoryLogStore::new();
+    let mut unanchored = JournalLog::open_with(&master, Box::new(unanchored_store.clone()), Box::new(Random(31))).unwrap();
+    unanchored.save(&UID, EntryKind::Fill, b"entry".to_vec()).unwrap();
+    assert!(peer.logs.answer(&master, &append(US, 1, &unanchored_store.records()[0].1)).is_err(), "no origin");
     assert!(peer.log_of(US).records().is_empty());
+    // The same entry written for us-east-1 under this M is taken.
+    let own_store = MemoryLogStore::new();
+    let mut own = detached_log(&master, US, &own_store, 32);
+    own.save(&UID, EntryKind::Fill, b"entry".to_vec()).unwrap();
+    let taken = peer.logs.answer(&master, &append(US, 1, &own_store.records()[0].1)).expect("us-east-1's record 1");
+    assert_eq!(head_counter(&taken), 1);
+    assert_eq!(peer.log_of(US).records(), own_store.records());
     assert!(peer.logs.answer(&master, &append(EU, 1, &record)).is_err(), "its own region");
     assert!(peer.logs.answer(&master, &append("sa-east-1", 1, &record)).is_err(), "a region it keeps no log of");
     assert!(peer.logs.answer(&master, &[2u8, 200, 1, 2]).is_err(), "malformed");
     assert!(peer.logs.answer(&master, &[9u8, 2, b'u', b's']).is_err(), "malformed");
     assert_eq!(peer.logs.origins(), vec![AP.to_string(), US.to_string()]);
+}
+
+#[test]
+fn a_record_of_one_region_is_never_taken_as_another_regions() {
+    let master = support::master();
+    let world = World::new();
+    let us_store = MemoryLogStore::new();
+    let mut us_log = world.open(&us_store, 40).unwrap();
+    save_four(&mut us_log);
+    let us_records = us_store.records();
+
+    // Anyone can fetch us-east-1's records from a peer: the service port
+    // takes the request without knowing who asks.
+    let fetched = world.eu.logs.answer(&master, &request(OP_FETCH, US, 0x01, &1u64.to_be_bytes())).unwrap();
+    assert!(contains(&fetched, &us_records[0].1), "the fetch carries us-east-1's record 1");
+
+    // us-east-1's record 1, appended as ap-southeast-1's counter 1 to
+    // eu-central-1's (empty) log of ap-southeast-1: refused, nothing kept.
+    assert!(world.eu.log_of(AP).records().is_empty());
+    let refused = world.eu.logs.answer(&master, &append(AP, 1, &us_records[0].1));
+    assert!(refused.is_err(), "a record of us-east-1 taken as ap-southeast-1's");
+    assert!(world.eu.log_of(AP).records().is_empty(), "the peer log is unchanged");
+    let head = world.eu.logs.answer(&master, &request(OP_HEAD, AP, 0x02, &[])).unwrap();
+    assert_eq!(head_counter(&head), 0, "the peer's head of ap-southeast-1 is still empty");
+    // And us-east-1's own log there is as it was.
+    assert_eq!(world.eu.log_of(US).records(), us_records);
+
+    // Nor onto a log of ap-southeast-1 that has records: its record 1
+    // written (and anchored in eu-central-1), us-east-1's record 2 is not
+    // taken as its counter 2.
+    let ap_store = MemoryLogStore::new();
+    let ap_anchor = Anchor::with_random(AP, vec![Peer { region: EU.into(), link: world.eu.link() }], Box::new(Random(41)));
+    let mut ap_log =
+        JournalLog::open_anchored(&master, Box::new(ap_store.clone()), Box::new(Random(42)), Box::new(ap_anchor)).unwrap();
+    ap_log.save(&OTHER, EntryKind::Fill, b"ap-southeast-1's own entry".to_vec()).unwrap();
+    assert_eq!(world.eu.log_of(AP).records(), ap_store.records());
+    let held = world.eu.log_of(AP).records();
+    assert!(world.eu.logs.answer(&master, &append(AP, 2, &us_records[1].1)).is_err());
+    assert_eq!(world.eu.log_of(AP).records(), held, "the peer log is unchanged");
+
+    // The check itself: us-east-1's record 1 opens only on us-east-1's chain.
+    assert!(Chain::new(&master, AP).push(1, &us_records[0].1).is_err());
+    assert!(Chain::new(&master, "").push(1, &us_records[0].1).is_err());
+    Chain::new(&master, US).push(1, &us_records[0].1).expect("us-east-1's own chain");
+
+    // A host that shows ap-southeast-1's enclave us-east-1's log is refused
+    // before any peer is asked.
+    let planted = MemoryLogStore::new();
+    planted.set_records(us_records.clone());
+    let ap_anchor = Anchor::with_random(AP, vec![Peer { region: EU.into(), link: world.eu.link() }], Box::new(Random(43)));
+    assert!(JournalLog::open_anchored(&master, Box::new(planted.clone()), Box::new(Random(44)), Box::new(ap_anchor)).is_err());
+    assert_eq!(planted.records(), us_records);
 }
 
 /// The vectors file, read without a JSON crate (the default build has
