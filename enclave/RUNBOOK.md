@@ -18,6 +18,10 @@ Short operating notes for the Seal on AWS Nitro Enclaves. The design is in
 - There is no KMS key, backup or export of M to restore from. If every
   enclave stops at once, M is gone and the cards it holds cannot be opened.
   Keep at least two regions running at all times.
+- Never replace the host of a region that may be the only one holding M: a
+  replaced host takes its enclave, and its M, with it. `deploy.sh` replaces a
+  host that holds M only once two other regions hold M and serve, and one
+  that may hold M only while another region holds M.
 - Never stop a region for long: every Fill and Open waits for both other
   regions to take its journal record. Keep every region running.
 - Never run one region's EIF in another region's stack, nor one EIF in two
@@ -151,8 +155,27 @@ TLS, which ends inside the enclave and trusts only ISRG Root X1 for the
 node's own host name, so pointing a unit at any other server only stops the
 chain check ("can't check right now"). The first region in
 `enclave/deploy/regions.json` starts in genesis; each other region joins from
-the peer listed for it. Check each host's `/ghost-seal/<stack>` log group for
-`ok: made M (genesis)` and `ok: received M from a running enclave`.
+the peer listed for it.
+
+After each stack's create or update, `deploy.sh` waits for the start outcome
+of that stack's current host (its own log stream, named for its instance id)
+in the log group `/ghost-seal/<stack>`: `ok: made M (genesis)` or
+`ok: received M from a running enclave`. It waits at most 15 minutes
+(`DEPLOY_START_WAIT=<seconds>`, 900 by default; it looks every
+`DEPLOY_START_POLL` seconds, 15 by default). On any `refused:` line, or when
+the wait runs out, it stops at once, prints that line (or that no outcome
+came) and deploys nothing more: no later region and no second pass. Find
+why in the log group, fix it, and run `deploy.sh --apply` again.
+
+A region holds M and serves when its stack is complete, its host is running
+and that host logged that it holds M (and no `refused:` line). When run
+again, `deploy.sh` checks each stack that already exists before it deploys
+it, since its deploy may replace the host: a stack whose host holds M is
+deployed only once two other regions hold M and serve, and is otherwise left
+as it is until the second pass; a stack whose host may hold M (no outcome
+logged, or it cannot be checked) is deployed only while another region holds
+M and serves, and otherwise `deploy.sh` stops (`not replacing the host of
+<stack>: no other region holds M and serves`).
 
 Each image is built for one region (see "Publish a build"), so each stack
 runs its own region's EIF and PCRs, each on the signed list. Each enclave
@@ -174,7 +197,14 @@ proxies' addresses (`AnchorPeerAddress` for vsock port 5006,
 On the first deploy the earlier regions have no address for the later ones
 yet, so `deploy.sh` deploys them again at the end with every address: their
 hosts are replaced before any card is served, join M from a running region
-and restore their (empty) journals from a peer.
+and restore their (empty) journals from a peer. That second pass runs only
+once every region logged that it holds M (otherwise it stops: `the second
+pass needs every region to hold M`). It replaces one region at a time, each
+only after it checked just then that two other regions hold M and serve, and
+waits for the new host's `ok` before the next (otherwise it stops: `not
+replacing the host of <stack>`). It never replaces a region while it is the
+only M holder: on the first deploy the genesis region is that until both
+other regions have joined.
 
 ## The journal store
 
@@ -303,7 +333,9 @@ starts empty: load it again after its start.
    every build it already holds.
 3. Redeploy one region at a time with that region's new EIF and the new list
    (`deploy.sh` with every region's `--eif-url` and `--eif-sha256`): each new
-   host joins from a region still running. Wait for its `ok` before the next.
+   host joins from a region still running. Wait for its `ok` before the next
+   (`deploy.sh` waits for it, and replaces a region only once two other
+   regions hold M and serve).
    A release that changes the answers between regions (as the attested
    answers did) is not taken by the release before it: until every region
    runs it, Fills and Opens wait and a restarted region serves no card, and
