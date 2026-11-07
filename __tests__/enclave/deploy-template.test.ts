@@ -140,6 +140,24 @@ describe('enclave/deploy/seal-stack.template.json', () => {
     expect(template.Parameters.EnclaveMemoryMiB.MinValue).toBeGreaterThanOrEqual(1024);
   });
 
+  it('carries the enclave to the two nodes of its release node list, each on its own vsock port', () => {
+    const script = userData();
+    for (const name of ['GhostNodeAddress', 'GhostNodeAddress2']) {
+      expect(template.Parameters[name].Type).toBe('String');
+      expect(template.Parameters[name].AllowedPattern).toBe('^[A-Za-z0-9.-]+:[0-9]+$');
+      expect(template.Parameters[name].Default).toBeUndefined();
+    }
+    expect(script).toContain("unit seal-node 'outbound 5003 ${GhostNodeAddress}'");
+    expect(script).toContain("unit seal-node-2 'outbound 5004 ${GhostNodeAddress2}'");
+    expect(script).toMatch(/systemctl enable --now seal-inbound seal-node seal-node-2\n/);
+    // The vsock ports are the node list's.
+    const nodeList = read('seal', 'src', 'node_list.rs');
+    const ports = [...nodeList.matchAll(/^node \S+ \S+ 443 \/ghost-rpc (\d+)$/gm)].map((m) => Number(m[1]));
+    expect(ports).toEqual([5003, 5004]);
+    // Outbound only: neither node port is ever inbound.
+    expect(script).not.toMatch(/inbound [^']*500[34]/);
+  });
+
   it('runs only the published build, its proxy and its list, each checked against a pinned hash', () => {
     const script = userData();
     for (const [url, hash] of [
@@ -252,5 +270,15 @@ describe('enclave/scripts/deploy.sh', () => {
     }
     expect(deploy).toContain('regions.json');
     expect(deploy).toContain('seal-stack.template.json');
+  });
+
+  it('passes both node addresses to every stack', () => {
+    expect(deploy).toContain('--ghost-node) ghost_node=');
+    expect(deploy).toContain('--ghost-node-2) ghost_node_2=');
+    expect(deploy).toContain('"GhostNodeAddress=$ghost_node"');
+    expect(deploy).toContain('"GhostNodeAddress2=$ghost_node_2"');
+    // Both are required before anything is applied, and they must differ.
+    expect(deploy).toMatch(/for value in [^\n]*"\$ghost_node" "\$ghost_node_2"; do/);
+    expect(deploy).toContain('[ "$ghost_node" != "$ghost_node_2" ]');
   });
 });

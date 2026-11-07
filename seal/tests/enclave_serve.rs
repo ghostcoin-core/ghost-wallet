@@ -1,9 +1,11 @@
 //! The enclave's service as library code: fail closed until M is held and a
-//! chain status check, a card registry and a durable journal are installed
-//! (with any one missing every flow is refused and no card traffic is sent),
-//! then a good Check, Fill, Fill confirmation and Open with the fakes
-//! installed; the attestation route with the tests' authority; and no
-//! answer, log line or error text carrying M or the PIN.
+//! chain status check, a card registry (loaded) and a durable journal are
+//! installed (with any one missing every flow is refused and no card
+//! traffic is sent), then a good Check, Fill, Fill confirmation and Open
+//! with the fakes installed through the `ChainStatus` and `RegistrySource`
+//! traits; the real chain status check over `RpcNode`s needs two nodes and
+//! never seals without them; the attestation route with the tests'
+//! authority; and no answer, log line or error text carrying M or the PIN.
 
 #[path = "fixtures/nitro_authority.rs"]
 mod authority;
@@ -18,10 +20,13 @@ use std::sync::Arc;
 use authority::{Authority, AuthoritySource, NOW, allowed_new, allowed_old, revoked, unlisted};
 use ghost_seal::attestation::AttestationRejected;
 use ghost_seal::enclave_serve::{
-    EnclaveService, KIND_KEY_SHARE, KIND_PHONE_ATTESTATION, MemoryServiceLog, ServiceDeps, ServiceEvent,
+    ChainStatus, EnclaveService, KIND_KEY_SHARE, KIND_PHONE_ATTESTATION, MemoryServiceLog, NodeChainStatus,
+    ServiceDeps, ServiceEvent,
 };
 use ghost_seal::key_share::Receiver;
 use ghost_seal::measurements::{MeasurementList, MeasurementRefused};
+use ghost_seal::node_rpc::{NodeAddress, RpcNode, TcpTransport, VsockTransport};
+use ghost_seal::{CoinStatus, LoadedRegistry, NodeList, NodeListError};
 use ghost_seal::phone_attestation::{self, PhoneAttestationRejected, answer_key};
 use ghost_seal::primitives::sha3_256;
 use ghost_seal::relay::{from_hex, to_hex};
@@ -146,8 +151,82 @@ fn with_any_of_the_three_missing_every_flow_is_refused_and_no_card_traffic_is_se
         // The attestation route still works.
         attest(&service, [8; 32]);
     }
-    // ServiceDeps::none() is what the enclave program installs today.
     assert!(!ServiceDeps::none().ready());
+}
+
+#[test]
+fn a_registry_installed_but_not_loaded_is_not_ready() {
+    // What the enclave program installs: a chain check and a registry the
+    // host has not loaded yet (and, today, no journal).
+    let registry = LoadedRegistry::new();
+    let (deps, fakes) = enclave::deps_with_loaded(&registry);
+    assert!(!deps.ready());
+    let service = enclave::service(deps.clone(), allowed_old(), Arc::new(MemoryServiceLog::default()));
+    service.install_master(support::master());
+    assert!(!service.serves_flows());
+    for (path, body) in flow_requests(&UID) {
+        assert_unavailable(&post(&service, path, &body));
+    }
+    let without_journal = ServiceDeps { journal: None, ..deps.clone() };
+    registry.load(&enclave::registry_text(&[UID])).unwrap();
+    assert!(deps.ready());
+    assert!(!without_journal.ready(), "a loaded registry without a durable journal is still not ready");
+    assert!(service.refresh_flows());
+    let answer = post(&service, "/v1/check/start", &json!({ "uid": uid_hex(&STRANGER), "challenge": to_hex(&[9; 32]) }));
+    assert_eq!((answer.0, answer.1["reason"].as_str()), (422, Some("not-a-ghost-card")));
+    assert!(fakes.journal.sealed_entries().is_empty());
+}
+
+/// A node that cannot be reached: plain HTTP to a loopback port nothing
+/// listens on.
+fn unreachable_node(name: &str) -> RpcNode {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let address = NodeAddress { name: name.into(), host: "127.0.0.1".into(), port, path: "/".into(), tls: false };
+    RpcNode::new(address, Arc::new(TcpTransport)).unwrap()
+}
+
+#[test]
+fn the_node_chain_status_needs_two_nodes_and_never_seals_without_them() {
+    // The release node list, as the enclave program builds it.
+    let list = NodeList::release();
+    let nodes: Vec<RpcNode> = list
+        .nodes
+        .iter()
+        .map(|entry| {
+            RpcNode::new(NodeAddress::from_entry(entry), Arc::new(VsockTransport { cid: 3, port: entry.vsock_port }))
+                .unwrap()
+        })
+        .collect();
+    assert!(NodeChainStatus::new(list.network, nodes).is_ok());
+    let network = list.network;
+    assert_eq!(NodeChainStatus::new(network, vec![unreachable_node("a")]).err(), Some(NodeListError::TooFewNodes));
+    assert_eq!(
+        NodeChainStatus::new(network, vec![unreachable_node("a"), unreachable_node("a")]).err(),
+        Some(NodeListError::SameNodeTwice)
+    );
+
+    // Installed with nodes that cannot be reached: a filled card is never
+    // sealed, however the payment check answers.
+    let status = NodeChainStatus::new(network, vec![unreachable_node("a"), unreachable_node("b")]).unwrap();
+    let coin = support::nodes::test_coin(9, AMOUNT);
+    assert_eq!(status.status_check().coin_status(&coin), CoinStatus::CantCheckNow);
+    let (mut deps, fakes) = enclave::deps(true, true, true);
+    deps.chain = Some(Arc::new(status) as Arc<dyn ChainStatus>);
+    let service = enclave::service(deps, allowed_old(), Arc::new(MemoryServiceLog::default()));
+    service.install_master(support::master());
+    let mut card = SimCard::set_up(UID);
+    let mut seen = Vec::new();
+    let fill = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x31; 32]), "amountWei": AMOUNT.to_string() });
+    let done = carry(&service, &mut card, post(&service, "/v1/fill/start", &fill), &mut seen);
+    assert_eq!(done.1["status"], "done", "{}", done.1);
+    let confirm = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x32; 32]) });
+    let refused = carry(&service, &mut card, post(&service, "/v1/fill/confirm", &confirm), &mut seen);
+    assert_eq!((refused.0, refused.1["reason"].as_str()), (422, Some("cant-check-now")), "{}", refused.1);
+    let check = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x33; 32]) });
+    let checked = carry(&service, &mut card, post(&service, "/v1/check/start", &check), &mut seen);
+    let body = verified(&answer_key(&support::master()), &checked.1, [0x33; 32], &UID);
+    assert_eq!(body.state, CardState::Empty, "never Sealed");
+    assert!(!fakes.journal.sealed_entries().is_empty(), "the Fill was journaled");
 }
 
 #[test]

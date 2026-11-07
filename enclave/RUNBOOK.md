@@ -102,11 +102,31 @@ the images trust only the key compiled into them.
 ## First deploy
 
 `bash enclave/scripts/deploy.sh` prints the plan. Then run it again with
-`--apply` and the URLs and hashes from above plus `--ghost-node HOST:PORT`.
-The first region in `enclave/deploy/regions.json` starts in genesis; each
-other region joins from the peer listed for it. Check each host's
-`/ghost-seal/<stack>` log group for `ok: made M (genesis)` and
-`ok: received M from a running enclave`.
+`--apply` and the URLs and hashes from above plus `--ghost-node HOST:PORT`
+and `--ghost-node-2 HOST:PORT`: the two nodes of the release node list
+compiled into the image (`seal/src/node_list.rs`), in its order, each at its
+HTTPS port 443. The host carries the enclave's vsock port 5003 to the first
+(unit `seal-node`) and 5004 to the second (unit `seal-node-2`); the bytes stay
+TLS, which ends inside the enclave and trusts only ISRG Root X1 for the
+node's own host name, so pointing a unit at any other server only stops the
+chain check ("can't check right now"). The first region in
+`enclave/deploy/regions.json` starts in genesis; each other region joins from
+the peer listed for it. Check each host's `/ghost-seal/<stack>` log group for
+`ok: made M (genesis)` and `ok: received M from a running enclave`.
+
+## Load the card registry
+
+After each enclave has started (genesis or join), and again whenever cards
+have been set up, send it the whole card registry file the card setup
+writes:
+
+`/opt/seal/seal_proxy registry <enclave CID> registry.txt`
+
+It answers `ok: took the card registry (N cards, M new, K lines left out)`.
+It refuses, and changes nothing, a file that leaves out a card it already
+holds or changes one's entry: send the full, current file, never a part of
+it. Until the first load the enclave serves no card. A restarted enclave
+starts empty: load it again after its start.
 
 ## Upgrade to a new build
 
@@ -134,4 +154,5 @@ older signed list can bring it back.
 ## Replace a lost region
 
 Redeploy its stack: the new host starts in join mode from its peer (or from
-any running region: change its `peer` in `regions.json`).
+any running region: change its `peer` in `regions.json`). Then load the card
+registry into it (above).

@@ -340,6 +340,11 @@ pub const CONTROL_GENESIS: u8 = 1;
 pub const CONTROL_JOIN: u8 = 2;
 /// Control frame: a signed measurements list.
 pub const CONTROL_SIGNED_LIST: u8 = 3;
+/// Control frame: the card registry, the text of the registry file.
+pub const CONTROL_REGISTRY: u8 = 4;
+/// The largest control frame: room for a registry of about a hundred
+/// thousand cards. Only the host reaches the control port.
+pub const MAX_CONTROL_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// A frame on the enclave's control port, from the parent host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,11 +361,16 @@ pub enum ControlFrame<'a> {
     Join,
     /// A later list; taken only through [`TrustedList::install_signed`].
     SignedList(&'a str),
+    /// The card registry: the text of the registry file, as
+    /// `FileRegistry` writes it. Taken any number of times after the start
+    /// (`LoadedRegistry::load`).
+    Registry(&'a str),
 }
 
 impl<'a> ControlFrame<'a> {
-    /// Reads a control frame: one byte (1 genesis, 2 join, 3 signed list),
-    /// then, for 1 and 3, the list's JSON.
+    /// Reads a control frame: one byte (1 genesis, 2 join, 3 signed list,
+    /// 4 card registry), then, for 1 and 3, the list's JSON, and for 4 the
+    /// registry's text.
     pub fn parse(frame: &'a [u8]) -> Result<ControlFrame<'a>, &'static str> {
         let (&kind, rest) = frame.split_first().ok_or("an empty control frame")?;
         let text = || core::str::from_utf8(rest).map_err(|_| "the list is not UTF-8");
@@ -369,6 +379,9 @@ impl<'a> ControlFrame<'a> {
             CONTROL_GENESIS => Ok(ControlFrame::Genesis { signed_list: Some(text()?) }),
             CONTROL_JOIN => Ok(ControlFrame::Join),
             CONTROL_SIGNED_LIST => Ok(ControlFrame::SignedList(text()?)),
+            CONTROL_REGISTRY => core::str::from_utf8(rest)
+                .map(ControlFrame::Registry)
+                .map_err(|_| "the registry is not UTF-8"),
             _ => Err("an unknown control frame"),
         }
     }
@@ -376,7 +389,26 @@ impl<'a> ControlFrame<'a> {
 
 /// Writes one frame: a 4-byte big-endian length, then the bytes.
 pub fn write_frame(out: &mut dyn Write, bytes: &[u8]) -> std::io::Result<()> {
-    if bytes.len() > MAX_FRAME_BYTES {
+    write_frame_up_to(out, bytes, MAX_FRAME_BYTES)
+}
+
+/// Reads one frame of at most [`MAX_FRAME_BYTES`].
+pub fn read_frame(input: &mut dyn Read) -> std::io::Result<Vec<u8>> {
+    read_frame_up_to(input, MAX_FRAME_BYTES)
+}
+
+/// Writes one control frame, of at most [`MAX_CONTROL_FRAME_BYTES`].
+pub fn write_control_frame(out: &mut dyn Write, bytes: &[u8]) -> std::io::Result<()> {
+    write_frame_up_to(out, bytes, MAX_CONTROL_FRAME_BYTES)
+}
+
+/// Reads one control frame, of at most [`MAX_CONTROL_FRAME_BYTES`].
+pub fn read_control_frame(input: &mut dyn Read) -> std::io::Result<Vec<u8>> {
+    read_frame_up_to(input, MAX_CONTROL_FRAME_BYTES)
+}
+
+fn write_frame_up_to(out: &mut dyn Write, bytes: &[u8], limit: usize) -> std::io::Result<()> {
+    if bytes.len() > limit {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "frame too long"));
     }
     out.write_all(&(bytes.len() as u32).to_be_bytes())?;
@@ -384,12 +416,11 @@ pub fn write_frame(out: &mut dyn Write, bytes: &[u8]) -> std::io::Result<()> {
     out.flush()
 }
 
-/// Reads one frame of at most [`MAX_FRAME_BYTES`].
-pub fn read_frame(input: &mut dyn Read) -> std::io::Result<Vec<u8>> {
+fn read_frame_up_to(input: &mut dyn Read, limit: usize) -> std::io::Result<Vec<u8>> {
     let mut length = [0u8; 4];
     input.read_exact(&mut length)?;
     let length = u32::from_be_bytes(length) as usize;
-    if length > MAX_FRAME_BYTES {
+    if length > limit {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too long"));
     }
     let mut bytes = vec![0u8; length];

@@ -13,7 +13,7 @@ use ghost_seal::{
     SignedAnswer,
 };
 use support::nodes::{FakeChain, FakeNode, node_check, two_nodes};
-use support::{AMOUNT, SimCard, StubChain, StubMaker, TestClock, UID};
+use support::{AMOUNT, SimCard, StubChain, StubMaker, TestClock, UID, registered};
 
 /// A filled card, its Seal's journal and the chain its two nodes read.
 struct Rig {
@@ -50,13 +50,22 @@ impl Rig {
         }
     }
 
-    /// A Seal over the rig's journal with the chain status check installed.
+    /// A Seal over the rig's journal whose chain status check asks the two
+    /// nodes.
     fn seal(&self) -> Seal {
-        support::seal(&self.journal, &self.clock, 2).with_chain_status(Box::new(node_check(&[&self.a, &self.b])))
+        support::seal_with(
+            &self.journal,
+            &self.clock,
+            2,
+            Box::new(node_check(&[&self.a, &self.b])),
+            Box::new(registered(&[UID])),
+        )
     }
 
-    /// A Seal over the rig's journal without it.
-    fn plain_seal(&self) -> Seal {
+    /// A Seal over the rig's journal whose status check calls every coin
+    /// settled (the stand-in): it stands for a Seal that was wrong about
+    /// the chain.
+    fn lax_seal(&self) -> Seal {
         support::seal(&self.journal, &self.clock, 3)
     }
 
@@ -193,11 +202,12 @@ fn check_cannot_check_with_a_node_down_or_the_nodes_apart() {
 
 #[test]
 fn check_refuses_a_card_sealed_on_a_payment_that_is_not_settled_or_exact() {
-    // Sealed by a Seal without the status check, on a lax chain check.
+    // Sealed by a Seal whose status check was wrong about the chain, on a
+    // lax chain check.
     let mut rig = Rig::filled();
-    let mut plain = rig.plain_seal();
-    assert_eq!(state(rig.confirm_with_lax_chain(&mut plain)), CardState::Sealed);
-    assert_eq!(state(rig.check(&mut plain)), CardState::Sealed, "without the status check, Check is unchanged");
+    let mut lax = rig.lax_seal();
+    assert_eq!(state(rig.confirm_with_lax_chain(&mut lax)), CardState::Sealed);
+    assert_eq!(state(rig.check(&mut lax)), CardState::Sealed, "the lax check lets it through");
 
     let mut seal = rig.seal();
     assert_eq!(rig.check(&mut seal).err(), Some(SealError::NotSettled), "nothing paid");
@@ -205,8 +215,8 @@ fn check_refuses_a_card_sealed_on_a_payment_that_is_not_settled_or_exact() {
     assert_eq!(rig.check(&mut seal).err(), Some(SealError::NotSettled), "one block deep");
 
     let mut underpaid = Rig::filled();
-    let mut plain = underpaid.plain_seal();
-    assert_eq!(state(underpaid.confirm_with_lax_chain(&mut plain)), CardState::Sealed);
+    let mut lax = underpaid.lax_seal();
+    assert_eq!(state(underpaid.confirm_with_lax_chain(&mut lax)), CardState::Sealed);
     underpaid.chain.borrow_mut().vanish(&underpaid.filled.commit_data, AMOUNT - 1);
     underpaid.chain.borrow_mut().mine(10);
     let mut seal = underpaid.seal();
@@ -214,20 +224,33 @@ fn check_refuses_a_card_sealed_on_a_payment_that_is_not_settled_or_exact() {
 }
 
 #[test]
-fn without_the_status_check_check_is_unchanged() {
+fn the_status_check_is_asked_on_every_check_of_a_sealed_card() {
+    // Both nodes down: the node check cannot answer, so Check refuses
+    // where the lax stand-in would have said Sealed.
     let mut rig = Rig::sealed();
     rig.a.down.set(true);
     rig.b.down.set(true);
-    let mut plain = rig.plain_seal();
-    assert_eq!(state(rig.check(&mut plain)), CardState::Sealed);
+    let mut seal = rig.seal();
+    assert_eq!(rig.check(&mut seal).err(), Some(SealError::CantCheckNow));
+    let mut lax = rig.lax_seal();
+    assert_eq!(state(rig.check(&mut lax)), CardState::Sealed);
 }
 
 #[test]
 fn a_seal_with_no_fill_entry_for_the_coin_never_answers_sealed() {
     let mut rig = Rig::sealed();
     let lost = MemoryJournal::new();
-    let mut seal = support::seal(&lost, &rig.clock, 4).with_chain_status(Box::new(node_check(&[&rig.a, &rig.b])));
+    let mut seal = support::seal_with(
+        &lost,
+        &rig.clock,
+        4,
+        Box::new(node_check(&[&rig.a, &rig.b])),
+        Box::new(registered(&[UID])),
+    );
     assert!(matches!(rig.check(&mut seal), Err(SealError::Journal(_))));
+    // Nor does the stand-in check, which is asked only with the Fill entry.
+    let mut lax = support::seal(&lost, &rig.clock, 5);
+    assert!(matches!(rig.check(&mut lax), Err(SealError::Journal(_))));
 }
 
 #[test]

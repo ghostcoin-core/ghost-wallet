@@ -1,21 +1,30 @@
 //! The development test Seal server: the relay protocol over HTTP(S),
-//! running the Seal's Check against the public test M. For development and
-//! the phone's speed test only, never for real money. See
+//! running the Seal's Check against the public test M, with the card
+//! registry file and the chain check over two or more real nodes. For
+//! development and the phone's speed test only, never for real money. See
 //! `ghost_seal::test_server` and `docs/seal-relay.md`.
 //!
 //! ```text
-//! GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-test-seal [--listen ADDR:PORT]
-//!     [--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N] [--total-ms N] [--max-sessions N]
-//!     [--body-ms N]
+//! GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-test-seal --registry FILE
+//!     --node URL --node URL [--node URL ...] [--network CHAIN_ID:GENESIS_HEX]
+//!     [--listen ADDR:PORT] [--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N]
+//!     [--total-ms N] [--max-sessions N] [--body-ms N]
 //! ```
+//!
+//! Without the registry or with fewer than two nodes it refuses to start,
+//! with one line.
 
-use ghost_seal::test_server::{DEV_ENV, Options, TestSealServer, USAGE, WARNING};
+use ghost_seal::test_server::{DEV_ENV, Options, StartError, TestSealServer, USAGE, WARNING};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dev_env = std::env::var(DEV_ENV).ok();
     let options = Options::from_args(&args, dev_env.as_deref()).unwrap_or_else(|error| {
-        eprintln!("test_seal_server: {error}\n{USAGE}");
+        match error {
+            // No registry or too few nodes: one plain line.
+            StartError::Missing(_) => eprintln!("test_seal_server: {error}"),
+            _ => eprintln!("test_seal_server: {error}\n{USAGE}"),
+        }
         std::process::exit(2);
     });
     eprintln!("{WARNING}");

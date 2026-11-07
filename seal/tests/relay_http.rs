@@ -17,11 +17,10 @@ use ghost_seal::relay_http::{
     AttestRefused, Flows, MAX_BODY_BYTES, NOT_READY_MESSAGE, PhoneAttester, Reply, Routes, refusal, serve_http,
 };
 use ghost_seal::{
-    AnswerKind, AnswerVerifier, CardState, CardTransport, MemoryJournal, Relay, RelayError, RelayLimits, Seal, SealConfig,
-    SealError, SystemRandom,
+    AnswerKind, AnswerVerifier, CardState, CardTransport, MemoryJournal, Relay, RelayError, RelayLimits, SealError,
 };
 use serde_json::{Value, json};
-use support::{AMOUNT, FixedClock, MEASUREMENT, START_TIME, SharedJournal, SimCard, SyncChain, SyncMaker, TestClock, UID};
+use support::{AMOUNT, MEASUREMENT, START_TIME, SharedJournal, SimCard, SyncChain, SyncMaker, TestClock, UID};
 
 const PIN: &str = "86420";
 const WRONG_PIN: &str = "97531";
@@ -36,18 +35,7 @@ struct World {
 fn world(limits: RelayLimits) -> World {
     let (maker, chain, journal) = (SyncMaker::default(), SyncChain::default(), SharedJournal::default());
     let seal_journal = journal.clone();
-    let relay = Relay::new(
-        Arc::new(move || {
-            Seal::new(
-                support::master(),
-                SealConfig { measurement: MEASUREMENT, answer_lifetime_secs: 120 },
-                Box::new(SystemRandom),
-                Box::new(FixedClock(START_TIME)),
-                Box::new(seal_journal.clone()),
-            )
-        }),
-        limits,
-    );
+    let relay = Relay::new(Arc::new(move || support::thread_seal(&seal_journal)), limits);
     let (made_by, paid_by) = (maker.clone(), chain.clone());
     let flows = Flows {
         relay: Arc::new(relay),
@@ -374,18 +362,7 @@ fn a_seal_that_is_not_ready_refuses_every_flow_and_still_attests() {
     let w = world(RelayLimits::default());
     drop(w.routes);
     let journal = SharedJournal::default();
-    let relay = Relay::new(
-        Arc::new(move || {
-            Seal::new(
-                support::master(),
-                SealConfig { measurement: MEASUREMENT, answer_lifetime_secs: 120 },
-                Box::new(SystemRandom),
-                Box::new(FixedClock(START_TIME)),
-                Box::new(journal.clone()),
-            )
-        }),
-        RelayLimits::default(),
-    );
+    let relay = Relay::new(Arc::new(move || support::thread_seal(&journal)), RelayLimits::default());
     let chain = w.chain.clone();
     let routes = Routes::new(
         Some(Flows { relay: Arc::new(relay), key_maker: None, payment: Arc::new(move || Box::new(chain.clone())) }),

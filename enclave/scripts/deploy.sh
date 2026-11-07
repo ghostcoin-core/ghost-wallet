@@ -9,7 +9,11 @@
 #
 #   bash enclave/scripts/deploy.sh [--apply] --eif-url URL --eif-sha256 HEX \
 #     --proxy-url URL --proxy-sha256 HEX --measurements-url URL \
-#     --measurements-sha256 HEX --ghost-node HOST:PORT
+#     --measurements-sha256 HEX --ghost-node HOST:PORT --ghost-node-2 HOST:PORT
+#
+# The two Ghost nodes are the two entries of the Seal's compiled-in release
+# node list (seal/src/node_list.rs), in its order: the host carries the
+# enclave's vsock port 5003 to the first and 5004 to the second.
 #
 # Genesis happens once, ever: if the genesis region's stack already exists,
 # it is deployed in join mode from the next region in the list, so no later
@@ -22,12 +26,12 @@ template="$repo/enclave/deploy/seal-stack.template.json"
 regions="$repo/enclave/deploy/regions.json"
 
 usage() {
-  sed -n '2,17p' "${BASH_SOURCE[0]}" >&2
+  sed -n '2,20p' "${BASH_SOURCE[0]}" >&2
   exit 2
 }
 
 apply=0
-eif_url="" eif_sha256="" proxy_url="" proxy_sha256="" measurements_url="" measurements_sha256="" ghost_node=""
+eif_url="" eif_sha256="" proxy_url="" proxy_sha256="" measurements_url="" measurements_sha256="" ghost_node="" ghost_node_2=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --apply) apply=1; shift ;;
@@ -38,6 +42,7 @@ while [ "$#" -gt 0 ]; do
     --measurements-url) measurements_url="${2:-}"; shift 2 || usage ;;
     --measurements-sha256) measurements_sha256="${2:-}"; shift 2 || usage ;;
     --ghost-node) ghost_node="${2:-}"; shift 2 || usage ;;
+    --ghost-node-2) ghost_node_2="${2:-}"; shift 2 || usage ;;
     -h | --help) usage ;;
     *) echo "deploy: unknown argument $1" >&2; usage ;;
   esac
@@ -46,13 +51,15 @@ done
 command -v jq > /dev/null || { echo "deploy: needs jq" >&2; exit 2; }
 if [ "$apply" = 1 ]; then
   command -v aws > /dev/null || { echo "deploy: --apply needs the aws CLI" >&2; exit 2; }
-  for value in "$eif_url" "$eif_sha256" "$proxy_url" "$proxy_sha256" "$measurements_url" "$measurements_sha256" "$ghost_node"; do
-    [ -n "$value" ] || { echo "deploy: --apply needs every --eif, --proxy, --measurements and --ghost-node value" >&2; exit 2; }
+  for value in "$eif_url" "$eif_sha256" "$proxy_url" "$proxy_sha256" "$measurements_url" "$measurements_sha256" "$ghost_node" "$ghost_node_2"; do
+    [ -n "$value" ] || { echo "deploy: --apply needs every --eif, --proxy, --measurements, --ghost-node and --ghost-node-2 value" >&2; exit 2; }
   done
+  [ "$ghost_node" != "$ghost_node_2" ] || { echo "deploy: --ghost-node and --ghost-node-2 are the list's two nodes, not one" >&2; exit 2; }
 else
   echo "# deploy: printing only; nothing is run (add --apply to run)."
   : "${eif_url:=<eif-url>}" "${eif_sha256:=<eif-sha256>}" "${proxy_url:=<proxy-url>}" "${proxy_sha256:=<proxy-sha256>}"
   : "${measurements_url:=<measurements-url>}" "${measurements_sha256:=<measurements-sha256>}" "${ghost_node:=<ghost-node>}"
+  : "${ghost_node_2:=<ghost-node-2>}"
 fi
 
 # Runs a command, or prints it.
@@ -132,6 +139,7 @@ for index in $(seq 0 $((count - 1))); do
     "MeasurementsUrl=$measurements_url" \
     "MeasurementsSha256=$measurements_sha256" \
     "GhostNodeAddress=$ghost_node" \
+    "GhostNodeAddress2=$ghost_node_2" \
     "StartMode=$start" \
     "PeerAddress=$peer_address"
 done

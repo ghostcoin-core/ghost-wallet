@@ -78,6 +78,8 @@ fn a_replayed_old_answer_is_rejected() {
         Box::new(support::TestRandom::new(3)),
         Box::new(sealed.clock.clone()),
         Box::new(ghost_seal::MemoryJournal::new()),
+        Box::new(support::SettledCheck),
+        Box::new(support::registered(&[UID])),
     );
     let stranger = AnswerVerifier::new(&other.answer_verifying_key(), MEASUREMENT).unwrap();
     assert_eq!(

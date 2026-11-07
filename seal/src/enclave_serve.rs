@@ -13,12 +13,17 @@
 //! - anything else: the connection is closed unanswered.
 //!
 //! Fail closed: the flows are served only once the enclave holds M **and**
-//! a chain status check, a card registry and a durable journal are
+//! a chain status check, a card registry (loaded) and a durable journal are
 //! installed ([`ServiceDeps`]). Until then every flow request is answered
 //! HTTP 503 `unavailable` ("This Seal is not ready to answer cards") and no
 //! card traffic is sent; the attestation route still answers once M is
-//! held. A Seal built without the three is never reachable from the
-//! network.
+//! held. Every session's Seal is built by `Seal::new`, which takes the chain
+//! status check and the registry: there is no other way to build one.
+//!
+//! The enclave program installs the chain status check over the release
+//! node list ([`NodeChainStatus`]) and the registry the host loads
+//! (`LoadedRegistry`); when the first registry load arrives after M,
+//! [`EnclaveService::refresh_flows`] rebuilds the routes.
 //!
 //! The service log ([`ServiceLog`]) takes a fixed set of events with no
 //! field for carried bytes: no path, header, body, PIN or key is ever
@@ -31,18 +36,21 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
 use crate::attestation::{AttestationSource, AttestationVerifier};
-use crate::chain_check::CoinStatusCheck;
+use crate::chain_check::{
+    ChainNode, CoinQuery, CoinStatus, CoinStatusCheck, Network, NodeChainCheck, NodeListError,
+};
 use crate::enclave_tls::EnclaveTls;
 use crate::flows::{Seal, SealConfig};
 use crate::journal::Journal;
 use crate::key_share::{self, GiverContext, read_frame, write_frame};
 use crate::measurements::TrustedList;
+use crate::node_rpc::RpcNode;
 use crate::phone_attestation::{self, CHALLENGE_BYTES};
 use crate::registry::CardRegistry;
 use crate::relay::{KeyMakerFactory, PaymentCheckFactory, Relay, RelayLimits, SealFactory};
 use crate::relay_http::{AttestRefused, Flows, PhoneAttester, ReadWrite, Routes};
 use crate::secrets::MasterKey;
-use crate::traits::{ChainCheck, Clock, PhantomKeyMaker, SystemRandom};
+use crate::traits::{ChainCheck, Clock, CoinClaim, PaymentVerdict, PhantomKeyMaker, SystemRandom};
 
 /// The first byte of a TLS connection: a handshake record.
 pub const FIRST_BYTE_TLS: u8 = 0x16;
@@ -59,8 +67,9 @@ pub const ANSWER_OK: u8 = 0;
 pub const ANSWER_REFUSED: u8 = 1;
 
 /// The chain status check, as the Seal asks it before it answers Sealed and
-/// before it seals a filled card (`ChainNode`s over the host's vsock port
-/// 5003 in a real Seal). Each session's Seal gets its own handles.
+/// before it seals a filled card (`RpcNode`s over the host's vsock ports in
+/// a real Seal: [`NodeChainStatus`]). Each session's Seal gets its own
+/// handles.
 pub trait ChainStatus: Send + Sync {
     /// The coin status check a session's Seal is built with.
     fn status_check(&self) -> Box<dyn CoinStatusCheck>;
@@ -72,6 +81,67 @@ pub trait ChainStatus: Send + Sync {
 pub trait RegistrySource: Send + Sync {
     /// The registry a session's Seal is built with.
     fn registry(&self) -> Box<dyn CardRegistry>;
+    /// Whether the registry has been loaded. Until it has, no flow is
+    /// served.
+    fn loaded(&self) -> bool;
+}
+
+/// The chain status check over the release nodes: each session's Seal gets
+/// a [`NodeChainCheck`] over clones of the same [`RpcNode`]s, so what their
+/// scans found is shared.
+pub struct NodeChainStatus {
+    network: Network,
+    nodes: Vec<RpcNode>,
+}
+
+impl NodeChainStatus {
+    /// A check on `network` over `nodes`: at least two, each named once.
+    pub fn new(network: Network, nodes: Vec<RpcNode>) -> Result<NodeChainStatus, NodeListError> {
+        let status = NodeChainStatus { network, nodes };
+        status.check()?;
+        Ok(status)
+    }
+
+    fn check(&self) -> Result<NodeChainCheck, NodeListError> {
+        let nodes = self.nodes.iter().map(|node| Box::new(node.clone()) as Box<dyn ChainNode>).collect();
+        NodeChainCheck::new(self.network, nodes)
+    }
+}
+
+/// A check that could not be made: it never answers Sealed.
+struct NoCheck;
+
+impl CoinStatusCheck for NoCheck {
+    fn coin_status(&self, _query: &CoinQuery) -> CoinStatus {
+        CoinStatus::CantCheckNow
+    }
+}
+
+/// A Fill confirmation's payment check that leaves the decision to the
+/// session Seal's own chain status check: the card names its coin by hash
+/// only, and only the Seal's Fill journal entry holds its commit data and
+/// spend marker. Every Seal is built with that check (`Seal::new`), and its
+/// confirmation asks it after this one before it writes Sealed, so this
+/// answer alone seals nothing.
+struct SealDecides;
+
+impl ChainCheck for SealDecides {
+    fn confirm_payment(&self, _claim: &CoinClaim) -> PaymentVerdict {
+        PaymentVerdict::Paid
+    }
+}
+
+impl ChainStatus for NodeChainStatus {
+    fn status_check(&self) -> Box<dyn CoinStatusCheck> {
+        match self.check() {
+            Ok(check) => Box::new(check),
+            Err(_) => Box::new(NoCheck),
+        }
+    }
+
+    fn payment_check(&self) -> Box<dyn ChainCheck> {
+        Box::new(SealDecides)
+    }
 }
 
 /// A durable journal: one whose saves survive the enclave (a journal
@@ -89,13 +159,13 @@ pub trait KeyMakerSource: Send + Sync {
 }
 
 /// What the enclave must be given before it may answer a card. The enclave
-/// program installs none of them yet, so it answers every flow request
-/// `unavailable`.
+/// program installs the chain status check and the registry; with no
+/// durable journal yet it still answers every flow request `unavailable`.
 #[derive(Clone, Default)]
 pub struct ServiceDeps {
     /// The chain status check.
     pub chain: Option<Arc<dyn ChainStatus>>,
-    /// The card registry.
+    /// The card registry; it counts once it is loaded.
     pub registry: Option<Arc<dyn RegistrySource>>,
     /// The durable journal.
     pub journal: Option<Arc<dyn DurableJournal>>,
@@ -110,10 +180,10 @@ impl ServiceDeps {
         ServiceDeps::default()
     }
 
-    /// Whether the chain status check, the card registry and the durable
-    /// journal are all installed.
+    /// Whether the chain status check, the card registry (loaded) and the
+    /// durable journal are all installed.
     pub fn ready(&self) -> bool {
-        self.chain.is_some() && self.registry.is_some() && self.journal.is_some()
+        self.chain.is_some() && self.registry.as_ref().is_some_and(|r| r.loaded()) && self.journal.is_some()
     }
 }
 
@@ -133,10 +203,13 @@ pub trait EnclaveAttestation: Send + Sync {
 pub enum ServiceEvent {
     /// M was installed; whether the flows are served from now on.
     MasterInstalled {
-        /// Whether a chain status check, a registry and a durable journal
-        /// are installed.
+        /// Whether a chain status check, a loaded registry and a durable
+        /// journal are installed.
         serves_flows: bool,
     },
+    /// What was missing arrived after M (the first registry load): the
+    /// flows are served from now on.
+    FlowsServed,
     /// M was handed, encrypted, to an attested build on the trusted list.
     HandedMaster {
         /// The receiving build's name, as the list names it.
@@ -153,9 +226,10 @@ impl fmt::Display for ServiceEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ServiceEvent::MasterInstalled { serves_flows: true } => f.write_str("holds M; serves the flows"),
-            ServiceEvent::MasterInstalled { serves_flows: false } => {
-                f.write_str("holds M; not ready to answer cards (no chain check, registry or durable journal)")
-            }
+            ServiceEvent::MasterInstalled { serves_flows: false } => f.write_str(
+                "holds M; not ready to answer cards (no chain check, loaded registry or durable journal)",
+            ),
+            ServiceEvent::FlowsServed => f.write_str("serves the flows from now on"),
             ServiceEvent::HandedMaster { build } => write!(f, "handed M to build {build}"),
             ServiceEvent::KeyShareRefused => f.write_str("refused a key-share request"),
             ServiceEvent::UnknownProtocol => f.write_str("closed a connection of no known protocol"),
@@ -306,9 +380,34 @@ impl EnclaveService {
     }
 
     /// Whether the flows are served: M is held and the chain status check,
-    /// the registry and the durable journal are installed.
+    /// the loaded registry and the durable journal are installed.
     pub fn serves_flows(&self) -> bool {
         lock(&self.routes).serves_flows()
+    }
+
+    /// Starts serving the flows if M is held and what they need has arrived
+    /// since (the first registry load); call it after each registry load.
+    /// Routes already serving are left as they are. Whether the flows are
+    /// served.
+    pub fn refresh_flows(&self) -> bool {
+        // The routes' lock is held throughout, so two loads at once build
+        // the routes once.
+        let mut routes = lock(&self.routes);
+        if routes.serves_flows() {
+            return true;
+        }
+        let flows = {
+            let held = lock(&self.shared.state);
+            let Some(master) = held.master.as_ref() else { return false };
+            if !self.deps.ready() {
+                return false;
+            }
+            self.flows(master)
+        };
+        let Some(flows) = flows else { return false };
+        *routes = Arc::new(Routes::new(Some(flows), Some(Arc::new(Attester(Arc::clone(&self.shared))))));
+        self.shared.log.record(ServiceEvent::FlowsServed);
+        true
     }
 
     /// The routes as they stand.
@@ -329,10 +428,11 @@ impl EnclaveService {
         self.shared.log.record(ServiceEvent::MasterInstalled { serves_flows });
     }
 
-    /// The flows over Seals holding `master`, with the installed deps.
+    /// The flows over Seals holding `master`, with the installed deps; none
+    /// until all three are installed and the registry is loaded.
     fn flows(&self, master: &MasterKey) -> Option<Flows> {
         let chain = self.deps.chain.clone()?;
-        let registry = self.deps.registry.clone()?;
+        let registry = self.deps.registry.clone().filter(|r| r.loaded())?;
         let journal = self.deps.journal.clone()?;
         // Each session's Seal holds its own copy of M, wiped when it is
         // dropped; the copies live in enclave memory only.
@@ -352,9 +452,9 @@ impl EnclaveService {
                 Box::new(SystemRandom),
                 Box::new(SharedClock(Arc::clone(&clock))),
                 journal.journal(),
+                session_chain.status_check(),
+                registry.registry(),
             )
-            .with_chain_status(session_chain.status_check())
-            .with_registry(registry.registry())
         });
         let payment: PaymentCheckFactory = Arc::new(move || chain.payment_check());
         let key_maker = self.deps.key_maker.clone().map(|source| {

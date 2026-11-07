@@ -2,8 +2,10 @@
 //! GetKeyVersion, AuthenticateEV2First, GetCardUID, GetFileSettings,
 //! ChangeFileSettings, ChangeKey, ReadData, WriteData), which checks every
 //! MAC and enforces the record file's access rights; and stand-ins for the
-//! Seal's random source, clock, Phantom Key maker and chain check. Fake chain
-//! nodes are in `nodes`.
+//! Seal's random source, clock, the maker of its Phantom Keys, chain check,
+//! chain status check and card registry. Fake chain nodes are in `nodes`; a fake node
+//! speaking JSON-RPC over TLS is in `rpc_node` (included by the tests that
+//! need it).
 #![allow(dead_code)]
 
 pub mod nodes;
@@ -24,8 +26,9 @@ use ghost_seal::primitives::{
 };
 use ghost_seal::session::session_keys;
 use ghost_seal::{
-    CardTransport, CardUid, ChainCheck, Clock, CoinClaim, Dropped, MadeKey, MasterKey, MemoryJournal, PaymentVerdict,
-    PhantomKey, PhantomKeyMaker, PhoneSecret, Seal, SealConfig, SealError, SealRandom,
+    CardRegistry, CardTransport, CardUid, ChainCheck, Clock, CoinClaim, CoinQuery, CoinStatus, CoinStatusCheck,
+    Dropped, MadeKey, MasterKey, MemoryJournal, MemoryRegistry, PaymentVerdict, PhantomKey, PhantomKeyMaker,
+    PhoneSecret, RegistryEntry, Seal, SealConfig, SealError, SealRandom,
 };
 
 pub const UID: CardUid = CardUid([0x04, 0x51, 0x8d, 0xfa, 0xa9, 0x61, 0x80]);
@@ -176,14 +179,65 @@ impl ChainCheck for StubChain {
     }
 }
 
-/// A Seal with the test master key, random source, clock and `journal`.
+/// A stand-in chain status check for tests that do not care about the
+/// chain: every coin is exact, settled and unspent. (The Seal still asks it
+/// only with the card's Fill journal entry.)
+#[derive(Clone, Copy, Default)]
+pub struct SettledCheck;
+
+impl CoinStatusCheck for SettledCheck {
+    fn coin_status(&self, _query: &CoinQuery) -> CoinStatus {
+        CoinStatus::ExactSettledUnspent
+    }
+}
+
+/// A registry holding `uids`, set up on one test date in one test batch.
+pub fn registered(uids: &[CardUid]) -> MemoryRegistry {
+    let mut registry = MemoryRegistry::new();
+    for uid in uids {
+        registry.record(&RegistryEntry::new(*uid, "2026-11-01", "test-batch").unwrap()).unwrap();
+    }
+    registry
+}
+
+/// A Seal with the test master key, random source, clock and `journal`,
+/// the stand-in chain status check and a registry holding [`UID`].
 pub fn seal(journal: &MemoryJournal, clock: &TestClock, random_label: u64) -> Seal {
+    seal_with(journal, clock, random_label, Box::new(SettledCheck), Box::new(registered(&[UID])))
+}
+
+/// A Seal with the test master key, random source, clock and `journal`,
+/// and `chain_status` and `registry`.
+pub fn seal_with(
+    journal: &MemoryJournal,
+    clock: &TestClock,
+    random_label: u64,
+    chain_status: Box<dyn CoinStatusCheck>,
+    registry: Box<dyn CardRegistry>,
+) -> Seal {
     Seal::new(
         master(),
         SealConfig { measurement: MEASUREMENT, answer_lifetime_secs: 120 },
         Box::new(TestRandom::new(random_label)),
         Box::new(clock.clone()),
         Box::new(journal.clone()),
+        chain_status,
+        registry,
+    )
+}
+
+/// A Seal for a relay's worker threads: the test master key, the system
+/// random source, a fixed clock, `journal`, the stand-in chain status check
+/// and a registry holding [`UID`].
+pub fn thread_seal(journal: &SharedJournal) -> Seal {
+    Seal::new(
+        master(),
+        SealConfig { measurement: MEASUREMENT, answer_lifetime_secs: 120 },
+        Box::new(ghost_seal::SystemRandom),
+        Box::new(FixedClock(START_TIME)),
+        Box::new(journal.clone()),
+        Box::new(SettledCheck),
+        Box::new(registered(&[UID])),
     )
 }
 

@@ -50,7 +50,8 @@ rustls = { version = "=0.23.46", default-features = false, features = ["std", "r
 # Only with the `test-server` feature (the development test Seal server, its
 # binary and its tests): an HTTP server with rustls for HTTPS, and JSON for
 # the relay's requests and answers (also used by `nitro`). The default build
-# has neither.
+# has neither. Both `nitro` and `test-server` also ask the chain nodes over
+# JSON-RPC (`node_rpc`): HTTP/1.1 with httparse, TLS 1.3 with rustls.
 serde_json = { version = "=1.0.154", optional = true }
 tiny_http = { version = "=0.12.0", default-features = false, features = ["ssl-rustls"], optional = true }
 
@@ -70,8 +71,9 @@ nitro = [
     "dep:vsock",
 ]
 # The development test Seal server: the relay protocol over HTTP(S), the test
-# M only. Never for real money.
-test-server = ["dep:serde_json", "dep:tiny_http"]
+# M only, with the card registry file and the chain check over real nodes.
+# Never for real money.
+test-server = ["dep:httparse", "dep:rustls", "dep:serde_json", "dep:tiny_http"]
 
 [[bin]]
 name = "seal_enclave"
@@ -126,6 +128,16 @@ required-features = ["nitro"]
 [[test]]
 name = "enclave_serve"
 path = "tests/enclave_serve.rs"
+required-features = ["nitro"]
+
+[[test]]
+name = "node_rpc"
+path = "tests/node_rpc.rs"
+required-features = ["nitro"]
+
+[[test]]
+name = "registry_load"
+path = "tests/registry_load.rs"
 required-features = ["nitro"]
 
 # The lattice signatures and key encapsulation are slow unoptimised; build the

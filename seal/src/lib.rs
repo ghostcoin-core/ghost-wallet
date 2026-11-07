@@ -5,6 +5,11 @@
 //! chain nodes, the wallet core's Phantom Key derivation and the journal
 //! store) comes in through a trait. The chain check (`chain_check`) reuses
 //! the wallet core's coin-tree check, coin leaf code and settlement depth.
+//! `Seal::new` is the only way to build a Seal, and it takes the chain
+//! status check and the card registry (`registry`): no Seal answers Sealed
+//! unchecked or serves an unregistered card. The release node list the
+//! chain check asks is compiled in (`node_list`); the real node, JSON-RPC
+//! over TLS 1.3, is `node_rpc` (features `nitro` and `test-server`).
 //!
 //! The design, the record layout, the frame and answer formats and the
 //! labels of every key derivation are in `docs/sealed-card.md`.
@@ -28,7 +33,8 @@
 //! The phone carries the Seal's card traffic (`relay`): each APDU and each
 //! answer crosses it as opaque bytes, over the wire format in
 //! `docs/seal-relay.md`. The `test-server` feature (off by default) adds a
-//! development test Seal that serves it over HTTP(S) with a public test M
+//! development test Seal that serves it over HTTP(S) with a public test M,
+//! a card registry file and the chain check over real nodes
 //! (`test_server`), for development and the speed test only, never for real
 //! money.
 
@@ -53,6 +59,9 @@ pub mod key_share;
 pub mod link;
 #[cfg(feature = "nitro")]
 pub mod measurements;
+pub mod node_list;
+#[cfg(any(feature = "nitro", feature = "test-server"))]
+pub mod node_rpc;
 #[cfg(feature = "nitro")]
 pub mod phone_attestation;
 pub mod primitives;
@@ -81,7 +90,8 @@ pub use error::SealError;
 pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest, Seal, SealConfig};
 pub use journal::{EntryKind, Journal, MemoryJournal};
 pub use record::CardState;
-pub use registry::{CardRegistry, FileRegistry, MemoryRegistry, RegistryEntry};
+pub use node_list::{NodeEntry, NodeList};
+pub use registry::{CardRegistry, FileRegistry, LoadedRegistry, MemoryRegistry, RegistryEntry};
 pub use relay::{
     Finished, FlowStep, KeyMakerFactory, PaymentCheckFactory, Relay, RelayError, RelayLimits, SessionId, Step,
 };

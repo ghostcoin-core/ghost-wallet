@@ -124,8 +124,10 @@ Messages never carry a key, a PIN or card traffic.
 
 The enclave answers every flow request (the starts, step and abort)
 `unavailable` with the message "This Seal is not ready to answer cards"
-until it holds M and a chain status check, a card registry and a durable
-journal are installed into it; it sends no card command before then.
+until it holds M and a chain status check, a card registry (loaded by the
+host) and a durable journal are installed into it; it sends no card command
+before then. It installs the chain check and the registry today; the durable
+journal is still missing.
 
 ### The Seal's attestation (the enclave only)
 
@@ -251,18 +253,32 @@ It is for development and the speed test only, **never for real money**:
   same value for its test cards;
 - its answers carry an all-zero code measurement, which no real Seal build
   has, so a phone that pins a real measurement never accepts them;
-- no enclave, no journal on disk and no card registry yet: it answers a Check
-  for any card set up with the test M. Check only.
+- its Seal is built like every Seal (`Seal::new`), with the card registry and
+  the chain check. It refuses to start, with one line, without `--registry
+  FILE` (the registry file the card setup writes, a `FileRegistry`, read
+  again for each Check so cards set up later are served without a restart)
+  or with fewer than two `--node URL` (each an `RpcNode`: `https://` and any
+  host, checked against ISRG Root X1 as in the enclave, or `http://` and a
+  loopback address only, a development convenience). The nodes must follow
+  the release network (the Ghost public test network) unless `--network
+  CHAIN_ID:GENESIS_HEX` names another. A card the registry does not hold is
+  refused with the reason `not-a-ghost-card` before any card command;
+- no enclave and no journal on disk: its journal is in memory, one per
+  session, so it holds no card's Fill entry and refuses a Sealed card rather
+  than answer it unchecked. It answers an Empty card. Check only.
 
 ```sh
 cargo build --manifest-path seal/Cargo.toml --release --features test-server --bin test_seal_server
 
 # HTTPS, for the phone (a certificate the iPhone trusts, PEM files):
 GHOST_DEV_TEST_SEAL=1 seal/target/release/test_seal_server --dev-test-seal \
+  --registry registry.txt --node https://node-one.example/ghost-rpc --node https://node-two.example/ghost-rpc \
   --listen 0.0.0.0:8443 --tls-cert cert.pem --tls-key key.pem
 
 # Plain HTTP, loopback only (it refuses any other address without TLS):
-GHOST_DEV_TEST_SEAL=1 seal/target/release/test_seal_server --dev-test-seal --listen 127.0.0.1:8787
+GHOST_DEV_TEST_SEAL=1 seal/target/release/test_seal_server --dev-test-seal \
+  --registry registry.txt --node https://node-one.example/ghost-rpc --node https://node-two.example/ghost-rpc \
+  --listen 127.0.0.1:8787
 ```
 
 `--idle-ms`, `--total-ms` and `--max-sessions` change the session limits; the

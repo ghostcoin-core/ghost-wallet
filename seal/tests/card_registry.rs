@@ -1,7 +1,7 @@
-//! The card registry: a Seal with it installed refuses an unregistered UID
-//! ("Not a Ghost card") before it sends the card anything, and lets a
-//! registered card through; the file registry reads back what it wrote and
-//! ignores torn lines.
+//! The card registry: every Seal is built with one and refuses an
+//! unregistered UID ("Not a Ghost card") before it sends the card anything,
+//! and lets a registered card through; the file registry reads back what it
+//! wrote and ignores torn lines.
 
 mod card_support;
 mod support;
@@ -13,7 +13,7 @@ use ghost_seal::{
     RegistryEntry, SealError,
 };
 use card_support::{BATCH, DATE, assert_set_up, run_setup, temp_registry};
-use support::{AMOUNT, SimCard, StubChain, StubMaker, TestClock, UID, phone, seal, sealed_card};
+use support::{AMOUNT, SettledCheck, SimCard, StubChain, StubMaker, TestClock, UID, phone, seal, seal_with, sealed_card};
 
 const OTHER_UID: CardUid = CardUid([0x04, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
 
@@ -30,7 +30,7 @@ fn check_refuses_an_unregistered_uid_before_sending_the_card_anything() {
     let mut card = SimCard::set_up(UID);
     let journal = MemoryJournal::new();
     let clock = TestClock::new();
-    let mut s = seal(&journal, &clock, 1).with_registry(Box::new(registered(&[OTHER_UID])));
+    let mut s = seal_with(&journal, &clock, 1, Box::new(SettledCheck), Box::new(registered(&[OTHER_UID])));
     let error = s.check(&mut card, &CheckRequest { uid: UID, challenge: [1u8; 32] }).unwrap_err();
     assert_eq!(error, SealError::NotAGhostCard);
     assert_eq!(error.to_string(), "Not a Ghost card");
@@ -42,7 +42,8 @@ fn check_refuses_an_unregistered_uid_before_sending_the_card_anything() {
 fn fill_confirm_and_open_refuse_an_unregistered_uid_before_sending_anything() {
     let mut sealed = sealed_card(None);
     let sent_before = sealed.card.sent;
-    let mut s = seal(&sealed.journal, &sealed.clock, 2).with_registry(Box::new(MemoryRegistry::new()));
+    let mut s =
+        seal_with(&sealed.journal, &sealed.clock, 2, Box::new(SettledCheck), Box::new(MemoryRegistry::new()));
 
     let mut blank = SimCard::set_up(UID);
     let fill = FillRequest { uid: UID, challenge: [2u8; 32], amount_wei: AMOUNT, pin: None };
@@ -65,19 +66,29 @@ fn fill_confirm_and_open_refuse_an_unregistered_uid_before_sending_anything() {
 fn a_registered_card_passes() {
     let sealed = sealed_card(None);
     let mut card = sealed.card;
-    let mut s = seal(&sealed.journal, &sealed.clock, 3).with_registry(Box::new(registered(&[UID])));
+    let mut s = seal_with(&sealed.journal, &sealed.clock, 3, Box::new(SettledCheck), Box::new(registered(&[UID])));
     let answer = s.check(&mut card, &CheckRequest { uid: UID, challenge: [5u8; 32] }).expect("check");
     assert_eq!(answer.body.state, CardState::Sealed);
     assert_eq!(answer.body.amount_wei, AMOUNT);
 }
 
 #[test]
-fn without_a_registry_the_seal_behaves_as_before() {
+fn an_empty_registry_refuses_every_card_and_the_test_seal_holds_only_its_card() {
+    // There is no Seal without a registry: an empty one serves no card.
     let mut card = SimCard::set_up(UID);
     let journal = MemoryJournal::new();
     let clock = TestClock::new();
+    let mut empty = seal_with(&journal, &clock, 4, Box::new(SettledCheck), Box::new(MemoryRegistry::new()));
+    assert_eq!(empty.check(&mut card, &CheckRequest { uid: UID, challenge: [6u8; 32] }).err(), Some(SealError::NotAGhostCard));
+    assert_eq!(card.sent, 0);
+
+    // The tests' Seal registers its one card and no other.
     let answer = seal(&journal, &clock, 4).check(&mut card, &CheckRequest { uid: UID, challenge: [6u8; 32] });
     assert_eq!(answer.expect("check").body.state, CardState::Empty);
+    let mut other = SimCard::set_up(OTHER_UID);
+    let refused = seal(&journal, &clock, 4).check(&mut other, &CheckRequest { uid: OTHER_UID, challenge: [6u8; 32] });
+    assert_eq!(refused.err(), Some(SealError::NotAGhostCard));
+    assert_eq!(other.sent, 0);
 }
 
 #[test]
@@ -92,7 +103,8 @@ fn a_card_set_up_into_a_file_registry_checks_after_the_seal_reopens_it() {
 
     let journal = MemoryJournal::new();
     let clock = TestClock::new();
-    let mut s = seal(&journal, &clock, 6).with_registry(Box::new(FileRegistry::open(&path).unwrap()));
+    let mut s =
+        seal_with(&journal, &clock, 6, Box::new(SettledCheck), Box::new(FileRegistry::open(&path).unwrap()));
     let answer = s.check(&mut card, &CheckRequest { uid: UID, challenge: [7u8; 32] }).expect("check");
     assert_eq!(answer.body.state, CardState::Empty);
 

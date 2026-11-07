@@ -14,28 +14,17 @@ use ghost_seal::primitives::sha3_256;
 use ghost_seal::record::PIN_TRIES;
 use ghost_seal::{
     AnswerKind, AnswerVerifier, CardState, CardTransport, FlowStep, KeyMakerFactory, MemoryJournal, PaymentCheckFactory,
-    Pin, Relay, RelayError, RelayLimits, Seal, SealConfig, SealError, SessionId, SignedAnswer, Step, SystemRandom,
+    Pin, Relay, RelayError, RelayLimits, SealError, SessionId, SignedAnswer, Step,
 };
 use support::{
-    AMOUNT, FixedClock, MEASUREMENT, START_TIME, SharedJournal, SimCard, SyncChain, SyncMaker, TestClock, UID, carry,
+    AMOUNT, MEASUREMENT, START_TIME, SharedJournal, SimCard, SyncChain, SyncMaker, TestClock, UID, carry,
     contains, phone,
 };
 
 /// A relay whose sessions each run a Seal with the test M over `journal`.
 fn relay_with(journal: &SharedJournal, limits: RelayLimits) -> Relay {
     let journal = journal.clone();
-    Relay::new(
-        Arc::new(move || {
-            Seal::new(
-                support::master(),
-                SealConfig { measurement: MEASUREMENT, answer_lifetime_secs: 120 },
-                Box::new(SystemRandom),
-                Box::new(FixedClock(START_TIME)),
-                Box::new(journal.clone()),
-            )
-        }),
-        limits,
-    )
+    Relay::new(Arc::new(move || support::thread_seal(&journal)), limits)
 }
 
 fn maker_factory(maker: &SyncMaker) -> KeyMakerFactory {

@@ -25,8 +25,8 @@ use ghost_seal::journal::Journal;
 use ghost_seal::measurements::{Pcrs, TrustedList};
 use ghost_seal::proxy::{BoundedService, ServiceLimits};
 use ghost_seal::{
-    CardRegistry, CardUid, ChainCheck, CoinQuery, CoinStatusCheck, MemoryRegistry, NodeChainCheck, PhantomKeyMaker,
-    RegistryEntry, RelayLimits,
+    CardRegistry, CardUid, ChainCheck, CoinQuery, CoinStatusCheck, LoadedRegistry, MemoryRegistry, NodeChainCheck,
+    PhantomKeyMaker, RegistryEntry, RelayLimits,
 };
 
 use crate::authority::{Authority, AuthoritySource, NOW};
@@ -106,7 +106,7 @@ impl ChainStatus for FakeChainStatus {
     }
 }
 
-/// The card registry: a `MemoryRegistry` holding these cards.
+/// The card registry: a `MemoryRegistry` holding these cards, loaded.
 pub struct TestRegistry(pub Vec<CardUid>);
 
 impl RegistrySource for TestRegistry {
@@ -117,6 +117,23 @@ impl RegistrySource for TestRegistry {
         }
         Box::new(registry)
     }
+
+    fn loaded(&self) -> bool {
+        true
+    }
+}
+
+/// The text of a registry file holding `uids`, as the host loads it.
+pub fn registry_text(uids: &[CardUid]) -> String {
+    uids.iter().map(|uid| RegistryEntry::new(*uid, "2026-11-01", "test-batch").unwrap().to_line()).collect()
+}
+
+/// Deps with the fake chain check, the journal and the key maker, and
+/// `registry` (a `LoadedRegistry` the test loads) as the card registry.
+pub fn deps_with_loaded(registry: &LoadedRegistry) -> (ServiceDeps, Fakes) {
+    let (mut deps, fakes) = deps(true, false, true);
+    deps.registry = Some(Arc::new(registry.clone()) as Arc<dyn RegistrySource>);
+    (deps, fakes)
 }
 
 /// The durable journal: here a journal in memory shared by every session
