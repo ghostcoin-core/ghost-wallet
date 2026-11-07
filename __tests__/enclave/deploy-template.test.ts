@@ -567,7 +567,7 @@ describe('enclave/scripts/deploy.sh', () => {
 
   it('deploys a region again once every peer exists, and refuses a region list the image does not have', () => {
     expect(deploy).toContain('missing+=("$index")');
-    expect(deploy).toMatch(/for index in "\$\{again\[@\]\}"; do\n {4}deploy_region "\$index"\n {2}done/);
+    expect(deploy).toMatch(/for index in "\$\{again\[@\]\}"; do\n[^\n]*\n {4}if ! two_others_hold_m "\$region"; then\n[\s\S]*?\n {4}deploy_region "\$index"\n {2}done/);
     expect(deploy).toContain('seal/src/journal_anchor.rs');
     expect(deploy).toContain('if [ "$compiled" != "$listed" ]; then');
     const anchor = read('seal', 'src', 'journal_anchor.rs');

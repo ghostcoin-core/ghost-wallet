@@ -33,6 +33,20 @@
 # second's. A region deployed before a later one existed is deployed again
 # at the end with every peer's address (its host is replaced; it joins M
 # from a running region and restores its journal from a peer).
+#
+# With --apply, after each stack's create or update it waits (at most
+# DEPLOY_START_WAIT seconds, 900 by default, looking every DEPLOY_START_POLL
+# seconds, 15 by default) for the start outcome of the stack's current host
+# in its log group /ghost-seal/<stack>: "ok: made M (genesis)" or "ok:
+# received M from a running enclave". On any "refused:" line, or when the
+# wait runs out, it stops at once with that line and deploys nothing more.
+# A region holds M and serves when its stack is complete, its host runs and
+# that host logged that it holds M. The second pass runs only once every
+# region holds M, one region at a time, each only once two other regions
+# hold M and serve. An existing stack whose host holds M is replaced only
+# then too (otherwise it is left as it is until the second pass), and one
+# whose host may hold M only while another region holds M: a region that
+# may be the only M holder is never replaced.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +55,7 @@ template="$repo/enclave/deploy/seal-stack.template.json"
 regions="$repo/enclave/deploy/regions.json"
 
 usage() {
-  sed -n '2,35p' "${BASH_SOURCE[0]}" >&2
+  sed -n '2,49p' "${BASH_SOURCE[0]}" >&2
   exit 2
 }
 
@@ -66,6 +80,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 command -v jq > /dev/null || { echo "deploy: needs jq" >&2; exit 2; }
+# How long to wait for each host's start outcome, and how often to look.
+start_wait="${DEPLOY_START_WAIT:-900}" start_poll="${DEPLOY_START_POLL:-15}"
+[[ "$start_wait" =~ ^[1-9][0-9]*$ ]] || { echo "deploy: DEPLOY_START_WAIT is a whole number of seconds, not '$start_wait'" >&2; exit 2; }
+[[ "$start_poll" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "deploy: DEPLOY_START_POLL is a number of seconds, not '$start_poll'" >&2; exit 2; }
 if [ "$apply" = 1 ]; then
   command -v aws > /dev/null || { echo "deploy: --apply needs the aws CLI" >&2; exit 2; }
   for value in "$proxy_url" "$proxy_sha256" "$measurements_url" "$measurements_sha256" "$ghost_node" "$ghost_node_2"; do
@@ -215,6 +233,150 @@ anchor_address() {
     --query "Stacks[0].Outputs[?OutputKey=='ProxyAddress'].OutputValue" --output text
 }
 
+# The two lines an enclave logs once it holds M (seal_enclave's start answer,
+# which seal_proxy start writes to the host's log as "the enclave answered").
+made_m="ok: made M (genesis)"
+received_m="ok: received M from a running enclave"
+# Why the last check of holds_m or two_others_hold_m failed.
+why=""
+# The count other_holders found.
+holders=0
+
+# The status of region $1's stack; nothing when it does not exist.
+stack_status() {
+  [ "$apply" = 1 ] && aws cloudformation describe-stacks --region "$1" --stack-name "$prefix-$1" \
+    --query 'Stacks[0].StackStatus' --output text 2> /dev/null || true
+}
+
+# The instance id of region $1's current host; nothing when there is none.
+stack_instance() {
+  local instance
+  instance="$([ "$apply" = 1 ] && aws cloudformation describe-stacks --region "$1" --stack-name "$prefix-$1" \
+    --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" --output text 2> /dev/null || true)"
+  [ "$instance" = None ] || printf '%s' "$instance"
+}
+
+# The state (running, stopped, ...) of host $2 in region $1.
+instance_state() {
+  [ "$apply" = 1 ] && aws ec2 describe-instances --region "$1" --instance-ids "$2" \
+    --query 'Reservations[0].Instances[0].State.Name' --output text 2> /dev/null || true
+}
+
+# The start outcome host $2 of region $1 logged in /ghost-seal/<stack>, from
+# its own log stream only (a replaced host's stream keeps its old lines):
+# "refused <line>" when it logged any refused: line, else "ok <line>" when
+# it logged that it holds M, else "none".
+start_outcome() {
+  local lines line
+  lines="$([ "$apply" = 1 ] && aws logs filter-log-events --region "$1" --log-group-name "/ghost-seal/$prefix-$1" \
+    --log-stream-names "$2" --query 'events[].message' --output json 2> /dev/null |
+    jq -r '.[]?' 2> /dev/null || true)"
+  line="$(printf '%s\n' "$lines" | grep -F -m 1 'refused:' || true)"
+  if [ -n "$line" ]; then
+    printf 'refused %s' "$line"
+    return 0
+  fi
+  line="$(printf '%s\n' "$lines" | grep -F -m 1 -e "$made_m" -e "$received_m" || true)"
+  if [ -n "$line" ]; then
+    printf 'ok %s' "$line"
+  else
+    printf 'none'
+  fi
+}
+
+# Whether region $1 holds M and serves: its stack is complete, its current
+# host runs, and that host logged that it holds M and no refusal. Sets why
+# when it does not.
+holds_m() {
+  local region="$1" status instance state outcome
+  status="$(stack_status "$region")"
+  case "$status" in
+    CREATE_COMPLETE | UPDATE_COMPLETE | UPDATE_ROLLBACK_COMPLETE) ;;
+    "") why="$region has no stack"; return 1 ;;
+    *) why="$region's stack is $status"; return 1 ;;
+  esac
+  instance="$(stack_instance "$region")"
+  if [ -z "$instance" ]; then
+    why="$region's stack names no host"
+    return 1
+  fi
+  state="$(instance_state "$region" "$instance")"
+  if [ "$state" != running ]; then
+    why="$region's host $instance is ${state:-not found}"
+    return 1
+  fi
+  outcome="$(start_outcome "$region" "$instance")"
+  case "$outcome" in
+    ok\ *) return 0 ;;
+    refused\ *) why="$region's host $instance logged ${outcome#refused }"; return 1 ;;
+    *) why="$region's host $instance has not logged that it holds M"; return 1 ;;
+  esac
+}
+
+# How many regions other than $1 hold M and serve; why says which do not.
+other_holders() {
+  local region="$1" other count=0 reasons=""
+  for other in "${region_names[@]}"; do
+    [ "$other" != "$region" ] || continue
+    if holds_m "$other"; then
+      count=$((count + 1))
+    else
+      reasons="${reasons:+$reasons; }$why"
+    fi
+  done
+  why="$reasons"
+  holders="$count"
+}
+
+# Succeeds once at least two regions other than $1 hold M and serve, checked
+# just now; sets why when fewer do.
+two_others_hold_m() {
+  other_holders "$1"
+  if [ "$holders" -ge 2 ]; then
+    echo "# $1: $holders other regions hold M and serve, checked just now."
+    return 0
+  fi
+  why="only $holders other region(s) hold M and serve: $why"
+  return 1
+}
+
+# Waits for the start outcome of region $1's current host, at most
+# start_wait seconds. Stops the whole run, deploying nothing more, on any
+# refused: line or when the wait runs out.
+wait_for_m() {
+  local region="$1" stack="$prefix-$1" instance outcome deadline
+  if [ "$apply" = 0 ]; then
+    echo "# then wait up to ${start_wait}s for $stack's host to log \"$made_m\" or \"$received_m\" in /ghost-seal/$stack; stop, deploying nothing more, on any refused: line or at the end of the wait."
+    return 0
+  fi
+  instance="$(stack_instance "$region")"
+  if [ -z "$instance" ]; then
+    echo "deploy: $stack names no host (no InstanceId output); stopped, nothing more is deployed" >&2
+    exit 1
+  fi
+  echo "# $region: waiting up to ${start_wait}s for host $instance to log its start in /ghost-seal/$stack."
+  deadline=$((SECONDS + start_wait))
+  while :; do
+    outcome="$(start_outcome "$region" "$instance")"
+    case "$outcome" in
+      ok\ *)
+        echo "# $region: host $instance holds M: ${outcome#ok }"
+        return 0
+        ;;
+      refused\ *)
+        echo "deploy: $stack: host $instance logged: ${outcome#refused }" >&2
+        echo "deploy: stopped; nothing more is deployed" >&2
+        exit 1
+        ;;
+    esac
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "deploy: $stack: host $instance logged no start outcome in /ghost-seal/$stack within ${start_wait}s; stopped, nothing more is deployed" >&2
+      exit 1
+    fi
+    sleep "$start_poll"
+  done
+}
+
 # Regions deployed without the address of every anchor peer.
 missing=()
 
@@ -282,21 +444,70 @@ deploy_region() {
     "AnchorPeerRegion2=${others[1]}" \
     "AnchorPeerAddress=$anchor" \
     "AnchorPeerAddress2=$anchor_2"
+  # Nothing more is deployed until this host logged that it holds M.
+  wait_for_m "$region"
 }
 
+# Regions whose existing host holds M while fewer than two other regions
+# did: left as they are now, deployed in the second pass.
+later=()
+
 for index in $(seq 0 $((count - 1))); do
+  region="${region_names[index]}"
+  if stack_exists "$region" "$prefix-$region"; then
+    # Its deploy may replace its host. A host that holds M is replaced only
+    # once two other regions hold M too; one that may hold M (it logged no
+    # outcome, or cannot be checked) only while another region holds M.
+    if holds_m "$region"; then
+      if ! two_others_hold_m "$region"; then
+        echo "# $region: its host holds M and $why; $prefix-$region is left as it is until the second pass."
+        later+=("$index")
+        continue
+      fi
+    else
+      echo "# $region: $why."
+      other_holders "$region"
+      if [ "$holders" -lt 1 ]; then
+        echo "deploy: not replacing the host of $prefix-$region: no other region holds M and serves ($why), so it may hold the only M; stopped, nothing more is deployed" >&2
+        exit 1
+      fi
+    fi
+  fi
   deploy_region "$index"
 done
 
 # A region deployed before a later peer existed has no address for it: it
-# serves no Fill or Open until it is deployed again with every address.
-if [ "${#missing[@]}" -gt 0 ]; then
-  again=("${missing[@]}")
+# serves no Fill or Open until it is deployed again with every address. Its
+# host is replaced, so this runs only once every region holds M, one region
+# at a time, each only once two other regions hold M and serve: never while
+# it may be the only M holder.
+again=()
+for index in "${!region_names[@]}"; do
+  for listed in ${missing[@]+"${missing[@]}"} ${later[@]+"${later[@]}"}; do
+    if [ "$listed" = "$index" ]; then
+      again+=("$index")
+      break
+    fi
+  done
+done
+if [ "${#again[@]}" -gt 0 ]; then
   missing=()
-  echo "# again, now that every region exists: each with both anchor peers' addresses."
+  for region in "${region_names[@]}"; do
+    if ! holds_m "$region"; then
+      echo "deploy: the second pass needs every region to hold M, and $why; stopped, nothing more is deployed" >&2
+      exit 1
+    fi
+  done
+  echo "# again, now that every region exists and holds M: each with both anchor peers' addresses, one at a time."
   for index in "${again[@]}"; do
+    region="${region_names[index]}"
+    if ! two_others_hold_m "$region"; then
+      echo "deploy: not replacing the host of $prefix-$region: $why; stopped, nothing more is deployed" >&2
+      exit 1
+    fi
     deploy_region "$index"
   done
 elif [ "$apply" = 0 ]; then
-  echo "# with --apply, a region deployed before a later peer existed is deployed again at the end with its address."
+  echo "# with --apply, a region deployed before a later peer existed is deployed again at the end with its address,"
+  echo "# only once every region logged that it holds M: one region at a time, each only once two other regions hold M and serve."
 fi
