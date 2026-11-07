@@ -53,9 +53,27 @@ RUN set -eu; \
 # on any host; rustup checks the target's hash against the toolchain's
 # release manifest.
 FROM build AS proxy-build
+# Crates in seal_proxy's tree (ring, through rustls) compile C for the musl
+# target, so cc-rs needs a musl C compiler: Debian trixie's musl-gcc wrapper
+# (musl-tools) around the image's gcc. The three packages come from a fixed
+# snapshot of the Debian archive and are checked against their SHA-256 before
+# dpkg installs them. Only this stage has them: the build stage and the
+# measured enclave stages are unchanged.
+ADD https://snapshot.debian.org/archive/debian/20260510T204219Z/pool/main/m/musl/musl_1.2.5-3.1~deb13u1_arm64.deb /seal-musl/musl.deb
+ADD https://snapshot.debian.org/archive/debian/20260510T204219Z/pool/main/m/musl/musl-dev_1.2.5-3.1~deb13u1_arm64.deb /seal-musl/musl-dev.deb
+ADD https://snapshot.debian.org/archive/debian/20260510T204219Z/pool/main/m/musl/musl-tools_1.2.5-3.1~deb13u1_arm64.deb /seal-musl/musl-tools.deb
+RUN set -eu; \
+    echo "46cf1fcaa2d49d1573ef0ceabdb36e04a359a9a37d8e4304024f9018682e3f35  /seal-musl/musl.deb" | sha256sum -c -; \
+    echo "384ea029e3694baac696d3993d93246f9a4b3741c493697e1ceb7256d8820748  /seal-musl/musl-dev.deb" | sha256sum -c -; \
+    echo "3d3a33291ee2bb651dae1940671fb302d0a1b90a0ad9bc2a1ae8e81151d811c7  /seal-musl/musl-tools.deb" | sha256sum -c -; \
+    dpkg -i /seal-musl/musl.deb /seal-musl/musl-dev.deb /seal-musl/musl-tools.deb; \
+    rm -rf /seal-musl; \
+    command -v musl-gcc
 RUN set -eu; \
     . /seal-build/enclave/build.env; \
     rustup target add "$SEAL_PROXY_TARGET"; \
+    export CC_aarch64_unknown_linux_musl=musl-gcc; \
+    export AR_aarch64_unknown_linux_musl=ar; \
     export SOURCE_DATE_EPOCH="$SEAL_SOURCE_DATE_EPOCH"; \
     export CARGO_TARGET_DIR=/seal-build/target; \
     export RUSTFLAGS="--remap-path-prefix=/seal-build=$SEAL_BUILD_ROOT --remap-path-prefix=$CARGO_HOME=$SEAL_CARGO_ROOT"; \
