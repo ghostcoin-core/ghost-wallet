@@ -27,6 +27,16 @@
 //! frame [`ANSWER_RECORD`] || counter || record per record, in order, then
 //! [`ANSWER_OK`] || the number of records (u64).
 //!
+//! **Replacing the journal.** A journal written in the previous record
+//! format is rewritten by the enclave when it opens it (`journal_log`) and
+//! replaced on the host at once: [`REQUEST_STAGE`] || counter || record
+//! stages each record (counter 1 begins a new replacement; the same checks
+//! as an append), then [`REQUEST_REPLACE`] || count (u64) writes every
+//! staged record to `<file>.new` (mode 0600), flushes it, renames it over the
+//! file and flushes the directory, and only then answers ok. A crash or a
+//! failure leaves the old file whole or the new one, never a mix; a count
+//! that is not the number staged is refused. Peer logs are never replaced.
+//!
 //! **Peer logs.** The host also keeps, for each other region, the copy of
 //! that region's log its enclave holds as a peer (`journal_anchor`): one
 //! file per origin region (`/var/lib/seal/peer-<region>.log`,
@@ -67,6 +77,12 @@ pub const REQUEST_READ_ALL: u8 = 2;
 /// A request about the log kept for a peer region: origin length (1) ||
 /// origin || an append or read-all request.
 pub const REQUEST_PEER: u8 = 3;
+/// A request: stage record counter || record of a replacement of the whole
+/// journal (counter 1 begins one).
+pub const REQUEST_STAGE: u8 = 4;
+/// A request: replace the whole journal with the count (u64) records
+/// staged, at once.
+pub const REQUEST_REPLACE: u8 = 5;
 /// Where the parent keeps its peer logs.
 pub const PEER_LOG_DIR: &str = "/var/lib/seal";
 
@@ -101,12 +117,23 @@ pub trait RecordFile: Send {
     fn sync(&mut self) -> io::Result<()>;
     /// Cuts the file to `length` bytes.
     fn truncate(&mut self, length: u64) -> io::Result<()>;
+    /// Replaces the whole file with `bytes` at once: on an error the file is
+    /// either the old one, whole, or the new one, never a mix.
+    fn replace(&mut self, bytes: &[u8]) -> io::Result<()>;
 }
 
 /// The store's file on disk.
 pub struct DiskFile {
     file: File,
+    path: PathBuf,
     directory: PathBuf,
+}
+
+/// Where a file's replacement is written before it is renamed over it.
+pub fn staging_file(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".new");
+    PathBuf::from(name)
 }
 
 impl DiskFile {
@@ -119,7 +146,7 @@ impl DiskFile {
             Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
             _ => PathBuf::from("."),
         };
-        let mut disk = DiskFile { file, directory };
+        let mut disk = DiskFile { file, path: path.to_path_buf(), directory };
         // A file just made is named in its directory only once that is
         // flushed.
         disk.sync()?;
@@ -146,6 +173,21 @@ impl RecordFile for DiskFile {
 
     fn truncate(&mut self, length: u64) -> io::Result<()> {
         self.file.set_len(length)
+    }
+
+    /// Writes `bytes` to the staging file (`<file>.new`, mode 0600),
+    /// flushes it, renames it over the file and flushes the directory. A
+    /// failure before the rename leaves the old file; after it, the new one.
+    fn replace(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let staging = staging_file(&self.path);
+        let mut file = OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&staging)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&staging, &self.path)?;
+        self.file = OpenOptions::new().read(true).append(true).open(&self.path)?;
+        File::open(&self.directory)?.sync_all()
     }
 }
 
@@ -220,6 +262,46 @@ pub struct HostStore<F: RecordFile = DiskFile> {
     end: u64,
     broken: bool,
     dropped_torn: bool,
+    /// The records staged for a replacement of the whole log, not kept yet.
+    staged: Vec<(u64, Vec<u8>)>,
+}
+
+/// The records of `file` (see the module notes): a torn last record is
+/// cut from it. The records, where they end, and whether one was cut.
+fn read_records<F: RecordFile>(file: &mut F) -> io::Result<(Vec<(u64, Vec<u8>)>, u64, bool)> {
+    let bytes = file.read_all()?;
+    let mut records = Vec::new();
+    let mut at = 0usize;
+    let mut dropped_torn = false;
+    while at < bytes.len() {
+        match parse_one(&bytes[at..], records.len() as u64 + 1) {
+            Parsed::Record(counter, record, used) => {
+                records.push((counter, record));
+                at += used;
+            }
+            Parsed::Torn => {
+                file.truncate(at as u64)?;
+                file.sync()?;
+                dropped_torn = true;
+                break;
+            }
+            Parsed::Damaged => {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "the journal file is damaged before its end"));
+            }
+        }
+    }
+    Ok((records, at as u64, dropped_torn))
+}
+
+/// The bytes on disk of record `counter`.
+fn encode_record(counter: u64, record: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(HEAD_BYTES + record.len() + CHECK_BYTES);
+    bytes.extend_from_slice(&counter.to_be_bytes());
+    bytes.extend_from_slice(&(record.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(record);
+    let check = check_of(&bytes);
+    bytes.extend_from_slice(&check);
+    bytes
 }
 
 impl HostStore<DiskFile> {
@@ -233,28 +315,8 @@ impl<F: RecordFile> HostStore<F> {
     /// The store in `file`: every whole record, a torn last one dropped (and
     /// cut from the file).
     pub fn with_file(mut file: F) -> io::Result<HostStore<F>> {
-        let bytes = file.read_all()?;
-        let mut records = Vec::new();
-        let mut at = 0usize;
-        let mut dropped_torn = false;
-        while at < bytes.len() {
-            match parse_one(&bytes[at..], records.len() as u64 + 1) {
-                Parsed::Record(counter, record, used) => {
-                    records.push((counter, record));
-                    at += used;
-                }
-                Parsed::Torn => {
-                    file.truncate(at as u64)?;
-                    file.sync()?;
-                    dropped_torn = true;
-                    break;
-                }
-                Parsed::Damaged => {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "the journal file is damaged before its end"));
-                }
-            }
-        }
-        Ok(HostStore { file, records, end: at as u64, broken: false, dropped_torn })
+        let (records, end, dropped_torn) = read_records(&mut file)?;
+        Ok(HostStore { file, records, end, broken: false, dropped_torn, staged: Vec::new() })
     }
 
     /// The records, in order.
@@ -279,12 +341,7 @@ impl<F: RecordFile> HostStore<F> {
         if record.is_empty() || record.len() > MAX_RECORD_BYTES {
             return Err(StoreRefused::BadLength);
         }
-        let mut bytes = Vec::with_capacity(HEAD_BYTES + record.len() + CHECK_BYTES);
-        bytes.extend_from_slice(&counter.to_be_bytes());
-        bytes.extend_from_slice(&(record.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(record);
-        let check = check_of(&bytes);
-        bytes.extend_from_slice(&check);
+        let bytes = encode_record(counter, record);
         if self.file.append(&bytes).and_then(|()| self.file.sync()).is_err() {
             // Undo whatever reached the file, so the next append of the same
             // counter starts where this one did (its flush flushes the cut
@@ -299,6 +356,63 @@ impl<F: RecordFile> HostStore<F> {
         self.end += bytes.len() as u64;
         self.records.push((counter, record.to_vec()));
         Ok(())
+    }
+
+    /// Replaces every record with `records` (counters 1 on) at once: the
+    /// whole new file written beside the old one, flushed, renamed over it
+    /// and its directory flushed, and only then `Ok`. A failure leaves the
+    /// old records or the new ones, whichever the file then holds (read
+    /// again; a file that cannot be read again breaks the store).
+    pub fn replace(&mut self, records: &[(u64, Vec<u8>)]) -> Result<(), StoreRefused> {
+        if self.broken {
+            return Err(StoreRefused::Broken);
+        }
+        if records.iter().zip(1u64..).any(|((counter, _), expected)| *counter != expected) {
+            return Err(StoreRefused::WrongCounter);
+        }
+        if records.iter().any(|(_, record)| record.is_empty() || record.len() > MAX_RECORD_BYTES) {
+            return Err(StoreRefused::BadLength);
+        }
+        let bytes: Vec<u8> = records.iter().flat_map(|(counter, record)| encode_record(*counter, record)).collect();
+        if self.file.replace(&bytes).is_err() {
+            match read_records(&mut self.file) {
+                Ok((held, end, _)) => {
+                    self.records = held;
+                    self.end = end;
+                }
+                Err(_) => self.broken = true,
+            }
+            return Err(StoreRefused::Disk);
+        }
+        self.end = bytes.len() as u64;
+        self.records = records.to_vec();
+        Ok(())
+    }
+
+    /// Stages record `counter` of a replacement ([`REQUEST_STAGE`]): counter
+    /// 1 begins a new one, any other must be the next staged.
+    pub fn stage(&mut self, counter: u64, record: &[u8]) -> Result<(), StoreRefused> {
+        if counter == 1 {
+            self.staged.clear();
+        }
+        if counter != self.staged.len() as u64 + 1 {
+            return Err(StoreRefused::WrongCounter);
+        }
+        if record.is_empty() || record.len() > MAX_RECORD_BYTES {
+            return Err(StoreRefused::BadLength);
+        }
+        self.staged.push((counter, record.to_vec()));
+        Ok(())
+    }
+
+    /// Replaces every record with the `count` staged ([`REQUEST_REPLACE`]).
+    pub fn replace_staged(&mut self, count: u64) -> Result<(), StoreRefused> {
+        let staged = if count == 0 { Vec::new() } else { std::mem::take(&mut self.staged) };
+        self.staged.clear();
+        if staged.len() as u64 != count {
+            return Err(StoreRefused::WrongCounter);
+        }
+        self.replace(&staged)
     }
 
     /// The answer frames to one request frame.
@@ -320,6 +434,20 @@ impl<F: RecordFile> HostStore<F> {
                     .collect();
                 frames.push([&[ANSWER_OK][..], &(self.records.len() as u64).to_be_bytes()].concat());
                 frames
+            }
+            Some((&REQUEST_STAGE, rest)) if rest.len() > 8 => {
+                let counter = u64::from_be_bytes(rest[..8].try_into().expect("8 bytes"));
+                match self.stage(counter, &rest[8..]) {
+                    Ok(()) => vec![vec![ANSWER_OK]],
+                    Err(why) => refused(&why.to_string()),
+                }
+            }
+            Some((&REQUEST_REPLACE, rest)) if rest.len() == 8 => {
+                let count = u64::from_be_bytes(rest.try_into().expect("8 bytes"));
+                match self.replace_staged(count) {
+                    Ok(()) => vec![vec![ANSWER_OK]],
+                    Err(why) => refused(&why.to_string()),
+                }
             }
             _ => refused("unknown request"),
         }
@@ -386,8 +514,13 @@ impl<F: RecordFile> StoreAnswer for HostStores<F> {
         let Some(origin) = rest.get(..length).and_then(|name| std::str::from_utf8(name).ok()) else {
             return refused("unknown request");
         };
+        let request = &rest[length..];
+        // Peer logs are only ever appended to: never replaced.
+        if matches!(request.first(), Some(&REQUEST_STAGE | &REQUEST_REPLACE)) {
+            return refused("a peer log is not replaced");
+        }
         match self.peers.iter_mut().find(|(name, _)| name == origin) {
-            Some((_, store)) => store.answer(&rest[length..]),
+            Some((_, store)) => store.answer(request),
             None => refused("no peer log of that region"),
         }
     }
@@ -403,6 +536,10 @@ impl<F: RecordFile> LogStore for HostStore<F> {
     fn read_all(&mut self) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
         Ok(self.records.clone())
     }
+
+    fn replace_all(&mut self, records: &[(u64, Vec<u8>)]) -> Result<(), SealError> {
+        HostStore::replace(self, records).map_err(|_| SealError::Journal("the journal file was not replaced"))
+    }
 }
 
 #[cfg(feature = "nitro")]
@@ -416,7 +553,7 @@ mod nitro {
 
     use super::{
         ANSWER_OK, ANSWER_RECORD, JOURNAL_PORT, PARENT_CID, REQUEST_APPEND, REQUEST_DEADLINE, REQUEST_READ_ALL,
-        StoreAnswer, peer_request,
+        REQUEST_REPLACE, REQUEST_STAGE, StoreAnswer, peer_request,
     };
     use crate::error::SealError;
     use crate::journal_log::LogStore;
@@ -501,15 +638,35 @@ mod nitro {
 
     const NO_ANSWER: SealError = SealError::Journal("the host journal did not answer in time");
 
-    impl<C: Connector> LogStore for HostJournal<C> {
-        fn append(&mut self, counter: u64, record: &[u8]) -> Result<(), SealError> {
-            let mut stream = self.send(&[&[REQUEST_APPEND][..], &counter.to_be_bytes(), record].concat())?;
+    impl<C: Connector> HostJournal<C> {
+        /// Sends one request answered by ok or a refusal; `Ok` on ok.
+        fn ok_or_refused(&self, request: &[u8], refused: SealError) -> Result<(), SealError> {
+            let mut stream = self.send(request)?;
             let answer = read_frame(&mut stream);
             stream.close();
             match answer.map_err(|_| NO_ANSWER)?.as_slice() {
                 [ANSWER_OK] => Ok(()),
-                _ => Err(SealError::Journal("the host journal refused the record")),
+                _ => Err(refused),
             }
+        }
+    }
+
+    impl<C: Connector> LogStore for HostJournal<C> {
+        fn append(&mut self, counter: u64, record: &[u8]) -> Result<(), SealError> {
+            self.ok_or_refused(
+                &[&[REQUEST_APPEND][..], &counter.to_be_bytes(), record].concat(),
+                SealError::Journal("the host journal refused the record"),
+            )
+        }
+
+        /// Stages every record (one request each), then has the host replace
+        /// the whole journal with them at once.
+        fn replace_all(&mut self, records: &[(u64, Vec<u8>)]) -> Result<(), SealError> {
+            let refused = SealError::Journal("the host journal refused the replacement");
+            for (counter, record) in records {
+                self.ok_or_refused(&[&[REQUEST_STAGE][..], &counter.to_be_bytes(), record].concat(), refused.clone())?;
+            }
+            self.ok_or_refused(&[&[REQUEST_REPLACE][..], &(records.len() as u64).to_be_bytes()].concat(), refused)
         }
 
         fn read_all(&mut self) -> Result<Vec<(u64, Vec<u8>)>, SealError> {

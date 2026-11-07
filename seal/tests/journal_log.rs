@@ -4,7 +4,10 @@
 //! tampering is refused at open, a store that rolls back while the log runs
 //! is refused for good, a failed append fails the save and leaves the card
 //! unchanged, and the store never holds a UID, an entry kind, commit data,
-//! a coin, a key or an amount in clear.
+//! a coin, a key or an amount in clear. A log written by the previous
+//! release (no origin under its tags) is upgraded once, its Fill and Open
+//! entries kept; a mixed log, or a previous record failing its check, is
+//! refused and left as it was.
 
 mod support;
 
@@ -17,6 +20,7 @@ use ghost_seal::{
     CardState, CardUid, CheckRequest, EntryKind, FillRequest, Journal, MasterKey, OpenRequest, Seal, SealConfig,
     SealError, SealRandom,
 };
+use support::previous_log::PreviousLog;
 use support::{AMOUNT, MEASUREMENT, SettledCheck, SimCard, StubChain, StubMaker, TestClock, TestRandom, UID, contains};
 
 const OTHER: CardUid = CardUid([0x04, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
@@ -529,4 +533,164 @@ fn the_store_holds_no_uid_kind_commit_data_coin_key_or_amount() {
     for (what, secret) in &secrets {
         assert!(!contains(&bytes, secret), "the store holds {what}");
     }
+}
+
+/// A Seal over a log the previous release writes.
+fn seal_on_previous(log: &PreviousLog, clock: &TestClock, label: u64) -> Seal {
+    Seal::new(
+        support::master(),
+        SealConfig { measurement: MEASUREMENT, answer_lifetime_secs: 120 },
+        Box::new(TestRandom::new(label)),
+        Box::new(clock.clone()),
+        Box::new(log.clone()),
+        Box::new(SettledCheck),
+        Box::new(support::registered(&[UID])),
+    )
+}
+
+/// The previous release's log over `store`.
+fn previous_log(store: &MemoryLogStore, seed: u64) -> PreviousLog {
+    PreviousLog::new(&support::master_bytes(), Box::new(store.clone()), Box::new(LogRandom(seed << 32)))
+}
+
+/// A store holding four saves written by the previous release.
+fn four_previous_records() -> MemoryLogStore {
+    let store = MemoryLogStore::new();
+    let mut log = previous_log(&store, 7);
+    log.save(&UID, EntryKind::Fill, b"first fill entry".to_vec()).unwrap();
+    log.save(&UID, EntryKind::Open, b"an open entry".to_vec()).unwrap();
+    log.save(&OTHER, EntryKind::Fill, b"another card's fill".to_vec()).unwrap();
+    log.save(&UID, EntryKind::Fill, b"the fill entry replaced".to_vec()).unwrap();
+    store
+}
+
+#[test]
+fn a_log_written_by_the_previous_release_is_upgraded_once_and_its_open_is_finished_with_the_same_key() {
+    // The previous release fills and seals a card, then begins an Open that
+    // is cut off once it was journaled.
+    let store = MemoryLogStore::new();
+    let clock = TestClock::new();
+    let mut maker = StubMaker::default();
+    let mut card = SimCard::set_up(UID);
+    let previous = previous_log(&store, 3);
+    let mut seal = seal_on_previous(&previous, &clock, 1);
+    let filled = seal.fill(&mut card, &fill_request(), &mut maker).unwrap();
+    let chain = StubChain::default();
+    chain.pay(&filled.commit_data, AMOUNT);
+    seal.confirm_fill(&mut card, &CheckRequest { uid: UID, challenge: [3; 32] }, &chain).unwrap();
+    let phone = support::phone(0x64);
+    let request = OpenRequest { uid: UID, challenge: [5; 32], phone_key: phone.public_key(), pin: None };
+    let mut step = 0;
+    loop {
+        card.drop_from(step, support::DropStyle::AfterCard);
+        let cut = seal.open(&mut card, &request);
+        card.reconnect();
+        assert_eq!(cut.err(), Some(SealError::Dropped), "step {step}");
+        if previous.load(&UID, EntryKind::Open).is_some() {
+            break;
+        }
+        step += 1;
+        assert!(step < 64, "the Open was never journaled");
+    }
+    let fill_entry = previous.load(&UID, EntryKind::Fill).expect("a Fill entry");
+    let open_entry = previous.load(&UID, EntryKind::Open).expect("an Open entry");
+    drop((seal, previous));
+    let written = store.records();
+    assert!(written.len() >= 2);
+
+    // The new release opens it: the same counters, the same IVs and
+    // ciphertext, only the tags rewritten, and the same entries.
+    let log = open(&store).expect("the previous format is upgraded");
+    let upgraded = store.records();
+    assert_eq!(upgraded.len(), written.len());
+    for ((old_counter, old), (new_counter, new)) in written.iter().zip(&upgraded) {
+        assert_eq!(old_counter, new_counter);
+        assert_eq!(old.len(), new.len());
+        assert_eq!(old[..old.len() - 32], new[..new.len() - 32], "record {old_counter}: the same IV and ciphertext");
+        assert_ne!(old[old.len() - 32..], new[new.len() - 32..], "record {old_counter}: the tag binds the origin now");
+    }
+    assert_eq!(log.counter(), written.len() as u64);
+    assert_eq!(log.load(&UID, EntryKind::Fill), Some(fill_entry));
+    assert_eq!(log.load(&UID, EntryKind::Open), Some(open_entry));
+    drop(log);
+
+    // Upgraded once: a second open finds the current format and changes
+    // nothing.
+    let log = open(&store).unwrap();
+    assert_eq!(store.records(), upgraded);
+
+    // The Open begun by the previous release is finished with its key, and
+    // the next save goes on at the next counter.
+    let mut seal = seal_on(&log, &clock, 2);
+    let opened = seal.open(&mut card, &request).expect("finished after the upgrade");
+    assert_eq!(phone.open(&opened.release, &UID, 1).unwrap().expose_secret(), &maker.key_for(&filled.commit_data)[..]);
+    let mut log = log;
+    log.save(&OTHER, EntryKind::Fill, b"after the upgrade".to_vec()).unwrap();
+    let reopened = open(&store).unwrap();
+    assert_eq!(reopened.counter(), store.records().len() as u64);
+    assert_eq!(reopened.load(&OTHER, EntryKind::Fill), Some(b"after the upgrade".to_vec()));
+}
+
+#[test]
+fn an_upgrade_refuses_a_mixed_log_a_failing_previous_record_or_a_store_that_cannot_replace() {
+    let previous = four_previous_records();
+    let written = previous.records();
+    let upgraded_store = MemoryLogStore::new();
+    upgraded_store.set_records(written.clone());
+    let upgraded = {
+        open(&upgraded_store).unwrap();
+        upgraded_store.records()
+    };
+    assert_ne!(upgraded, written);
+    let store = MemoryLogStore::new();
+
+    // A record of the previous format that fails the previous check: a
+    // byte of its IV, of its ciphertext or of its tag changed, or (below) a
+    // record dropped.
+    for (index, from_end) in [(0usize, Some(1usize)), (3, None), (1, Some(40)), (2, Some(1))] {
+        let mut bad = written.clone();
+        let at = from_end.map_or(0, |back| bad[index].1.len() - back);
+        bad[index].1[at] ^= 0x01;
+        store.set_records(bad.clone());
+        assert!(refused(open(&store)), "record {} changed", index + 1);
+        assert_eq!(store.records(), bad, "a refused log is not rewritten");
+    }
+    let mut gap = written.clone();
+    gap.remove(1);
+    store.set_records(gap.clone());
+    assert!(refused(open(&store)));
+    assert_eq!(store.records(), gap);
+
+    // A log mixing the two formats, either way round.
+    for mixed in [
+        vec![written[0].clone(), upgraded[1].clone(), upgraded[2].clone(), upgraded[3].clone()],
+        vec![upgraded[0].clone(), upgraded[1].clone(), written[2].clone(), written[3].clone()],
+        vec![upgraded[0].clone(), written[1].clone()],
+    ] {
+        store.set_records(mixed.clone());
+        assert!(refused(open(&store)), "a mixed log");
+        assert_eq!(store.records(), mixed);
+    }
+
+    // Under another M: refused, as before.
+    store.set_records(written.clone());
+    assert!(refused(open_with(&other_master(), &store)));
+    assert_eq!(store.records(), written);
+
+    // A store that fails the replacement, or cannot replace at all: refused,
+    // the previous format kept whole, and the next try upgrades it.
+    store.fail_appends(true);
+    assert!(refused(open(&store)));
+    assert_eq!(store.records(), written);
+    let no_replace = LosesAnswers { inner: store.clone(), lose: Arc::new(AtomicBool::new(false)) };
+    let result = JournalLog::open_with(&support::master(), Box::new(no_replace), Box::new(LogRandom(5)));
+    assert!(refused(result));
+    store.fail_appends(false);
+    assert_eq!(store.records(), written);
+    let shared = SharedLog::new(Box::new(store.clone()));
+    let log = shared.journal(&support::master()).expect("the shared log upgrades it");
+    assert_eq!(store.records(), upgraded, "the upgrade is the same whoever does it");
+    assert_eq!(log.load(&UID, EntryKind::Fill), Some(b"the fill entry replaced".to_vec()));
+    assert_eq!(log.load(&UID, EntryKind::Open), Some(b"an open entry".to_vec()));
+    assert_eq!(log.load(&OTHER, EntryKind::Fill), Some(b"another card's fill".to_vec()));
 }

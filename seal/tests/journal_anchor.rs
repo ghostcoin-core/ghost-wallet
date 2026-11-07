@@ -33,6 +33,7 @@ use ghost_seal::{
     CardState, CardUid, CheckRequest, EntryKind, FillRequest, Journal, MasterKey, OpenRequest, Seal, SealConfig,
     SealError, SealRandom,
 };
+use support::previous_log::PreviousLog;
 use support::{AMOUNT, MEASUREMENT, SettledCheck, SimCard, StubChain, StubMaker, TestClock, TestRandom, UID, contains};
 
 const US: &str = "us-east-1";
@@ -625,6 +626,91 @@ fn every_region_restarting_at_once_starts_again_and_a_replaced_host_among_them_r
     let logs = start_in_turns(&[&us, &eu, &ap]);
     assert_eq!(ap.own.records(), ap_records);
     assert_eq!(logs[2].load(&UID, EntryKind::Open), Some(b"ap's open".to_vec()));
+}
+
+/// Region `name`'s enclave restarted on the host of `old` (every store
+/// kept), its `generation`-th start.
+fn restart(net: &Net, old: &Node, name: &str, generation: u8) -> Node {
+    let node = net.boot(name, generation);
+    node.own.set_records(old.own.records());
+    for (origin, store) in &node.copies {
+        store.set_records(old.copies[origin].records());
+    }
+    node
+}
+
+#[test]
+fn every_region_upgrading_a_log_the_previous_release_wrote_anchors_it_and_keeps_its_entries() {
+    let master = support::master();
+    let net = Net::new();
+    let (us, eu, ap) = (net.boot(US, 0), net.boot(EU, 0), net.boot(AP, 0));
+    // Each host holds its log as the previous release wrote it, before the
+    // log was anchored: no origin under its tags, no peer holding it.
+    let mut written = BTreeMap::new();
+    for (node, name, seed) in [(&us, US, 1u64), (&eu, EU, 2), (&ap, AP, 3)] {
+        let store = Box::new(node.own.clone());
+        let mut log = PreviousLog::new(&support::master_bytes(), store, Box::new(Random(seed << 36)));
+        log.save(&UID, EntryKind::Fill, format!("{name}'s fill").into_bytes()).unwrap();
+        log.save(&UID, EntryKind::Open, format!("{name}'s open").into_bytes()).unwrap();
+        written.insert(name, node.own.records());
+    }
+    let mut chain = Chain::new(&master, US);
+    assert!(chain.push(1, &written[US][0].1).is_err(), "the previous format is not the current one");
+
+    // Until it is upgraded, a region answers about its own log as about an
+    // empty store: no peer can hold a copy of a log never anchored.
+    let answer = us.logs.answer(&master, &request(OP_HEAD, US, 0x21, &[])).unwrap();
+    assert_eq!(body_of(&answer), [0, NO_COPY_NOT_RESTORED]);
+    // A region whose peers have not restored their copies yet waits, its
+    // host's log still in the previous format.
+    assert_eq!(start(&us).err(), Some(NO_COPY));
+    assert_eq!(us.own.records(), written[US]);
+
+    // Every region started (each tried again in turn): every log upgraded,
+    // its entries kept, and held by both peers before it is used.
+    let logs = start_in_turns(&[&us, &eu, &ap]);
+    let nodes = [(&us, US), (&eu, EU), (&ap, AP)];
+    for ((node, name), log) in nodes.iter().zip(&logs) {
+        let upgraded = node.own.records();
+        assert_eq!(upgraded.len(), 2, "{name}");
+        for ((_, old), (_, new)) in written[name].iter().zip(&upgraded) {
+            assert_eq!(old[..old.len() - 32], new[..new.len() - 32], "{name}: the same IV and ciphertext");
+        }
+        let mut chain = Chain::new(&master, name);
+        for (counter, record) in &upgraded {
+            chain.push(*counter, record).expect("the upgraded log is this region's, in the current format");
+        }
+        assert_eq!(log.load(&UID, EntryKind::Fill), Some(format!("{name}'s fill").into_bytes()));
+        assert_eq!(log.load(&UID, EntryKind::Open), Some(format!("{name}'s open").into_bytes()));
+        for (peer, other) in nodes {
+            if other != *name {
+                assert_eq!(peer.copies[*name].records(), upgraded, "{other}'s copy of {name}'s log");
+            }
+        }
+    }
+    let mut logs = logs;
+    logs[0].save(&OTHER, EntryKind::Fill, b"us's fill after the upgrade".to_vec()).expect("anchored in both peers");
+    let us_records = us.own.records();
+    assert_eq!(eu.copies[US].records(), us_records);
+    drop(logs);
+
+    // After the upgrade, the host of us-east-1 puts back its log as the
+    // previous release left it (an older copy, in the previous format), and
+    // the enclave restarts: the peers' heads restore what it cut.
+    net.lose(US);
+    let us = restart(&net, &us, US, 1);
+    us.own.set_records(written[US].clone());
+    let log = start(&us).expect("the older copy is upgraded and restored from the peers");
+    assert_eq!(us.own.records(), us_records);
+    assert_eq!(log.load(&OTHER, EntryKind::Fill), Some(b"us's fill after the upgrade".to_vec()));
+    drop(log);
+
+    // A tail cut later, in the current format, is restored as before.
+    net.lose(US);
+    let us = restart(&net, &us, US, 2);
+    us.own.set_records(us_records[..1].to_vec());
+    assert_eq!(start(&us).expect("restored from the peers").counter(), 3);
+    assert_eq!(us.own.records(), us_records);
 }
 
 #[test]

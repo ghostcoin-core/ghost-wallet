@@ -22,6 +22,20 @@
 //! records only: it sees no UID, no entry kind, no card data and no key, and
 //! it never holds M.
 //!
+//! **The previous format.** Before the log was anchored, a record's tag had
+//! no origin field (`HMAC-SHA3-256(ghost-seal/v1/host-journal || counter ||
+//! the previous record's tag || IV || ciphertext)`, same keys). A host's own
+//! log that holds such records is upgraded when it is opened: every record
+//! is checked once with that previous rule, then rewritten with the same
+//! counter, IV and ciphertext (so the same entry) under the current tag, as
+//! this region's record, and the store's whole log is replaced at once
+//! ([`LogStore::replace_all`]: on the host, a new file renamed over the old
+//! one) and read back before the log is used. A log mixing the two formats,
+//! or a record of the previous format that fails the previous check, is
+//! refused. An anchored log is upgraded only once its peers took the
+//! upgraded records ([`HeadAnchor::restore_upgraded`]). Peer logs were never
+//! written in the previous format and are never upgraded.
+//!
 //! Opening the log ([`JournalLog::open`]) reads every record in order and
 //! refuses the whole log on a counter that is not the previous one plus 1
 //! (a gap, a repeat or a reorder), a bad tag, a tag chained to another
@@ -79,6 +93,15 @@ pub trait LogStore: Send {
     fn append(&mut self, counter: u64, record: &[u8]) -> Result<(), SealError>;
     /// Every record the store holds, in order, with its counter.
     fn read_all(&mut self) -> Result<Vec<(u64, Vec<u8>)>, SealError>;
+    /// Replaces every record the store holds with `records` (counters 1 on)
+    /// at once: `Ok` only once the new records are durable; on a failure the
+    /// store holds either the old records or the new ones, never a mix. What
+    /// a log written in the previous format is upgraded with. A store that
+    /// cannot do it refuses (the default).
+    fn replace_all(&mut self, records: &[(u64, Vec<u8>)]) -> Result<(), SealError> {
+        let _ = records;
+        Err(SealError::Journal("the log store cannot replace its records"))
+    }
 }
 
 #[derive(Default)]
@@ -158,6 +181,21 @@ impl LogStore for MemoryLogStore {
         }
         Ok(state.records.clone())
     }
+
+    fn replace_all(&mut self, records: &[(u64, Vec<u8>)]) -> Result<(), SealError> {
+        let mut state = self.lock();
+        if state.fail_appends {
+            return Err(SealError::Journal("the log store did not take the records"));
+        }
+        let numbered = records.iter().zip(1u64..).all(|((counter, record), expected)| {
+            *counter == expected && !record.is_empty() && record.len() <= MAX_RECORD_BYTES
+        });
+        if !numbered {
+            return Err(SealError::Journal("the log store refused the records"));
+        }
+        state.records = records.to_vec();
+        Ok(())
+    }
 }
 
 /// Keeps a log's head where its store's host cannot touch it (the other
@@ -170,6 +208,19 @@ pub trait HeadAnchor: Send {
     /// past them, in order, which the log appends to the store before it is
     /// used. An error leaves the log unopened (and it is tried again).
     fn restore(&mut self, master: &MasterKey, records: &[(u64, Vec<u8>)]) -> Result<Vec<(u64, Vec<u8>)>, SealError>;
+    /// [`HeadAnchor::restore`] of a log the store held in the previous
+    /// format (written before the log was anchored): `records` are those
+    /// records upgraded, not written to the store yet (it is upgraded only
+    /// once this is `Ok`). No peer may hold a copy of a log never anchored,
+    /// so the anchor may take them although no peer holds them, once it has
+    /// had every peer take them. By default the same as `restore`.
+    fn restore_upgraded(
+        &mut self,
+        master: &MasterKey,
+        records: &[(u64, Vec<u8>)],
+    ) -> Result<Vec<(u64, Vec<u8>)>, SealError> {
+        self.restore(master, records)
+    }
     /// Called after record `counter` is durable in `store`: `Ok` only once
     /// every peer holds it. `store` holds the earlier records a peer may
     /// lack.
@@ -248,11 +299,24 @@ impl LogKeys {
     }
 
     fn tag(&self, counter: u64, previous: &[u8; TAG_BYTES], iv_and_body: &[u8]) -> [u8; TAG_BYTES] {
-        let length = [self.origin.len() as u8];
-        hmac_sha3_256(
-            &self.mac[..],
-            &[HOST_JOURNAL_LABEL, &length, &self.origin, &counter.to_be_bytes(), previous, iv_and_body],
-        )
+        self.tag_as(Format::Current, counter, previous, iv_and_body)
+    }
+
+    /// The tag of a record in `format`: the current one binds the origin,
+    /// the previous one (before the log was anchored) has no origin field.
+    fn tag_as(&self, format: Format, counter: u64, previous: &[u8; TAG_BYTES], iv_and_body: &[u8]) -> [u8; TAG_BYTES] {
+        match format {
+            Format::Current => {
+                let length = [self.origin.len() as u8];
+                hmac_sha3_256(
+                    &self.mac[..],
+                    &[HOST_JOURNAL_LABEL, &length, &self.origin, &counter.to_be_bytes(), previous, iv_and_body],
+                )
+            }
+            Format::Previous => {
+                hmac_sha3_256(&self.mac[..], &[HOST_JOURNAL_LABEL, &counter.to_be_bytes(), previous, iv_and_body])
+            }
+        }
     }
 
     /// Record `counter`, chained to `previous`, holding `sealed` for card
@@ -291,6 +355,17 @@ impl LogKeys {
         previous: &[u8; TAG_BYTES],
         record: &[u8],
     ) -> Result<(CardUid, EntryKind, Vec<u8>), SealError> {
+        self.open_as(Format::Current, counter, previous, record)
+    }
+
+    /// [`LogKeys::open`] of a record written in `format`.
+    fn open_as(
+        &self,
+        format: Format,
+        counter: u64,
+        previous: &[u8; TAG_BYTES],
+        record: &[u8],
+    ) -> Result<(CardUid, EntryKind, Vec<u8>), SealError> {
         if record.len() < MIN_RECORD_BYTES
             || record.len() > MAX_RECORD_BYTES
             || (record.len() - IV_BYTES - TAG_BYTES) % 16 != 0
@@ -298,7 +373,7 @@ impl LogKeys {
             return Err(SealError::Journal("a log record has the wrong length"));
         }
         let (signed, stored) = record.split_at(record.len() - TAG_BYTES);
-        if !ct_eq(&self.tag(counter, previous, signed), stored) {
+        if !ct_eq(&self.tag_as(format, counter, previous, signed), stored) {
             return Err(SealError::Journal("a log record fails its check"));
         }
         let iv: [u8; IV_BYTES] = signed[..IV_BYTES].try_into().expect("16 bytes");
@@ -341,6 +416,59 @@ fn verify(keys: &LogKeys, records: &[(u64, Vec<u8>)]) -> Result<Verified, SealEr
         verified.tag = tag_of(record);
     }
     Ok(verified)
+}
+
+/// The two tag rules a record of the host's own log may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    /// The origin-bound tag (see the module notes).
+    Current,
+    /// The tag before the log was anchored: no origin length, no origin.
+    Previous,
+}
+
+/// A log the store holds in the previous format, rewritten in the current
+/// one: each record checked once with the previous rule, then the same
+/// counter, IV and ciphertext (so the same entry) under the current tag,
+/// chained to the rewritten record before it, as `keys`' origin's record.
+/// `Ok(None)`: the log's first record is not one of the previous format (an
+/// empty log is never upgraded). A log mixing the two formats, or a record
+/// that fails the previous check, is refused.
+fn upgrade(keys: &LogKeys, records: &[(u64, Vec<u8>)]) -> Result<Option<Vec<(u64, Vec<u8>)>>, SealError> {
+    let Some((first_counter, first)) = records.first() else { return Ok(None) };
+    if *first_counter != 1 || keys.open_as(Format::Previous, 1, &[0u8; TAG_BYTES], first).is_err() {
+        return Ok(None);
+    }
+    let mut previous = [0u8; TAG_BYTES];
+    let mut rewritten_previous = [0u8; TAG_BYTES];
+    let mut rewritten = Vec::with_capacity(records.len());
+    for (expected, (counter, record)) in (1u64..).zip(records) {
+        if *counter != expected {
+            return Err(SealError::Journal("the log has a gap, a repeat or a reorder"));
+        }
+        if keys.open_as(Format::Previous, *counter, &previous, record).is_err() {
+            return Err(if keys.open_as(Format::Current, *counter, &rewritten_previous, record).is_ok() {
+                SealError::Journal("the log mixes the previous record format with the current one")
+            } else {
+                SealError::Journal("a log record of the previous format fails its check")
+            });
+        }
+        let signed = &record[..record.len() - TAG_BYTES];
+        let tag = keys.tag(*counter, &rewritten_previous, signed);
+        rewritten.push((*counter, [signed, &tag[..]].concat()));
+        previous = tag_of(record);
+        rewritten_previous = tag;
+    }
+    Ok(Some(rewritten))
+}
+
+/// Whether `records` are a log of region `origin` written in the previous
+/// format under the keys of `master`, every record checked: a log not
+/// upgraded yet (it is when it is next opened). What the region answers its
+/// peers about its own log before it is open: a log never anchored, of
+/// which no peer can hold a copy.
+pub fn is_previous_format(master: &MasterKey, origin: &str, records: &[(u64, Vec<u8>)]) -> bool {
+    matches!(upgrade(&LogKeys::derive(master, origin), records), Ok(Some(_)))
 }
 
 /// An append not taken as written yet: either its answer never came (the
@@ -468,6 +596,13 @@ impl LogState {
 
 /// Reads and checks every record of `store` and, with an `anchor`, appends
 /// the records its peers hold past them; the whole log, checked again.
+///
+/// A store holding a log in the previous format (written before the log
+/// was anchored) is upgraded first ([`upgrade`]): with an anchor, once the
+/// anchor took the upgraded records ([`HeadAnchor::restore_upgraded`]), the
+/// store's records are replaced by them at once ([`LogStore::replace_all`])
+/// and read back, and only then is the log used. Until then the store keeps
+/// the previous format, so a failed try is tried again from the same log.
 fn settle_open(
     master: &MasterKey,
     keys: &LogKeys,
@@ -475,15 +610,29 @@ fn settle_open(
     anchor: Option<&mut (dyn HeadAnchor + '_)>,
 ) -> Result<Verified, SealError> {
     let mut records = store.read_all()?;
-    verify(keys, &records)?;
-    if let Some(anchor) = anchor {
-        let missing = anchor.restore(master, &records)?;
-        if !missing.is_empty() {
-            for (counter, record) in &missing {
-                store.append(*counter, record)?;
-            }
-            records = store.read_all()?;
+    let upgraded = match verify(keys, &records) {
+        Ok(_) => false,
+        Err(error) => {
+            records = upgrade(keys, &records)?.ok_or(error)?;
+            true
         }
+    };
+    let missing = match anchor {
+        Some(anchor) if upgraded => anchor.restore_upgraded(master, &records)?,
+        Some(anchor) => anchor.restore(master, &records)?,
+        None => Vec::new(),
+    };
+    if upgraded {
+        store.replace_all(&records)?;
+        if store.read_all()? != records {
+            return Err(SealError::Journal("the log store did not keep the upgraded log"));
+        }
+    }
+    for (counter, record) in &missing {
+        store.append(*counter, record)?;
+    }
+    if upgraded || !missing.is_empty() {
+        records = store.read_all()?;
     }
     verify(keys, &records)
 }
@@ -510,7 +659,7 @@ impl JournalLog {
         random: Box<dyn SealRandom + Send>,
     ) -> Result<JournalLog, SealError> {
         let keys = LogKeys::derive(master, "");
-        let verified = verify(&keys, &store.read_all()?)?;
+        let verified = settle_open(master, &keys, store.as_mut(), None)?;
         Ok(JournalLog::from_verified(store, keys, random, None, verified))
     }
 

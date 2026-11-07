@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod nodes;
+pub mod previous_log;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,11 +52,18 @@ pub fn array<const N: usize>(text: &str) -> [u8; N] {
 
 /// A test master key (a fixed pattern: test only).
 pub fn master() -> MasterKey {
+    let mut bytes = master_bytes();
+    MasterKey::take(&mut bytes)
+}
+
+/// The bytes of [`master`]: what the previous release's log writer
+/// (`previous_log`) derives its keys from.
+pub fn master_bytes() -> [u8; 32] {
     let mut bytes = [0u8; 32];
     for (i, b) in bytes.iter_mut().enumerate() {
         *b = 0x40 + i as u8;
     }
-    MasterKey::take(&mut bytes)
+    bytes
 }
 
 /// A deterministic random source: SHA3-256 of a label and a counter (test only).

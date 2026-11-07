@@ -553,10 +553,30 @@ the log's head is anchored in the other regions (`seal/src/journal_anchor.rs`):
   signature crate is needed.
 - Because a save reaches every peer and a start needs every peer, a start
   always meets the peers that hold the last acknowledged record.
+- **Upgrade.** The release before the anchor wrote its records with
+  `tag = HMAC-SHA3-256(ghost-seal/v1/host-journal || counter || previous
+  record's tag || IV || ciphertext)` (no origin length, no origin). A host's
+  own log that holds such records is upgraded when the enclave opens it:
+  every record is checked once with that rule, then rewritten with the same
+  counter, IV and ciphertext (the same entry) under the current tag, as this
+  region's record. A record that fails the previous check, or a log mixing
+  the two formats, is a refusal. The rewritten log is first taken by every
+  peer (each must answer with its copy restored, empty or holding part of
+  it, and is sent what it lacks; a peer head ahead is restored as at any
+  start), then the host replaces the whole file at once (written beside it,
+  flushed, renamed over it, the directory flushed) and the enclave reads it
+  back before any flow. Until then the file keeps the previous format, and
+  the region answers about it as about an empty store (no copy, reason 2),
+  so the peers' copies restore and the upgrade can begin. Peer logs are
+  always in the current format. A cut the host made before the upgrade (the
+  previous release's known limit) is not caught by it.
 
 What it does not catch: an attacker who can launch new EC2 instances in the
 AWS account itself (approved enclaves on two new instances, one per peer
-port, each with a PCR4 of its own); every region lost at once, or the hosts
+port, each with a PCR4 of its own, joined to M and seeded with an older copy
+of the log; binding the answering instances to the deployed stacks, by a
+membership list signed with the release key, is a later change); every
+region lost at once, or the hosts
 of every region cutting the log at once (no copy is left to restore from).
 The cost is availability: Fill and Open wait while a peer region is down,
 and a start waits for both peers. The log is not compacted; it survives the
