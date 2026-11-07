@@ -225,7 +225,7 @@ pub fn verify_with_root(check: &SealAttestationCheck, root_sha256: &[u8; 32]) ->
     }
     let layout = Layout::parse(&check.attestation)?;
 
-    let document = verify_document(layout.document, root_sha256, check.now)?;
+    let document = verify_document(layout.document, root_sha256, check.now).map_err(AttestationRefusal::from)?;
 
     let pcrs = &document.pcrs;
     if is_zero(&pcrs.pcr0) || is_zero(&pcrs.pcr1) || is_zero(&pcrs.pcr2) {
@@ -330,6 +330,9 @@ struct AttestedDocument {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Rejected {
     Malformed,
+    /// A part that is not CBOR, with the decoder's reason and where it
+    /// stopped. The app sees it as [`AttestationRefusal::Malformed`].
+    NotCbor(&'static str, cbor::CborError),
     WrongRoot,
     BadChain,
     BadSignature,
@@ -337,10 +340,34 @@ enum Rejected {
     NotYetValid,
 }
 
+impl fmt::Display for Rejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Rejected::Malformed => f.write_str("malformed attestation document"),
+            Rejected::NotCbor(part, error) => write!(f, "malformed attestation document: {part}: {error}"),
+            Rejected::WrongRoot => f.write_str("attestation document does not chain to the pinned root"),
+            Rejected::BadChain => f.write_str("attestation certificate chain is refused"),
+            Rejected::BadSignature => f.write_str("attestation document signature does not verify"),
+            Rejected::Expired => f.write_str("attestation document or certificate has expired"),
+            Rejected::NotYetValid => f.write_str("attestation document or certificate is not yet valid"),
+        }
+    }
+}
+
+/// Checks a Nitro attestation document alone, as [`verify_seal_attestation`]
+/// checks the one in a phone attestation: `Ok` when it verifies, else why,
+/// in words (for a document that is not CBOR, the decoder's reason and the
+/// byte it stopped at). For tests and diagnosis; the app goes through
+/// [`verify_seal_attestation`]. Not exported to the app.
+#[doc(hidden)]
+pub fn check_nitro_document(document: &[u8], root_sha256: &[u8; 32], now_unix: u64) -> Result<(), String> {
+    verify_document(document, root_sha256, now_unix).map(|_| ()).map_err(|why| why.to_string())
+}
+
 impl From<Rejected> for AttestationRefusal {
     fn from(rejected: Rejected) -> Self {
         match rejected {
-            Rejected::Malformed => AttestationRefusal::Malformed,
+            Rejected::Malformed | Rejected::NotCbor(..) => AttestationRefusal::Malformed,
             Rejected::WrongRoot | Rejected::BadChain => AttestationRefusal::BadChain,
             Rejected::BadSignature => AttestationRefusal::BadSignature,
             Rejected::Expired => AttestationRefusal::Expired,
@@ -353,7 +380,7 @@ fn certificate_fingerprint(der: &[u8]) -> [u8; 32] {
     Sha256::digest(der).into()
 }
 
-fn verify_document(document: &[u8], root_sha256: &[u8; 32], now_unix: u64) -> Result<AttestedDocument, AttestationRefusal> {
+fn verify_document(document: &[u8], root_sha256: &[u8; 32], now_unix: u64) -> Result<AttestedDocument, Rejected> {
     let cose = CoseSign1::parse(document)?;
     let payload = Payload::parse(&cose.payload)?;
     if cose.signature.len() != 96 {
@@ -438,7 +465,7 @@ impl CoseSign1 {
         if document.len() > MAX_DOCUMENT_BYTES {
             return Err(Rejected::Malformed);
         }
-        let value = cbor::decode(document).map_err(|_| Rejected::Malformed)?;
+        let value = cbor::decode(document).map_err(|e| Rejected::NotCbor("the document is not CBOR", e))?;
         let value = match value {
             cbor::Value::Tag(18, inner) => *inner,
             cbor::Value::Tag(..) => return Err(Rejected::Malformed),
@@ -452,7 +479,7 @@ impl CoseSign1 {
         let cbor::Value::Bytes(protected) = protected else {
             return Err(Rejected::Malformed);
         };
-        let header = cbor::decode(&protected).map_err(|_| Rejected::Malformed)?;
+        let header = cbor::decode(&protected).map_err(|e| Rejected::NotCbor("the protected header is not CBOR", e))?;
         // {1: -35}: alg ES384, and nothing else.
         if header != cbor::Value::Map(vec![(cbor::Value::Unsigned(1), cbor::Value::Negative(34))]) {
             return Err(Rejected::Malformed);
@@ -495,7 +522,7 @@ const PAYLOAD_FIELDS: [&str; 9] =
 impl Payload {
     fn parse(bytes: &[u8]) -> Result<Payload, Rejected> {
         let bad = Rejected::Malformed;
-        let value = cbor::decode(bytes).map_err(|_| bad)?;
+        let value = cbor::decode(bytes).map_err(|e| Rejected::NotCbor("the payload is not CBOR", e))?;
         let cbor::Value::Map(fields) = value else {
             return Err(bad);
         };
@@ -922,6 +949,8 @@ mod der {
 /// and null, nesting at most 16 deep, no duplicate map keys. The writer
 /// always uses the shortest heads.
 mod cbor {
+    use core::fmt;
+
     const MAX_DEPTH: usize = 16;
 
     /// A CBOR value.
@@ -940,9 +969,21 @@ mod cbor {
         Null,
     }
 
-    /// Bytes that are not CBOR this reader takes.
+    /// Bytes that are not CBOR this reader takes: which rule they break, and
+    /// where (the offset of the item that broke it, from the start of the
+    /// bytes decoded), as the seal-side reader says it.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(super) struct CborError;
+    pub(super) struct CborError {
+        pub(super) reason: &'static str,
+        pub(super) at: usize,
+        pub(super) length: usize,
+    }
+
+    impl fmt::Display for CborError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{} at byte {} of {}", self.reason, self.at, self.length)
+        }
+    }
 
     fn head(out: &mut Vec<u8>, major: u8, n: u64) {
         let m = major << 5;
@@ -1008,10 +1049,11 @@ mod cbor {
 
     /// Decodes exactly one value from all of `bytes`.
     pub(super) fn decode(bytes: &[u8]) -> Result<Value, CborError> {
-        let mut reader = Reader { bytes, at: 0 };
+        let mut reader = Reader { bytes, at: 0, item: 0 };
         let value = reader.value(0)?;
         if reader.at != bytes.len() {
-            return Err(CborError);
+            reader.item = reader.at;
+            return Err(reader.error("data after the value"));
         }
         Ok(value)
     }
@@ -1019,18 +1061,25 @@ mod cbor {
     struct Reader<'a> {
         bytes: &'a [u8],
         at: usize,
+        /// Where the item being read starts.
+        item: usize,
     }
 
     impl Reader<'_> {
+        fn error(&self, reason: &'static str) -> CborError {
+            CborError { reason, at: self.item, length: self.bytes.len() }
+        }
+
         fn take(&mut self, n: usize) -> Result<&[u8], CborError> {
-            let end = self.at.checked_add(n).ok_or(CborError)?;
-            let out = self.bytes.get(self.at..end).ok_or(CborError)?;
+            let end = self.at.checked_add(n).ok_or(self.error("too long"))?;
+            let out = self.bytes.get(self.at..end).ok_or(self.error("truncated"))?;
             self.at = end;
             Ok(out)
         }
 
         fn fixed<const N: usize>(&mut self) -> Result<[u8; N], CborError> {
-            self.take(N)?.try_into().map_err(|_| CborError)
+            let error = self.error("truncated");
+            self.take(N)?.try_into().map_err(|_| error)
         }
 
         fn argument(&mut self, info: u8) -> Result<u64, CborError> {
@@ -1040,7 +1089,7 @@ mod cbor {
                 25 => u64::from(u16::from_be_bytes(self.fixed()?)),
                 26 => u64::from(u32::from_be_bytes(self.fixed()?)),
                 27 => u64::from_be_bytes(self.fixed()?),
-                _ => return Err(CborError),
+                _ => return Err(self.error("indefinite or reserved length")),
             })
         }
 
@@ -1048,14 +1097,15 @@ mod cbor {
             let n = self.argument(info)?;
             // No item can be longer than what is left of the input.
             if n > (self.bytes.len() - self.at) as u64 {
-                return Err(CborError);
+                return Err(self.error("a length runs past the end"));
             }
             Ok(n as usize)
         }
 
         fn value(&mut self, depth: usize) -> Result<Value, CborError> {
+            self.item = self.at;
             if depth > MAX_DEPTH {
-                return Err(CborError);
+                return Err(self.error("nested too deep"));
             }
             let initial = self.fixed::<1>()?[0];
             let (major, info) = (initial >> 5, initial & 0x1f);
@@ -1068,7 +1118,8 @@ mod cbor {
                 }
                 3 => {
                     let n = self.length(info)?;
-                    let text = core::str::from_utf8(self.take(n)?).map_err(|_| CborError)?;
+                    let error = self.error("text is not UTF-8");
+                    let text = core::str::from_utf8(self.take(n)?).map_err(|_| error)?;
                     Value::Text(text.to_owned())
                 }
                 4 => {
@@ -1085,7 +1136,8 @@ mod cbor {
                     for _ in 0..n {
                         let key = self.value(depth + 1)?;
                         if fields.iter().any(|(k, _)| *k == key) {
-                            return Err(CborError);
+                            // At the second key: the item just read.
+                            return Err(self.error("a map key appears twice"));
                         }
                         let value = self.value(depth + 1)?;
                         fields.push((key, value));
@@ -1100,7 +1152,7 @@ mod cbor {
                     20 => Value::Bool(false),
                     21 => Value::Bool(true),
                     22 => Value::Null,
-                    _ => return Err(CborError),
+                    _ => return Err(self.error("a float or simple value")),
                 },
             })
         }

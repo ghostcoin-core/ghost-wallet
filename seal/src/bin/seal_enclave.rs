@@ -100,6 +100,14 @@
 //! It never writes M anywhere, and no frame it sends carries M except a
 //! key-share package, encrypted to the receiving enclave.
 //!
+//! Each side of a key share logs one fixed-format line per request and per
+//! package (`ghost_seal::key_share::request_log_line`, `package_log_line`):
+//! `key share: receiver sends request N bytes, sha256 H; attestation
+//! document M bytes, sha256 D` when it joins, `giver received ...` on the
+//! giving side, and the same for the package back. Lengths and hashes only,
+//! never a document, a key or M; the two sides' lines are equal when the
+//! bytes arrived unchanged.
+//!
 //! Frames are a 4-byte big-endian length and the bytes. Control frames (at
 //! most 8 MiB): 1 (genesis) [|| signed list JSON], 2 (join; anything after
 //! is ignored), 3 (a signed list JSON, before or after the start), 4 (the
@@ -130,7 +138,10 @@ use ghost_seal::flows::ANSWER_LIFETIME_SECS;
 use ghost_seal::host_journal::HostJournal;
 use ghost_seal::journal_anchor::{Anchor, PEER_PORTS, Peer, PeerLink, PeerLogs, Peers, Regions};
 use ghost_seal::journal_log::{LogStore, SharedLog};
-use ghost_seal::key_share::{ControlFrame, Receiver, read_control_frame, read_frame, write_frame};
+use ghost_seal::key_share::{
+    ControlFrame, LogSide, Receiver, log_lines_to, package_log_line, read_control_frame, read_frame, request_log_line,
+    write_frame,
+};
 use ghost_seal::measurements::{ReleaseKey, TrustedList};
 use ghost_seal::node_list::NodeList;
 use ghost_seal::node_rpc::{NodeAddress, RpcNode, VsockTransport};
@@ -244,6 +255,10 @@ fn status(text: &str) {
 }
 
 fn main() {
+    // As a giver, the key share logs the length and SHA-256 of each request
+    // it gets and each package it sends (and of the document in it).
+    log_lines_to(status);
+
     // The enclave's own ML-KEM-768 key, for phones, fresh on every start.
     let mut seed = [0u8; 64];
     if SystemRandom.fill(&mut seed).is_err() {
@@ -534,13 +549,18 @@ fn join(trusted: &TrustedList) -> Result<MasterKey, String> {
     let receiver = Receiver::start(&mut source, &mut SystemRandom).map_err(|e| e.to_string())?;
     let peer = VsockStream::connect_with_cid_port(PARENT_CID, PEER_PORT).map_err(|e| e.to_string())?;
     let mut peer = DeadlineStream::new(peer, Instant::now() + JOIN_TIMEOUT);
+    let body = receiver.request();
+    // The giver logs the same line for what it got: one comparison shows
+    // whether the bytes changed on the way.
+    status(&request_log_line(LogSide::ReceiverSends, &body));
     let mut request = vec![KIND_KEY_SHARE];
-    request.extend_from_slice(&receiver.request());
+    request.extend_from_slice(&body);
     write_frame(&mut peer, &request).map_err(|e| e.to_string())?;
     let answer = read_frame(&mut peer).map_err(|e| e.to_string())?;
     peer.close();
     match answer.split_first() {
         Some((&ANSWER_OK, package)) => {
+            status(&package_log_line(LogSide::ReceiverReceived, package));
             let (received, giver) = receiver
                 .accept(package, &NitroVerifier::aws(), trusted, SystemClock.now_unix())
                 .map_err(|e| e.to_string())?;

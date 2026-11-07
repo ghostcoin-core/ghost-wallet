@@ -168,11 +168,41 @@ signature; the payload's fields, sizes, digest `SHA384` and 48-byte PCRs 0, 1
 and 2; and that the document is at most 300 seconds old. An unknown critical
 X.509 extension or an unknown payload field refuses the document. This is
 verify-only use of `p384`; nothing outside the tests signs. Tests inject their
-own root and never use the AWS one.
+own root to accept documents they sign; the AWS root accepts only real
+documents made by Nitro hardware (below).
+
+Bytes that are not CBOR are refused with the decoder's reason and the byte it
+stopped at, counted from the start of the part that did not decode: for
+example `malformed attestation document: the payload is not CBOR: truncated at
+byte 4385 of 4385`, or `... a map key appears twice at byte 3990 of 4385`. The
+text has a rule and a position only, never the document's bytes. The phone's
+copy of the check (`core/src/seal_attestation.rs`) keeps the same reason; the
+app still sees only the code `malformed`.
 
 The enclave asks the Nitro Secure Module for its own documents through
 `/dev/nsm` (`NsmSource`), with the request
-`{"Attestation": {"user_data": ..., "nonce": ..., "public_key": null}}`.
+`{"Attestation": {"user_data": ..., "nonce": ..., "public_key": null}}`. The
+answer is `{"Attestation": {"document": bytes}}`; a document written as an
+array of unsigned integers below 256 is taken as the same bytes, and an
+answer that is not CBOR says why and where, as above.
+
+### Real documents in the tests
+
+`seal/tests/real_nitro_documents.rs` runs three public, hardware-made
+documents (from MystenLabs/sui, base/base and MystenLabs/nautilus, each noted
+with its source; saved under `seal/tests/fixtures/nitro_document_*.hex`)
+through `NitroVerifier::aws()` at a moment inside each one's certificate
+validity. Each must verify fully, signature and chain included. Real
+documents are about 4.5 KB, untagged, with 16 PCRs of 48 bytes, four
+certificates in the bundle and some null fields; the tests' own authority
+writes about 1 KB, tagged, with five PCRs. The same file carries a
+document of that shape and size (from a test chain shaped like AWS's) end
+to end: `Receiver::request`, the joining parent's outbound proxy, TCP, the
+giving parent's inbound proxy, the giving enclave's service (its framed
+request parse and `package_for`) and back. Both directions must arrive byte
+for byte, whole or written a few bytes at a time. The wallet core's
+`core/tests/real_nitro_documents.rs` checks the phone's copy on the same
+three documents.
 
 ## The master secret M
 
@@ -220,6 +250,26 @@ The enclave asks the Nitro Secure Module for its own documents through
 A document hash is SHA3-256(`ghost-seal/v1/attestation-document` ||
 document). A package opens only for the one receiver and nonce it was made
 for; a receiver takes one package and is used up.
+
+Both enclaves log one fixed-format line per request and per package, on
+standard error (`key_share::request_log_line`, `package_log_line`):
+
+```text
+seal_enclave: key share: receiver sends request 5705 bytes, sha256 <64 hex>; attestation document 4513 bytes, sha256 <64 hex>
+seal_enclave: key share: giver received request 5705 bytes, sha256 <64 hex>; attestation document 4513 bytes, sha256 <64 hex>
+seal_enclave: key share: giver sends package 5713 bytes, sha256 <64 hex>; attestation document 4521 bytes, sha256 <64 hex>
+seal_enclave: key share: receiver received package 5713 bytes, sha256 <64 hex>; attestation document 4521 bytes, sha256 <64 hex>
+```
+
+The receiver logs the first line when it sends and the last when a package
+comes back. The giver logs the second for every request it gets, before it
+checks anything, and the third when it hands a package out (its own
+document's). Apart from the side, a line is the same at both
+ends exactly when the bytes arrived unchanged. If they differ, the bytes
+changed between the two enclaves (`seal_proxy outbound 5002`, TCP, `seal_proxy
+inbound`). `no readable attestation document` in place of the document part
+means the request or package did not have its layout, for example because it
+was cut. Lengths and SHA-256 hashes only: never a document, a key or M.
 
 ### Upgrades
 

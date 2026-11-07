@@ -35,11 +35,21 @@
 //!
 //! A package opens only for the one receiver whose document and nonce it
 //! was made for, and a receiver takes one package and is used up.
+//!
+//! Both sides log one fixed-format line per request and per package
+//! ([`request_log_line`], [`package_log_line`]): its length and SHA-256, and
+//! the length and SHA-256 of the attestation document in it. The receiver
+//! logs the request it sends and the package it gets; the giver (through
+//! [`log_lines_to`]) the request it got and the package it sends. Comparing
+//! the two sides' lines shows whether the bytes changed on the way. The
+//! lines hold lengths and hashes only: never a document, a key or M.
 
 use core::fmt;
 use std::io::{Read, Write};
+use std::sync::OnceLock;
 
 use ml_kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey, KeyExport, MlKem768, TryKeyInit};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::attestation::{AttestationError, AttestationRejected, AttestationSource, AttestationVerifier, AttestedDocument};
@@ -191,6 +201,72 @@ impl<'a> Package<'a> {
     }
 }
 
+/// Which side logs a line, and whether it sends or got the bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogSide {
+    /// The receiver, about the request it sends.
+    ReceiverSends,
+    /// The giver, about the request it got.
+    GiverReceived,
+    /// The giver, about the package it sends.
+    GiverSends,
+    /// The receiver, about the package it got.
+    ReceiverReceived,
+}
+
+impl LogSide {
+    fn words(self) -> &'static str {
+        match self {
+            LogSide::ReceiverSends => "receiver sends",
+            LogSide::GiverReceived => "giver received",
+            LogSide::GiverSends => "giver sends",
+            LogSide::ReceiverReceived => "receiver received",
+        }
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn log_line(side: LogSide, what: &str, bytes: &[u8], document: Option<&[u8]>) -> String {
+    let document = match document {
+        Some(document) => format!("attestation document {} bytes, sha256 {}", document.len(), sha256_hex(document)),
+        None => "no readable attestation document".to_owned(),
+    };
+    format!("key share: {} {what} {} bytes, sha256 {}; {document}", side.words(), bytes.len(), sha256_hex(bytes))
+}
+
+/// The line logged about one request (as [`Receiver::request`] makes it,
+/// without the service's kind byte): `key share: <side> request N bytes,
+/// sha256 H; attestation document M bytes, sha256 D`. Lengths and hashes
+/// only.
+pub fn request_log_line(side: LogSide, request: &[u8]) -> String {
+    log_line(side, "request", request, Request::parse(request).ok().map(|r| r.document))
+}
+
+/// The line logged about one package, as [`request_log_line`] for a
+/// request.
+pub fn package_log_line(side: LogSide, package: &[u8]) -> String {
+    log_line(side, "package", package, Package::parse(package).ok().map(|p| p.document))
+}
+
+static LOG_SINK: OnceLock<fn(&str)> = OnceLock::new();
+
+/// Sends the giver's lines ([`request_log_line`] for each request
+/// [`package_for`] gets, [`package_log_line`] for each package it makes) to
+/// `sink`; the enclave program sends them to its standard error. Set once
+/// for the process: `false` if a sink was already set (and is kept).
+pub fn log_lines_to(sink: fn(&str)) -> bool {
+    LOG_SINK.set(sink).is_ok()
+}
+
+fn log(line: impl FnOnce() -> String) {
+    if let Some(sink) = LOG_SINK.get() {
+        sink(&line());
+    }
+}
+
 /// What a giving enclave needs besides M.
 pub struct GiverContext<'a> {
     /// Checks the receiver's document (the AWS chain in an enclave).
@@ -217,6 +293,7 @@ pub struct GivenPackage {
 /// The giving side: answers one `request` with a package of M for that
 /// receiver only, or refuses. M itself is never returned.
 pub fn package_for(master: &MasterKey, request: &[u8], context: GiverContext<'_>) -> Result<GivenPackage, ShareRefused> {
+    log(|| request_log_line(LogSide::GiverReceived, request));
     let request = Request::parse(request)?;
     let receiver = context.verifier.verify(request.document, context.now_unix).map_err(ShareRefused::ReceiverDocument)?;
     let build = context.list.check(&receiver.pcrs).map_err(ShareRefused::ReceiverNotAllowed)?.clone();
@@ -252,6 +329,7 @@ pub fn package_for(master: &MasterKey, request: &[u8], context: GiverContext<'_>
     package.extend_from_slice(&body);
     let tag = package_tag(&mac, &receiver.hash, &giver.hash, &nonce, &package);
     package.extend_from_slice(&tag);
+    log(|| package_log_line(LogSide::GiverSends, &package));
     Ok(GivenPackage { package, receiver: build })
 }
 
