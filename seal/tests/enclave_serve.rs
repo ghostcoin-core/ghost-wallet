@@ -13,7 +13,14 @@
 //! over TLS ended in the enclave, a Fill answered `unavailable` without a
 //! key maker and served with the enclave's own (`CoreKeyMakerSource`), its
 //! key the wallet core's, found by the core's lookup, and in no answer or
-//! log line.
+//! log line. With the region list installed: a card is served by its home
+//! region only; another region refuses its Check, Fill, Fill confirmation
+//! and Open `wrong-region`, naming the home, with no change to either
+//! region's log, the card or the service log (an Open begun at home
+//! included), over TLS too; and the journal anchored in peer enclaves over
+//! the service port (kind 3): every record reaches both peers' host stores,
+//! ciphertext only, a replaced host restores from them, and with no peer
+//! answering every flow is 503 with a fixed event.
 
 #[path = "fixtures/nitro_authority.rs"]
 mod authority;
@@ -31,9 +38,14 @@ use std::time::Duration;
 use authority::{Authority, AuthoritySource, NOW, allowed_new, allowed_old, revoked, unlisted};
 use ghost_seal::attestation::AttestationRejected;
 use ghost_seal::enclave_serve::{
-    ChainStatus, DurableJournal, EnclaveService, KIND_KEY_SHARE, KIND_PHONE_ATTESTATION, MemoryServiceLog,
-    NodeChainStatus, ServiceDeps, ServiceEvent,
+    ChainStatus, DurableJournal, EnclaveService, KIND_JOURNAL_HEAD, KIND_KEY_SHARE, KIND_PHONE_ATTESTATION,
+    MemoryServiceLog, NodeChainStatus, PINNED_PATHS, ServiceDeps, ServiceEvent, ServicePeer,
 };
+use ghost_seal::journal_anchor::{
+    Anchor, PEER_PORTS, Peer, PeerLink, PeerLogs, RELEASE_REGIONS, Regions, WRONG_REGION_MESSAGE, home_region,
+};
+use ghost_seal::journal_log::LogStore;
+use ghost_seal::proxy::TcpConnector;
 use ghost_seal::journal_log::{JournalLog, MemoryLogStore, SharedLog};
 use ghost_seal::{EntryKind, Journal};
 use ghost_seal::key_share::Receiver;
@@ -53,8 +65,10 @@ const WRONG_PIN: &str = "246801";
 /// A card the registry does not hold.
 const STRANGER: CardUid = CardUid([0x04, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
 
+/// One request as the service answers it over TLS: the home region's check,
+/// then the routes (with no region list installed, the routes alone).
 fn post(service: &EnclaveService, path: &str, body: &Value) -> (u16, Value) {
-    let reply = service.routes().answer("POST", path, body.to_string().as_bytes());
+    let reply = service.answer("POST", path, body.to_string().as_bytes());
     (reply.status, serde_json::from_str(&reply.body).expect("JSON"))
 }
 
@@ -766,6 +780,271 @@ fn with_the_core_key_maker_installed_a_fill_over_tls_is_served_and_its_key_is_in
             assert!(!support::contains(text, form), "the key leaked into {}", String::from_utf8_lossy(text));
         }
     }
+}
+
+/// The home region of the tests' card ([`UID`]), as
+/// `tests/vectors/home-region.json` has it.
+const HOME: &str = "eu-central-1";
+/// A region that is not its home.
+const AWAY: &str = "us-east-1";
+/// A card whose home is [`AWAY`] (from the same vectors).
+const AWAY_CARD: CardUid = CardUid([0x04, 0x10, 0x22, 0x33, 0x44, 0x55, 0x66]);
+
+/// A service of region `own` whose journal is the sealed log over `store`,
+/// with the fakes for the rest, holding M.
+fn region_service(own: &str, store: &MemoryLogStore) -> (EnclaveService, enclave::Fakes, Arc<MemoryServiceLog>) {
+    let journal = SharedLog::new(Box::new(store.clone()));
+    let (mut deps, fakes) = enclave::deps_with_journal(Arc::new(journal) as Arc<dyn DurableJournal>);
+    deps.regions = Some(Regions::release(own).unwrap());
+    let log = Arc::new(MemoryServiceLog::default());
+    let service = enclave::service(deps, allowed_old(), log.clone());
+    service.install_master(support::master());
+    assert!(service.serves_flows());
+    (service, fakes, log)
+}
+
+fn assert_wrong_region(answer: &(u16, Value), home: &str) {
+    assert_eq!(answer.0, 422, "{}", answer.1);
+    assert_eq!(
+        answer.1,
+        json!({
+            "status": "error",
+            "error": "refused",
+            "reason": "wrong-region",
+            "homeRegion": home,
+            "message": WRONG_REGION_MESSAGE,
+        })
+    );
+}
+
+/// Begins an Open of `card` on `service` and cuts it off at the first card
+/// command after it was journaled in `store`.
+fn begin_open_cut_off(service: &EnclaveService, store: &MemoryLogStore, card: &mut SimCard, open: &Value) {
+    let mut step = 0;
+    loop {
+        card.drop_from(step, support::DropStyle::AfterCard);
+        let ended = carry_or_drop(service, card, post(service, "/v1/open/start", open));
+        card.reconnect();
+        assert!(ended.is_none() || ended.as_ref().is_some_and(|a| a.0 != 200), "step {step}: cut off");
+        if reread(store).load(&UID, EntryKind::Open).is_some() {
+            return;
+        }
+        step += 1;
+        assert!(step < 64, "the Open was never journaled");
+    }
+}
+
+#[test]
+fn an_open_begun_at_home_is_refused_wrong_region_elsewhere_touching_nothing_and_finished_at_home() {
+    assert_eq!(home_region(&RELEASE_REGIONS, &UID), Some(HOME));
+    assert_eq!(home_region(&RELEASE_REGIONS, &AWAY_CARD), Some(AWAY));
+    let (home_store, away_store) = (MemoryLogStore::new(), MemoryLogStore::new());
+    let (home, home_fakes, _) = region_service(HOME, &home_store);
+    let (away, away_fakes, away_log) = region_service(AWAY, &away_store);
+    let key = answer_key(&support::master());
+
+    // Filled, sealed, and an Open begun at home.
+    let mut card = SimCard::set_up(UID);
+    let commit_data = fill_and_seal(&home, &home_fakes, &mut card, &mut Vec::new());
+    let phone = support::phone(0x71);
+    let open = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x72; 32]), "phoneKey": to_hex(&phone.public_key()) });
+    begin_open_cut_off(&home, &home_store, &mut card, &open);
+
+    // The phone tries the other region: its Open, and a Check, a Fill and a
+    // Fill confirmation of the same card, are refused, naming the home.
+    let home_records = home_store.records();
+    let (file, keys, transcript) = (card.file.clone(), card.keys, card.transcript.len());
+    let events = away_log.0.lock().unwrap().clone();
+    assert_wrong_region(&post(&away, "/v1/open/start", &open), HOME);
+    let pinned: Vec<(&str, Value)> =
+        flow_requests(&UID).into_iter().filter(|(path, _)| PINNED_PATHS.contains(path)).collect();
+    assert_eq!(pinned.len(), 4, "Check, Fill, Fill confirmation and Open");
+    for (path, body) in &pinned {
+        let answer = post(&away, path, body);
+        assert_wrong_region(&answer, HOME);
+        assert!(!support::contains(answer.1.to_string().as_bytes(), PIN.as_bytes()));
+    }
+    // Nothing changed: neither region's log, nor the card, nor the other
+    // region's service log; no key was made and no card command sent.
+    assert!(away_store.records().is_empty(), "the other region's log is untouched");
+    assert_eq!(home_store.records(), home_records, "the home region's log is untouched");
+    assert_eq!((card.file.clone(), card.keys, card.transcript.len()), (file, keys, transcript), "the card is untouched");
+    assert_eq!(*away_log.0.lock().unwrap(), events, "no log line");
+    assert!(away_fakes.maker.made.lock().unwrap().is_empty());
+    assert!(away_fakes.journal.sealed_entries().is_empty());
+
+    // The home region finishes the Open with the key of the Fill.
+    let done = carry(&home, &mut card, post(&home, "/v1/open/start", &open), &mut Vec::new());
+    let body = verified(&key, &done.1, [0x72; 32], &UID);
+    assert_eq!(body.state, CardState::Opened);
+    let release = from_hex(done.1["release"].as_str().unwrap()).unwrap();
+    assert_eq!(phone.open(&release, &UID, 1).unwrap().expose_secret(), &home_fakes.maker.key_for(&commit_data)[..]);
+    // And the other region, asked again, still refuses and still holds
+    // nothing; it would certify nothing about the card.
+    let check = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x73; 32]) });
+    assert_wrong_region(&post(&away, "/v1/check/start", &check), HOME);
+    assert!(away_store.records().is_empty());
+
+    // The rule is the same the other way round: a card homed in us-east-1
+    // is refused by eu-central-1 and served (here: not registered) by its
+    // home.
+    let other = json!({ "uid": uid_hex(&AWAY_CARD), "challenge": to_hex(&[0x74; 32]) });
+    assert_wrong_region(&post(&home, "/v1/check/start", &other), AWAY);
+    let served = post(&away, "/v1/check/start", &other);
+    assert_eq!((served.0, served.1["reason"].as_str()), (422, Some("not-a-ghost-card")));
+    // A malformed start is the routes' to refuse, as before.
+    let malformed = post(&away, "/v1/check/start", &json!({ "uid": "04", "challenge": to_hex(&[1; 32]) }));
+    assert_eq!(malformed.0, 400, "{}", malformed.1);
+}
+
+#[test]
+fn over_tls_a_card_of_another_region_is_refused_before_the_relay_routes() {
+    let (mut deps, fakes) = enclave::deps(true, true, true);
+    deps.regions = Some(Regions::release(AWAY).unwrap());
+    let (service, addr, log) = served(deps);
+    let mut tls = tls_client::connect(addr, service.certificate_hash());
+    for (path, body) in flow_requests(&UID).into_iter().filter(|(path, _)| PINNED_PATHS.contains(path)) {
+        assert_wrong_region(&tls_client::post(&mut tls, path, &body), HOME);
+    }
+    // Every other request on the same connection is the routes'.
+    let malformed = tls_client::post(&mut tls, "/v1/check/start", &json!({ "uid": "zz" }));
+    assert_eq!(malformed.0, 400, "{}", malformed.1);
+    assert_eq!(tls_client::post(&mut tls, "/v1/nowhere", &json!({})).0, 404);
+    let step = tls_client::post(&mut tls, "/v1/relay/step", &json!({ "session": "00".repeat(16), "answer": "9100" }));
+    assert_eq!((step.0, step.1["error"].as_str()), (404, Some("unknown-session")));
+    let attested = tls_client::post(&mut tls, "/v1/attestation", &json!({ "challenge": to_hex(&[0x75; 32]) }));
+    assert_eq!(attested.0, 200, "{}", attested.1);
+    // Its own card over TLS starts a Check at once.
+    let own = json!({ "uid": uid_hex(&AWAY_CARD), "challenge": to_hex(&[0x76; 32]) });
+    let refused = tls_client::post(&mut tls, "/v1/check/start", &own);
+    assert_eq!(refused.1["reason"].as_str(), Some("not-a-ghost-card"), "the routes answered it: {}", refused.1);
+    assert!(fakes.journal.sealed_entries().is_empty());
+    assert_eq!(*log.0.lock().unwrap(), vec![ServiceEvent::MasterInstalled { serves_flows: true }]);
+
+    // The card's home region over TLS starts its Check.
+    let (mut deps, _) = enclave::deps(true, true, true);
+    deps.regions = Some(Regions::release(HOME).unwrap());
+    let (service, addr, _) = served(deps);
+    let mut tls = tls_client::connect(addr, service.certificate_hash());
+    let check = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x77; 32]) });
+    let started = tls_client::post(&mut tls, "/v1/check/start", &check);
+    assert_eq!((started.0, started.1["status"].as_str()), (200, Some("apdu")), "{}", started.1);
+    tls_client::post(&mut tls, "/v1/relay/abort", &json!({ "session": started.1["session"].clone() }));
+}
+
+/// A peer region's enclave: it holds M, keeps the logs of the other regions
+/// in `stores` and serves its service port on a local socket.
+fn peer_enclave(own: &str, stores: &[(&str, &MemoryLogStore)]) -> (Arc<EnclaveService>, std::net::SocketAddr) {
+    let (mut deps, _) = enclave::deps(true, true, true);
+    deps.regions = Some(Regions::release(own).unwrap());
+    let stores = stores.iter().map(|(region, store)| (region.to_string(), Box::new((*store).clone()) as Box<dyn LogStore>));
+    deps.peer_logs = Some(Arc::new(PeerLogs::new(own, stores.collect())));
+    let (service, addr, _) = served(deps);
+    (service, addr)
+}
+
+/// The home region's service, its journal the sealed log over `store`
+/// anchored in the enclaves at `peers` over their service ports.
+fn anchored_service(
+    store: &MemoryLogStore,
+    peers: &[(&str, std::net::SocketAddr)],
+) -> (EnclaveService, enclave::Fakes, Arc<MemoryServiceLog>) {
+    let peers = peers
+        .iter()
+        .map(|(region, addr)| Peer {
+            region: region.to_string(),
+            link: Arc::new(ServicePeer::new(TcpConnector(addr.to_string()), Duration::from_secs(5))) as Arc<dyn PeerLink>,
+        })
+        .collect();
+    let journal = SharedLog::anchored(Box::new(store.clone()), Box::new(Anchor::new(HOME, peers)));
+    let (mut deps, fakes) = enclave::deps_with_journal(Arc::new(journal) as Arc<dyn DurableJournal>);
+    deps.regions = Some(Regions::release(HOME).unwrap());
+    let log = Arc::new(MemoryServiceLog::default());
+    let service = enclave::service(deps, allowed_old(), log.clone());
+    service.install_master(support::master());
+    (service, fakes, log)
+}
+
+#[test]
+fn the_journal_is_anchored_in_the_peer_enclaves_over_the_service_port() {
+    assert_eq!((PEER_PORTS, KIND_JOURNAL_HEAD), ([5006, 5007], 3));
+    // us-east-1 and ap-southeast-1 keep eu-central-1's log, each on its host.
+    let (us_copy, ap_copy) = (MemoryLogStore::new(), MemoryLogStore::new());
+    let (_us, us_addr) = peer_enclave("us-east-1", &[(HOME, &us_copy), ("ap-southeast-1", &MemoryLogStore::new())]);
+    let (_ap, ap_addr) = peer_enclave("ap-southeast-1", &[("us-east-1", &MemoryLogStore::new()), (HOME, &ap_copy)]);
+    let peers = [("us-east-1", us_addr), ("ap-southeast-1", ap_addr)];
+
+    // The home region fills and seals the card and begins an Open; every
+    // record reached both peers before its save was taken.
+    let store = MemoryLogStore::new();
+    let mut card = SimCard::set_up(UID);
+    let phone = support::phone(0x78);
+    let open = json!({ "uid": uid_hex(&UID), "challenge": to_hex(&[0x79; 32]), "phoneKey": to_hex(&phone.public_key()) });
+    let (commit_data, first_fakes) = {
+        let (service, fakes, log) = anchored_service(&store, &peers);
+        assert!(service.serves_flows());
+        assert_eq!(*log.0.lock().unwrap(), vec![ServiceEvent::MasterInstalled { serves_flows: true }]);
+        let commit_data = fill_and_seal(&service, &fakes, &mut card, &mut Vec::new());
+        begin_open_cut_off(&service, &store, &mut card, &open);
+        (commit_data, fakes)
+        // The host instance is lost here, with its store.
+    };
+    assert!(!store.records().is_empty());
+    assert_eq!(us_copy.records(), store.records());
+    assert_eq!(ap_copy.records(), store.records());
+    // The peers' hosts hold ciphertext only.
+    for copy in [&us_copy, &ap_copy] {
+        let bytes = copy.bytes();
+        assert!(!support::contains(&bytes, &UID.0), "a UID on a peer's host");
+        assert!(!support::contains(&bytes, &commit_data[..32]), "commit data on a peer's host");
+    }
+
+    // A replaced host: its store is empty. The enclave restores the whole
+    // log from its peers before it serves, and finishes the Open it never
+    // saw with the key of the Fill.
+    let replaced = MemoryLogStore::new();
+    let (service, _, log) = anchored_service(&replaced, &peers);
+    assert!(service.serves_flows());
+    assert_eq!(*log.0.lock().unwrap(), vec![ServiceEvent::MasterInstalled { serves_flows: true }]);
+    assert_eq!(replaced.records(), store.records(), "restored, ciphertext as it was");
+    let done = carry(&service, &mut card, post(&service, "/v1/open/start", &open), &mut Vec::new());
+    let body = verified(&answer_key(&support::master()), &done.1, [0x79; 32], &UID);
+    assert_eq!(body.state, CardState::Opened);
+    let release = from_hex(done.1["release"].as_str().unwrap()).unwrap();
+    assert_eq!(phone.open(&release, &UID, 1).unwrap().expose_secret(), &first_fakes.maker.key_for(&commit_data)[..]);
+    assert_eq!(us_copy.records(), replaced.records(), "the new host's records reached the peers too");
+    assert_eq!(ap_copy.records(), replaced.records());
+
+    // A tail the host cut while the enclave was stopped, with no peer
+    // reachable: every flow 503, a fixed event, nothing appended.
+    let gone = |region| (region, std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap());
+    let cut = MemoryLogStore::new();
+    cut.set_records(store.records()[..1].to_vec());
+    let (service, fakes, log) = anchored_service(&cut, &[gone("us-east-1"), gone("ap-southeast-1")]);
+    assert!(!service.serves_flows());
+    assert_eq!(
+        *log.0.lock().unwrap(),
+        vec![ServiceEvent::JournalUnanchored, ServiceEvent::MasterInstalled { serves_flows: false }]
+    );
+    for (path, body) in flow_requests(&UID) {
+        assert_unavailable(&post(&service, path, &body));
+    }
+    assert_eq!(cut.records(), store.records()[..1].to_vec());
+    assert!(fakes.maker.made.lock().unwrap().is_empty());
+    // The same cut with the peers reachable is restored and served.
+    let (service, _, _) = anchored_service(&cut, &peers);
+    assert!(service.serves_flows());
+    assert_eq!(cut.records(), us_copy.records());
+
+    // A kind 3 request to an enclave that keeps no peer logs, or holds no
+    // M yet, is refused.
+    let bare = enclave::service(ServiceDeps::none(), allowed_old(), Arc::new(MemoryServiceLog::default()));
+    bare.install_master(support::master());
+    assert!(bare.answer_frame(&[KIND_JOURNAL_HEAD, 2, 0]).unwrap_err().contains("no peer logs"));
+    let (mut deps, _) = enclave::deps(true, true, true);
+    deps.peer_logs = Some(Arc::new(PeerLogs::new("us-east-1", Vec::new())));
+    let early = enclave::service(deps, allowed_old(), Arc::new(MemoryServiceLog::default()));
+    assert!(early.answer_frame(&[KIND_JOURNAL_HEAD, 2, 0]).unwrap_err().contains("no M"));
 }
 
 /// A deterministic random source (test only).

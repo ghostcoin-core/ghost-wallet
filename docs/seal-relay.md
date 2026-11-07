@@ -230,6 +230,16 @@ can say what the card is without reading `message`:
 | `pin-locked` | no PIN tries left | Locked |
 | `wrong-state` | the card is not in a state for this flow | asks to try again |
 | `fill-pending` | a Fill with another amount or PIN waits for its payment | asks to try again |
+| `wrong-region` | the card's home is another region, named in `homeRegion` | sends the card to its home region |
+
+`wrong-region` answers a Check, Fill, Fill confirmation or Open start of a
+card whose home region (`docs/sealed-card.md`, "Home region") is not this
+Seal's. It comes before any session, with no card command, and the Seal
+writes nothing for it to its journal or its log:
+
+```json
+{ "status": "error", "error": "refused", "reason": "wrong-region", "homeRegion": "eu-central-1", "message": "This card is served by its home region" }
+```
 
 A refusal without a `reason` is shown as Not a Ghost card. The PIN is sent
 only in the start request, over HTTPS, and never comes back in any answer or
@@ -273,7 +283,15 @@ It is for development and the speed test only, **never for real money**:
   refused; every session shares it, so a Fill or an Open cut off before a
   restart is finished after one on the same file. A Sealed card whose Fill
   entry is not in that file (sealed by another Seal) is refused rather than
-  answered unchecked. It answers an Empty card. Check only over HTTP.
+  answered unchecked. It answers an Empty card. Check only over HTTP;
+- as one region of several, given `--region ID`, `--regions A,B,C` (the
+  ordered region list), `--peer-listen ADDR:PORT` (its own peer port,
+  loopback only, plain TCP) and one `--peer REGION=ADDR:PORT` for each other
+  region (their peer ports): it refuses a card whose home is another region
+  `wrong-region` before any card command, and anchors its journal in its
+  peers as the enclaves do, keeping theirs in `peer-<region>.log` beside its
+  journal file (give each server a directory of its own). Without the four
+  it runs as the one region it always was.
 
 ```sh
 cargo build --manifest-path seal/Cargo.toml --release --features test-server --bin test_seal_server

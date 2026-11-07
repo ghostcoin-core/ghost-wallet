@@ -15,15 +15,25 @@ networking), plus `enclave/` (image, scripts, deploy files) and
   It has no disk, no network and no console; it talks only over vsock.
 - **The host** (the enclave's parent EC2 instance) runs `seal_proxy`, which
   relays bytes between TCP and vsock and never reads them.
-- **Regions**: one host and one enclave per region, in 2 to 3 regions
-  (`enclave/deploy/regions.json`). Every enclave holds the same M.
+- **Regions**: one host and one enclave per region, in the regions of the
+  compiled-in region list (`enclave/deploy/regions.json` lists the same, in
+  the same order). Every enclave holds the same M.
 
 vsock ports of the enclave: **5000** control (the host only; the proxy never
 forwards to it), **5001** service (the inbound proxy forwards the internet to
 it). Ports on the host, for the enclave to reach out: **5002** to a giving
 region's proxy (key share), **5003** and **5004** to the two Ghost nodes of
 the compiled-in release node list (the chain check; TLS to each ends inside
-the enclave).
+the enclave), **5005** the host's journal store, and **5006** and **5007** to
+the two other regions' proxies (the journal's head, anchored in the peer
+regions; one port per peer, in the order of the region list).
+
+Each card is served by its home region only (`docs/sealed-card.md`, "Home
+region"). The region list is compiled into the image
+(`seal/src/journal_anchor.rs`, `RELEASE_REGIONS`), and so is each image's own
+region (`SEAL_REGION` when the enclave program is built): one build per
+region, each on the signed list. An image built without a region on the list
+installs no journal and answers every card `unavailable`.
 
 ## Build and measurements
 
@@ -424,13 +434,43 @@ or timeout is a journal error, and the Seal changes a card only after a save
 succeeded. The host sees counters and ciphertext only, and is not trusted for
 integrity: the enclave checks the log itself.
 
-The file survives the enclave and the host restarting, not the host instance
-being replaced (`enclave/RUNBOOK.md`). Each region keeps its own log. What
-this does not catch: a host that cuts the tail of the log while the enclave
-is stopped shows it a shorter log that is still valid at the next start (the
-checks cannot see records never shown to it). A cut while the enclave runs
-is caught. Closing the restart case needs the log's head kept where the host
-cannot touch it, in the other regions (`docs/sealed-card.md`, "Next").
+The same unit keeps, for each other region, the copy of its log this
+enclave holds as its peer: `seal_proxy journal 5005 /var/lib/seal/journal.log
+<region>=/var/lib/seal/peer-<region>.log ...`, one file per origin region,
+the same store and checks, the same port; a request about a peer log is 3 ||
+origin length || origin || an append or read-all request.
+
+### The journal's head in the other regions (`seal/src/journal_anchor.rs`)
+
+The host's log alone cannot show a tail cut while the enclave is stopped,
+nor a replaced host's empty log. So each region's log is anchored in the
+other two (`docs/sealed-card.md`, "Journal", has the formats):
+
+- After each append is durable on the host, the enclave sends the record
+  (ciphertext only) to both peer enclaves as a service request kind 3,
+  through vsock ports 5006 and 5007 (`seal_proxy outbound`, units
+  `seal-anchor` and `seal-anchor-2`) to their regions' inbound proxies, 10
+  seconds each. A peer checks the record's chain with M, keeps it in its
+  host's peer log for that origin, and answers its head MACed under a key
+  derived from M (`ghost-seal/v1/journal-head`) over the asker's fresh
+  nonce. The save is `Ok` only once both answered a head holding it, so
+  Fill and Open refuse while a peer is unreachable.
+- At the start, after M is installed and before the log is used, the
+  enclave asks both peers for its log's head. With no peer answering, a
+  peer holding another record at the same counter, or a restored record
+  that fails its check, it serves no flow, logs `the durable journal could
+  not be anchored in a peer region` and tries again every minute. A peer
+  ahead of the host's log has the missing records restored to the host's
+  store, each checked with M: that one path covers a cut tail and a replaced
+  host.
+- A peer request needs M only, not the peer's own flows, so regions that
+  start together anchor each other.
+
+The cost is availability: Fill and Open wait while a peer region is down;
+keep every region running, and replace a lost region by a redeploy, which
+restores from a peer (`enclave/RUNBOOK.md`). What it still does not cover:
+every region lost at once, or the hosts of every region cutting the log at
+once.
 
 ## What is still trusted
 
@@ -455,9 +495,10 @@ real PCR values (they need a Nitro-capable builder), the release key (made
 offline by the release owner; its public half goes into `RELEASE_KEY_HEX`
 before the first image is built, and its signature into
 `enclave/measurements.json` each time a build is published), the reproducibility check
-in CI, the journal's head kept where
-the host cannot touch it (so a tail cut while the enclave is stopped is
-caught) and a journal that survives a replaced host, a faster Vanish lookup than the
+in CI, the image build passing `SEAL_REGION` for each region's build (the
+enclave program reads it at compile time; `enclave/Dockerfile` and
+`compute-pcrs.sh` do not set it yet, so an image they build answers no card),
+the app and DNS sending each card to its home region, a faster Vanish lookup than the
 bounded block scan, nodes of independent operators in the release node list,
 and the app's check of the phone attestation and of the TLS certificate it
 binds.

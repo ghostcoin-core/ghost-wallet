@@ -29,10 +29,18 @@
 //! While it runs, the log remembers the last counter and tag it wrote. A
 //! later read of the store ([`JournalLog::check_store`]) that shows fewer
 //! records, more, or another tail is a rollback: the log refuses every
-//! later save, for good. One thing this cannot see: a store that cuts the
-//! tail of the log while the Seal is stopped shows a shorter log that is
-//! still valid at the next start. Closing that needs the log's head kept
-//! where the host cannot touch it (`docs/sealed-card.md`, "Next").
+//! later save, for good.
+//!
+//! What the store alone cannot show, a cut made while the Seal is stopped
+//! or a store replaced by an empty one, is caught by a [`HeadAnchor`]: the
+//! log's head kept in the other regions (`journal_anchor`). An anchored log
+//! asks the anchor, when it is opened, for the records the peers hold past
+//! the store's end and appends them before it is used, and after each
+//! append it asks the anchor to have every peer acknowledge the record. A
+//! save is `Ok`, and the map changed, only after both. A record the store
+//! took but the peers did not acknowledge is held back (not loaded) until a
+//! later save has every peer acknowledge it; a store that then drops it is
+//! a rollback.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -147,7 +155,67 @@ impl LogStore for MemoryLogStore {
     }
 }
 
+/// Keeps a log's head where its store's host cannot touch it (the other
+/// regions, `journal_anchor::Anchor`).
+pub trait HeadAnchor: Send {
+    /// Called once, when the log is opened with `master`, with every record
+    /// of the store, already checked: the records the anchor's peers hold
+    /// past them, in order, which the log appends to the store before it is
+    /// used. An error leaves the log unopened (and it is tried again).
+    fn restore(&mut self, master: &MasterKey, records: &[(u64, Vec<u8>)]) -> Result<Vec<(u64, Vec<u8>)>, SealError>;
+    /// Called after record `counter` is durable in `store`: `Ok` only once
+    /// every peer holds it. `store` holds the earlier records a peer may
+    /// lack.
+    fn anchor(&mut self, counter: u64, record: &[u8], store: &mut dyn LogStore) -> Result<(), SealError>;
+}
+
+/// A log's chain checked one record at a time with the keys of an M, from
+/// its start: what a peer region checks a record it keeps for another
+/// region with, and a restored record is checked with.
+#[derive(Clone)]
+pub struct Chain {
+    keys: LogKeys,
+    counter: u64,
+    tag: [u8; TAG_BYTES],
+}
+
+impl Chain {
+    /// An empty chain under the keys of `master`.
+    pub fn new(master: &MasterKey) -> Chain {
+        Chain { keys: LogKeys::derive(master), counter: 0, tag: [0u8; TAG_BYTES] }
+    }
+
+    /// The counter of the last record taken (0: none).
+    pub fn counter(&self) -> u64 {
+        self.counter
+    }
+
+    /// The tag of the last record taken (zeros: none).
+    pub fn tag(&self) -> [u8; TAG_BYTES] {
+        self.tag
+    }
+
+    /// Takes record `counter`: it must be the next counter, carry a good tag
+    /// chained to the last record, and decode. Refused, the chain is left as
+    /// it was.
+    pub fn push(&mut self, counter: u64, record: &[u8]) -> Result<(), SealError> {
+        if Some(counter) != self.counter.checked_add(1) {
+            return Err(SealError::Journal("the log has a gap, a repeat or a reorder"));
+        }
+        self.keys.open(counter, &self.tag, record)?;
+        self.counter = counter;
+        self.tag = tag_of(record);
+        Ok(())
+    }
+}
+
+/// The tag a record ends with (`None`: too short to be a record).
+pub fn record_tag(record: &[u8]) -> Option<[u8; TAG_BYTES]> {
+    (record.len() >= MIN_RECORD_BYTES).then(|| tag_of(record))
+}
+
 /// The log's two keys, derived from M.
+#[derive(Clone)]
 struct LogKeys {
     enc: Zeroizing<[u8; 32]>,
     mac: Zeroizing<[u8; 32]>,
@@ -256,19 +324,26 @@ fn verify(keys: &LogKeys, records: &[(u64, Vec<u8>)]) -> Result<Verified, SealEr
     Ok(verified)
 }
 
-/// An append whose answer never came: the store may or may not hold it.
+/// An append not taken as written yet: either its answer never came (the
+/// store may or may not hold it), or the store took it and the anchor's
+/// peers did not all acknowledge it.
 struct Unsettled {
     counter: u64,
     record: Vec<u8>,
     uid: CardUid,
     kind: EntryKind,
     sealed: Vec<u8>,
+    /// The store said the record is durable: a store that no longer shows
+    /// it was rolled back.
+    stored: bool,
 }
 
 struct LogState {
     store: Box<dyn LogStore>,
     keys: LogKeys,
     random: Box<dyn SealRandom + Send>,
+    /// Where the log's head is kept beyond the store (none: the store only).
+    anchor: Option<Box<dyn HeadAnchor>>,
     /// The last counter written (0: none).
     counter: u64,
     /// The last tag written (zeros: none).
@@ -283,9 +358,11 @@ const ROLLED_BACK: SealError = SealError::Journal("the log store was rolled back
 
 impl LogState {
     /// Reads the store again and checks it still ends where this log last
-    /// wrote. An append whose answer was lost and that the store does hold
-    /// is taken as written.
-    fn reconcile(&mut self) -> Result<(), SealError> {
+    /// wrote. An append that the store does hold at its end is taken as
+    /// written: at once without an anchor, and with one only when `settle`
+    /// is set and every peer acknowledges it (until then it stays unsettled
+    /// and is not loaded).
+    fn reconcile(&mut self, settle: bool) -> Result<(), SealError> {
         if self.refused {
             return Err(ROLLED_BACK);
         }
@@ -295,13 +372,29 @@ impl LogState {
             return Err(ROLLED_BACK);
         };
         if verified.counter == self.counter && ct_eq(&verified.tag, &self.tag) {
+            if self.unsettled.as_ref().is_some_and(|unsettled| unsettled.stored) {
+                // The store dropped a record it had said was durable.
+                self.refused = true;
+                return Err(ROLLED_BACK);
+            }
             self.unsettled = None;
             return Ok(());
         }
-        if let Some(unsettled) = self.unsettled.take()
+        if let Some(mut unsettled) = self.unsettled.take()
             && verified.counter == unsettled.counter
             && records.last().is_some_and(|(_, record)| *record == unsettled.record)
         {
+            unsettled.stored = true;
+            if let Some(anchor) = self.anchor.as_mut() {
+                if !settle {
+                    self.unsettled = Some(unsettled);
+                    return Ok(());
+                }
+                if let Err(error) = anchor.anchor(unsettled.counter, &unsettled.record, self.store.as_mut()) {
+                    self.unsettled = Some(unsettled);
+                    return Err(error);
+                }
+            }
             self.counter = unsettled.counter;
             self.tag = tag_of(&unsettled.record);
             self.entries.insert((unsettled.uid, unsettled.kind), unsettled.sealed);
@@ -316,26 +409,54 @@ impl LogState {
             return Err(ROLLED_BACK);
         }
         if self.unsettled.is_some() {
-            self.reconcile()?;
+            self.reconcile(true)?;
         }
         let counter = self.counter.checked_add(1).ok_or(SealError::Journal("the log is full"))?;
         let record = self.keys.seal(self.random.as_mut(), counter, &self.tag, uid, kind, &sealed)?;
-        match self.store.append(counter, &record) {
-            Ok(()) => {
-                self.counter = counter;
-                self.tag = tag_of(&record);
-                self.entries.insert((*uid, kind), sealed);
-                Ok(())
+        if let Err(error) = self.store.append(counter, &record) {
+            self.unsettled = Some(Unsettled { counter, record, uid: *uid, kind, sealed, stored: false });
+            return Err(match error {
+                SealError::Journal(_) => error,
+                _ => SealError::Journal("the log store failed"),
+            });
+        }
+        if let Some(anchor) = self.anchor.as_mut()
+            && let Err(error) = anchor.anchor(counter, &record, self.store.as_mut())
+        {
+            // Durable here, not acknowledged by every peer: not taken yet.
+            self.unsettled = Some(Unsettled { counter, record, uid: *uid, kind, sealed, stored: true });
+            return Err(match error {
+                SealError::Journal(_) => error,
+                _ => SealError::Journal("the log's head could not be anchored"),
+            });
+        }
+        self.counter = counter;
+        self.tag = tag_of(&record);
+        self.entries.insert((*uid, kind), sealed);
+        Ok(())
+    }
+}
+
+/// Reads and checks every record of `store` and, with an `anchor`, appends
+/// the records its peers hold past them; the whole log, checked again.
+fn settle_open(
+    master: &MasterKey,
+    keys: &LogKeys,
+    store: &mut dyn LogStore,
+    anchor: Option<&mut (dyn HeadAnchor + '_)>,
+) -> Result<Verified, SealError> {
+    let mut records = store.read_all()?;
+    verify(keys, &records)?;
+    if let Some(anchor) = anchor {
+        let missing = anchor.restore(master, &records)?;
+        if !missing.is_empty() {
+            for (counter, record) in &missing {
+                store.append(*counter, record)?;
             }
-            Err(error) => {
-                self.unsettled = Some(Unsettled { counter, record, uid: *uid, kind, sealed });
-                Err(match error {
-                    SealError::Journal(_) => error,
-                    _ => SealError::Journal("the log store failed"),
-                })
-            }
+            records = store.read_all()?;
         }
     }
+    verify(keys, &records)
 }
 
 /// The verified log. Clones are handles on the same log, behind one lock,
@@ -360,19 +481,35 @@ impl JournalLog {
     ) -> Result<JournalLog, SealError> {
         let keys = LogKeys::derive(master);
         let verified = verify(&keys, &store.read_all()?)?;
-        Ok(JournalLog::from_verified(store, keys, random, verified))
+        Ok(JournalLog::from_verified(store, keys, random, None, verified))
+    }
+
+    /// [`JournalLog::open_with`] with the log's head kept by `anchor`: the
+    /// records its peers hold past the store's end are restored to the store
+    /// first, and each later save is `Ok` only once every peer holds it.
+    pub fn open_anchored(
+        master: &MasterKey,
+        mut store: Box<dyn LogStore>,
+        random: Box<dyn SealRandom + Send>,
+        mut anchor: Box<dyn HeadAnchor>,
+    ) -> Result<JournalLog, SealError> {
+        let keys = LogKeys::derive(master);
+        let verified = settle_open(master, &keys, store.as_mut(), Some(anchor.as_mut()))?;
+        Ok(JournalLog::from_verified(store, keys, random, Some(anchor), verified))
     }
 
     fn from_verified(
         store: Box<dyn LogStore>,
         keys: LogKeys,
         random: Box<dyn SealRandom + Send>,
+        anchor: Option<Box<dyn HeadAnchor>>,
         verified: Verified,
     ) -> JournalLog {
         let state = LogState {
             store,
             keys,
             random,
+            anchor,
             counter: verified.counter,
             tag: verified.tag,
             entries: verified.entries,
@@ -389,9 +526,17 @@ impl JournalLog {
     /// Reads the store again and checks that it still holds exactly the log
     /// written so far. A shorter log, a longer one or another tail is a
     /// rollback: refused, and no save is taken from then on. A store that
-    /// cannot be read now is refused this once.
+    /// cannot be read now is refused this once. It asks no peer: a record
+    /// the store holds that the peers have not all acknowledged stays held
+    /// back until the next save.
     pub fn check_store(&self) -> Result<(), SealError> {
-        self.lock().reconcile()
+        self.lock().reconcile(false)
+    }
+
+    /// Whether a record the store took is held back, waiting for every
+    /// peer to acknowledge it (or for its answer).
+    pub fn has_unsettled(&self) -> bool {
+        self.lock().unsettled.is_some()
     }
 
     /// Whether a rollback was seen.
@@ -420,10 +565,14 @@ impl Journal for JournalLog {
     }
 }
 
+/// What a log not opened yet waits with: its store, the random source of
+/// its IVs and its anchor, if any.
+type Waiting = (Box<dyn LogStore>, Box<dyn SealRandom + Send>, Option<Box<dyn HeadAnchor>>);
+
 struct Opening {
-    /// Until the log is opened (and after a failed try): the store and the
-    /// random source, kept for the next try.
-    waiting: Option<(Box<dyn LogStore>, Box<dyn SealRandom + Send>)>,
+    /// Until the log is opened (and after a failed try): the store, the
+    /// random source and the anchor, kept for the next try.
+    waiting: Option<Waiting>,
     /// The log, once opened and verified.
     open: Option<JournalLog>,
 }
@@ -443,7 +592,24 @@ impl SharedLog {
 
     /// [`SharedLog::new`] with the random source of the records' IVs.
     pub fn with_random(store: Box<dyn LogStore>, random: Box<dyn SealRandom + Send>) -> SharedLog {
-        SharedLog { opening: Mutex::new(Opening { waiting: Some((store, random)), open: None }) }
+        SharedLog { opening: Mutex::new(Opening { waiting: Some((store, random, None)), open: None }) }
+    }
+
+    /// A log over `store` whose head `anchor` keeps (the enclave's: its
+    /// peer regions), not opened yet. Opening it restores what the peers
+    /// hold past the store first ([`JournalLog::open_anchored`]); a failure
+    /// is returned and the next use tries again.
+    pub fn anchored(store: Box<dyn LogStore>, anchor: Box<dyn HeadAnchor>) -> SharedLog {
+        SharedLog::anchored_with_random(store, Box::new(SystemRandom), anchor)
+    }
+
+    /// [`SharedLog::anchored`] with the random source of the records' IVs.
+    pub fn anchored_with_random(
+        store: Box<dyn LogStore>,
+        random: Box<dyn SealRandom + Send>,
+        anchor: Box<dyn HeadAnchor>,
+    ) -> SharedLog {
+        SharedLog { opening: Mutex::new(Opening { waiting: Some((store, random, Some(anchor))), open: None }) }
     }
 
     /// Whether the log has been opened and verified.
@@ -465,11 +631,11 @@ impl SharedLog {
             log.check_store()?;
             return Ok(log.clone());
         }
-        let (store, _) = opening.waiting.as_mut().ok_or(SealError::Journal("the log has no store"))?;
+        let (store, _, anchor) = opening.waiting.as_mut().ok_or(SealError::Journal("the log has no store"))?;
         let keys = LogKeys::derive(master);
-        let verified = verify(&keys, &store.read_all()?)?;
-        let (store, random) = opening.waiting.take().ok_or(SealError::Journal("the log has no store"))?;
-        let log = JournalLog::from_verified(store, keys, random, verified);
+        let verified = settle_open(master, &keys, store.as_mut(), anchor.as_deref_mut())?;
+        let (store, random, anchor) = opening.waiting.take().ok_or(SealError::Journal("the log has no store"))?;
+        let log = JournalLog::from_verified(store, keys, random, anchor, verified);
         opening.open = Some(log.clone());
         Ok(log)
     }

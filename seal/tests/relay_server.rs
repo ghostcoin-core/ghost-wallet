@@ -10,7 +10,11 @@
 //! after one. Its Fill factory is the enclave's maker (`CoreKeyMaker` on the
 //! chain check's network): a Fill makes the wallet core's key and coin, its
 //! confirmation seals the card once the coin is paid, and its Check stops
-//! answering Sealed once the coin's own spend marker is spent.
+//! answering Sealed once the coin's own spend marker is spent. Run as one
+//! region of several (`--region`, `--regions`, `--peer-listen` and a
+//! `--peer` per other region), it refuses a card whose home is another
+//! region `wrong-region` before any card traffic, serves its own, and its
+//! Fill reaches the other regions' peer logs.
 
 mod support;
 
@@ -26,6 +30,7 @@ use ghost_seal::answer::{AnswerKind, AnswerVerifier};
 use ghost_seal::card_keys::{card_keys, key_version};
 use ghost_seal::chain_check::safe_depth;
 use ghost_seal::host_journal::HostStore;
+use ghost_seal::journal_anchor::WRONG_REGION_MESSAGE;
 use ghost_seal::{CoinQuery, SealError};
 use ghost_seal::flows::record_file_settings;
 use ghost_seal::primitives::sha3_256;
@@ -885,4 +890,138 @@ fn limits_stay_well_inside_the_ios_nfc_session() {
     }
     let too_idle = args(&["--idle-ms", "20000", "--total-ms", "10000"]);
     assert!(matches!(Options::from_args(&too_idle, Some("1")), Err(StartError::Usage(_))));
+}
+
+/// The release's ordered region list.
+const REGIONS: &str = "us-east-1,eu-central-1,ap-southeast-1";
+/// The home region of the tests' card ([`UID`]), as
+/// `tests/vectors/home-region.json` has it.
+const UID_HOME: &str = "eu-central-1";
+
+/// A directory of its own for one region's journal and peer logs.
+fn region_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("ghost-seal-relay-server-{}-region-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The region flags of region `own` of [`REGIONS`], its peer port at
+/// `addrs[own's index]` and each other region's at its index.
+fn region_flags(own: usize, addrs: &[String]) -> Vec<String> {
+    let names: Vec<&str> = REGIONS.split(',').collect();
+    let mut flags = vec!["--region".to_owned(), names[own].to_owned(), "--regions".to_owned(), REGIONS.to_owned()];
+    flags.extend(["--peer-listen".to_owned(), addrs[own].clone()]);
+    for (index, other) in names.iter().enumerate().filter(|(index, _)| *index != own) {
+        flags.extend(["--peer".to_owned(), format!("{other}={}", addrs[index])]);
+    }
+    flags
+}
+
+/// Three test servers, one per region, each anchoring its journal in the
+/// other two: (region, its directory, the server).
+fn three_regions() -> Vec<(String, PathBuf, TestSealServer)> {
+    let held: Vec<std::net::TcpListener> = (0..3).map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+    let addrs: Vec<String> = held.iter().map(|listener| listener.local_addr().unwrap().to_string()).collect();
+    drop(held);
+    REGIONS
+        .split(',')
+        .enumerate()
+        .map(|(index, own)| {
+            let dir = region_dir(own);
+            let flags = region_flags(index, &addrs);
+            let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+            let options = Options::from_args(&args_with_journal(&dir.join("journal.log"), &flags), Some("1")).unwrap();
+            let server = TestSealServer::start_with(&options, installed(&[UID])).expect("a region's server");
+            assert_eq!(server.peer_addr().map(|addr| addr.to_string()), Some(addrs[index].clone()));
+            assert_eq!(server.regions().map(|regions| regions.own().to_owned()), Some(own.to_owned()));
+            (own.to_owned(), dir, server)
+        })
+        .collect()
+}
+
+#[test]
+fn as_one_region_of_several_the_test_server_refuses_a_card_that_is_not_its_own() {
+    let regions = three_regions();
+    let (home, away): (Vec<_>, Vec<_>) = regions.iter().partition(|(name, _, _)| name == UID_HOME);
+    let (_, home_dir, home) = home[0];
+    assert_eq!(away.len(), 2);
+
+    // Each other region refuses the card's Check before any session or card
+    // traffic, naming its home, and its Fill before any card command.
+    for (name, dir, server) in &away {
+        let mut card = dev_card(UID);
+        let Relayed::Refused { status, body } = relay_check(server.addr(), &mut card, UID, [0x51; 32]) else {
+            panic!("{name} served a card whose home is {UID_HOME}");
+        };
+        assert_eq!(status, 422, "{name}");
+        assert_eq!(
+            body,
+            json!({
+                "status": "error",
+                "error": "refused",
+                "reason": "wrong-region",
+                "homeRegion": UID_HOME,
+                "message": WRONG_REGION_MESSAGE,
+            })
+        );
+        assert_eq!(server.session_count(), 0, "{name}: no session");
+        assert!(server.fill(&mut card, &fill_request()).is_err(), "{name}");
+        assert!(card.transcript.is_empty(), "{name}: no card command");
+        assert!(HostStore::open(&dir.join("journal.log")).unwrap().records().is_empty(), "{name}: nothing journaled");
+    }
+
+    // Its home serves it: a Check round trip, and a Fill on its journal,
+    // which reaches the other two regions' peer logs (ciphertext only).
+    let mut card = dev_card(UID);
+    let challenge = [0x52u8; 32];
+    let Relayed::Done { answer, signature, .. } = relay_check(home.addr(), &mut card, UID, challenge) else {
+        panic!("the home region did not serve its card");
+    };
+    assert_eq!(verifier().verify(&answer, &signature, &challenge, &UID, now()).unwrap().state, CardState::Empty);
+    home.fill(&mut card, &fill_request()).expect("the home region fills its card");
+    let written = HostStore::open(&home_dir.join("journal.log")).unwrap().records().to_vec();
+    assert!(!written.is_empty());
+    for (name, dir, _) in &away {
+        let copy = dir.join(format!("peer-{UID_HOME}.log"));
+        assert_eq!(HostStore::open(&copy).unwrap().records(), written.as_slice(), "{name} holds the home's log");
+        assert!(!contains(&std::fs::read(&copy).unwrap(), &UID.0), "{name}: ciphertext only");
+    }
+    drop(regions);
+}
+
+#[test]
+fn the_region_flags_must_name_this_region_and_one_peer_for_each_other() {
+    let addrs: Vec<String> = ["127.0.0.1:7101", "127.0.0.1:7102", "127.0.0.1:7103"].map(String::from).to_vec();
+    let good = region_flags(0, &addrs);
+    let parse = |flags: &[String]| {
+        let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+        Options::from_args(&args(&flags), Some("1"))
+    };
+    let options = parse(&good).expect("the region flags");
+    let regions = options.regions().expect("one region of several");
+    assert_eq!((regions.regions.own(), regions.peers.len()), ("us-east-1", 2));
+    // --region without --regions, and the other way round.
+    assert!(matches!(parse(&good[..2]), Err(StartError::Usage(_))));
+    assert!(matches!(parse(&good[2..4]), Err(StartError::Usage(_))));
+    // A list that does not name this region, or names one twice.
+    let mut flags = good.clone();
+    flags[3] = "eu-central-1,ap-southeast-1".into();
+    assert!(matches!(parse(&flags), Err(StartError::Usage(_))));
+    flags[3] = "us-east-1,us-east-1".into();
+    assert!(matches!(parse(&flags), Err(StartError::Usage(_))));
+    // A peer left out, a peer given twice, a peer of no listed region, a
+    // peer port that is not loopback.
+    assert!(matches!(parse(&good[..good.len() - 2]), Err(StartError::Missing(_))));
+    let mut twice = good.clone();
+    twice.extend(good[good.len() - 2..].to_vec());
+    assert!(parse(&twice).is_err());
+    let mut stranger = good.clone();
+    stranger.extend(["--peer".to_owned(), "sa-east-1=127.0.0.1:7104".to_owned()]);
+    assert!(matches!(parse(&stranger), Err(StartError::Usage(_))));
+    let mut remote = good.clone();
+    remote[5] = "192.0.2.10:7101".into();
+    assert!(matches!(parse(&remote), Err(StartError::Usage(_))));
+    // Without the flags it runs as the one region it always was.
+    assert!(parse(&[]).unwrap().regions().is_none());
 }

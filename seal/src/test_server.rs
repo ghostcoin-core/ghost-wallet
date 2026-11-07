@@ -40,6 +40,22 @@
 //! address. [`TestSealServer::start_with`] takes the nodes and the registry
 //! from the caller (the tests), with no network.
 //!
+//! **Regions.** Given `--region ID`, `--regions A,B,C` (the ordered region
+//! list, as the enclave has it compiled in) and, for each other region,
+//! `--peer REGION=ADDR:PORT` (that region's test server's peer port) and
+//! `--peer-listen ADDR:PORT` (its own), it runs as one region of several,
+//! as the enclaves do (`journal_anchor`): a Check start of a card whose
+//! home is another region is refused HTTP 422 `refused`, reason
+//! `wrong-region`, naming the home region (`homeRegion`), before any card
+//! traffic, and [`TestSealServer::fill`] refuses such a card the same way
+//! before any card command. Its journal's head is anchored in its peers:
+//! the journal file is opened at the first session, after every peer was
+//! asked for its head and what they hold past the file was restored; each
+//! save is `Ok` only once every peer took it. On its peer port (plain TCP,
+//! loopback only) it keeps the other regions' logs, each in
+//! `peer-<region>.log` beside the journal file, and answers their framed
+//! service requests kind 3 under the test M.
+//!
 //! Every request must arrive whole in time: its body within
 //! `--body-ms` (5 seconds by default) of its head, and each head within
 //! [`CONNECTION_IDLE`] of the connection opening or its last answer. A
@@ -64,8 +80,11 @@ use crate::chain_check::{ChainNode, CoinQuery, CoinStatus, CoinStatusCheck, Netw
 use crate::error::SealError;
 use crate::flows::{FillOutcome, FillRequest, Seal, SealConfig};
 use crate::host_journal::HostStore;
-use crate::journal::{Journal, MemoryJournal};
-use crate::journal_log::JournalLog;
+use crate::journal::{EntryKind, Journal, MemoryJournal};
+use crate::journal_anchor::{
+    Anchor, PEER_DEADLINE, Peer, PeerLink, PeerLogs, Regions, SERVICE_KIND, WRONG_REGION_MESSAGE, WRONG_REGION_REASON,
+};
+use crate::journal_log::{JournalLog, LogStore, SharedLog};
 use crate::key_maker::CoreKeyMaker;
 use crate::node_list::NodeList;
 use crate::node_rpc::{NodeAddress, RpcNode, TcpTransport};
@@ -117,7 +136,13 @@ const WATCH_TICK: Duration = Duration::from_millis(20);
 /// The usage line.
 pub const USAGE: &str = "usage: GHOST_DEV_TEST_SEAL=1 test_seal_server --dev-test-seal --registry FILE \
 --node URL --node URL [--node URL ...] --journal FILE [--network CHAIN_ID:GENESIS_HEX] [--listen ADDR:PORT] \
-[--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N] [--total-ms N] [--max-sessions N] [--body-ms N]";
+[--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N] [--total-ms N] [--max-sessions N] [--body-ms N] \
+[--region ID --regions A,B,C --peer-listen ADDR:PORT --peer REGION=ADDR:PORT ...]";
+
+/// The largest frame on the peer port.
+const MAX_PEER_FRAME_BYTES: usize = 64 * 1024;
+/// How many peer connections are served at once; more are closed.
+const MAX_PEER_CONNECTIONS: usize = 16;
 
 /// The test M's bytes. Public by design: SHA3-256 of
 /// [`DEV_TEST_MASTER_LABEL`]. Card setup uses the same value for test cards.
@@ -284,6 +309,60 @@ pub struct Options {
     nodes: Vec<NodeAddress>,
     network: Network,
     journal: PathBuf,
+    regions: Option<RegionOptions>,
+}
+
+/// Where a test server runs as one region of several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionOptions {
+    /// The ordered region list and this region.
+    pub regions: Regions,
+    /// Each other region and its test server's peer port, in list order.
+    pub peers: Vec<(String, SocketAddr)>,
+    /// This server's own peer port.
+    pub peer_listen: SocketAddr,
+}
+
+/// A loopback `ADDR:PORT` for `flag`.
+fn loopback(flag: &str, value: &str) -> Result<SocketAddr, StartError> {
+    value
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .filter(|addr| addr.ip().is_loopback())
+        .ok_or_else(|| StartError::Usage(format!("{flag} takes a loopback ADDR:PORT (the peer port is plain TCP)")))
+}
+
+/// The region options from the flags, checked: `--region` and `--regions`
+/// together, a well-formed list naming this region, and exactly one
+/// `--peer` for each other region and a `--peer-listen`.
+fn region_options(
+    region: Option<String>,
+    list: Option<String>,
+    peers: Vec<(String, String)>,
+    peer_listen: Option<String>,
+) -> Result<Option<RegionOptions>, StartError> {
+    let (region, list) = match (region, list) {
+        (None, None) if peers.is_empty() && peer_listen.is_none() => return Ok(None),
+        (Some(region), Some(list)) => (region, list),
+        _ => return Err(StartError::Usage("--region, --regions, --peer-listen and --peer go together".into())),
+    };
+    let names: Vec<&str> = list.split(',').map(str::trim).collect();
+    let regions = Regions::new(&names, &region).map_err(|why| StartError::Usage(format!("--regions: {why}")))?;
+    let mut addressed = Vec::new();
+    for other in regions.peers() {
+        let given: Vec<&(String, String)> = peers.iter().filter(|(name, _)| name == other).collect();
+        let [(_, address)] = given.as_slice() else {
+            return Err(StartError::Missing(format!("one --peer {other}=ADDR:PORT is needed for each other region")));
+        };
+        addressed.push((other.to_owned(), loopback("--peer", address)?));
+    }
+    if peers.len() != addressed.len() {
+        return Err(StartError::Usage("a --peer names a region that is not another region on --regions".into()));
+    }
+    let peer_listen = peer_listen
+        .ok_or_else(|| StartError::Missing("--peer-listen ADDR:PORT is needed with --regions".into()))?;
+    Ok(Some(RegionOptions { regions, peers: addressed, peer_listen: loopback("--peer-listen", &peer_listen)? }))
 }
 
 impl Options {
@@ -308,6 +387,7 @@ impl Options {
         let mut journal = None;
         let mut nodes: Vec<NodeAddress> = Vec::new();
         let mut network = NodeList::release().network;
+        let (mut region, mut region_list, mut peers, mut peer_listen) = (None, None, Vec::new(), None);
         let mut at = 0;
         while at < args.len() {
             let flag = args[at].as_str();
@@ -329,6 +409,15 @@ impl Options {
                 "--total-ms" => limits.total_limit = Duration::from_millis(number(flag, value)?),
                 "--max-sessions" => limits.max_sessions = number(flag, value)? as usize,
                 "--body-ms" => body_deadline = Duration::from_millis(number(flag, value)?),
+                "--region" => region = Some(value.clone()),
+                "--regions" => region_list = Some(value.clone()),
+                "--peer-listen" => peer_listen = Some(value.clone()),
+                "--peer" => {
+                    let (name, address) = value
+                        .split_once('=')
+                        .ok_or_else(|| StartError::Usage("--peer is REGION=ADDR:PORT".into()))?;
+                    peers.push((name.to_owned(), address.to_owned()));
+                }
                 _ => return Err(StartError::Usage(format!("unknown argument {flag}"))),
             }
             at += 2;
@@ -367,7 +456,13 @@ impl Options {
         if tls.is_none() && !listen.ip().is_loopback() {
             return Err(StartError::PlainNotLoopback(listen));
         }
-        Ok(Options { listen, tls, limits, body_deadline, registry, nodes, network, journal })
+        let regions = region_options(region, region_list, peers, peer_listen)?;
+        Ok(Options { listen, tls, limits, body_deadline, registry, nodes, network, journal, regions })
+    }
+
+    /// Where it runs as one region of several, if it does.
+    pub fn regions(&self) -> Option<&RegionOptions> {
+        self.regions.as_ref()
     }
 
     /// The card registry file.
@@ -443,18 +538,55 @@ pub struct TestSealServer {
     threads: Vec<JoinHandle<()>>,
     sessions: SessionSeals,
     key_maker: KeyMakerFactory,
+    peer_addr: Option<SocketAddr>,
+}
+
+/// The server's journal: the file's log, opened at the start, or (as one
+/// region of several) the same log anchored in the peers, opened at the
+/// first session.
+#[derive(Clone)]
+enum SessionJournal {
+    Plain(JournalLog),
+    Anchored(Arc<SharedLog>),
+}
+
+impl SessionJournal {
+    fn journal(&self) -> Box<dyn Journal> {
+        match self {
+            SessionJournal::Plain(log) => Box::new(log.clone()),
+            SessionJournal::Anchored(shared) => match shared.journal(&dev_test_master()) {
+                Ok(log) => Box::new(log),
+                // No peer answered, a fork, a bad restore or a rollback: the
+                // session's Seal changes no card.
+                Err(_) => Box::new(RefusedJournal),
+            },
+        }
+    }
+}
+
+/// A journal that holds nothing and takes no save.
+struct RefusedJournal;
+
+impl Journal for RefusedJournal {
+    fn load(&self, _uid: &CardUid, _kind: EntryKind) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn save(&mut self, _uid: &CardUid, _kind: EntryKind, _sealed: Vec<u8>) -> Result<(), SealError> {
+        Err(SealError::Journal("the journal could not be anchored in the peer regions"))
+    }
 }
 
 /// How the server's Seals are made.
 #[derive(Clone)]
 struct SessionSeals {
     installed: Installed,
-    journal: JournalLog,
+    journal: SessionJournal,
 }
 
 impl SessionSeals {
     fn seal(&self) -> Seal {
-        dev_test_seal_with(self.installed.status_check(), (self.installed.registry)(), Box::new(self.journal.clone()))
+        dev_test_seal_with(self.installed.status_check(), (self.installed.registry)(), self.journal.journal())
     }
 }
 
@@ -464,6 +596,124 @@ struct Shared {
     links: Links,
     body_deadline: Duration,
     in_flight: AtomicUsize,
+    regions: Option<Regions>,
+}
+
+/// A peer region's test server, reached on its peer port: one framed
+/// service request kind 3 per connection.
+struct TcpPeer(SocketAddr);
+
+impl PeerLink for TcpPeer {
+    fn exchange(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        let mut stream = TcpStream::connect_timeout(&self.0, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+        let _ = stream.set_read_timeout(Some(PEER_DEADLINE));
+        let _ = stream.set_write_timeout(Some(PEER_DEADLINE));
+        write_peer_frame(&mut stream, &[&[SERVICE_KIND][..], request].concat()).map_err(|e| e.to_string())?;
+        let answer = read_peer_frame(&mut stream).map_err(|e| e.to_string())?;
+        match answer.split_first() {
+            Some((&0, body)) => Ok(body.to_vec()),
+            Some((&1, why)) => Err(String::from_utf8_lossy(why).into_owned()),
+            _ => Err("the peer's answer is malformed".into()),
+        }
+    }
+}
+
+/// A frame on the peer port: a 4-byte big-endian length and the bytes.
+fn write_peer_frame(out: &mut dyn Write, bytes: &[u8]) -> std::io::Result<()> {
+    if bytes.len() > MAX_PEER_FRAME_BYTES {
+        return Err(std::io::Error::other("the frame is too long"));
+    }
+    out.write_all(&[&(bytes.len() as u32).to_be_bytes()[..], bytes].concat())?;
+    out.flush()
+}
+
+fn read_peer_frame(input: &mut dyn Read) -> std::io::Result<Vec<u8>> {
+    let mut length = [0u8; 4];
+    input.read_exact(&mut length)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_PEER_FRAME_BYTES {
+        return Err(std::io::Error::other("the frame is too long"));
+    }
+    let mut bytes = vec![0u8; length];
+    input.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Answers the peer regions' requests on `listener` until `stop`, one
+/// thread per connection, at most [`MAX_PEER_CONNECTIONS`] at once.
+fn serve_peers(listener: TcpListener, logs: Arc<PeerLogs>, stop: Arc<AtomicBool>) {
+    let open = Arc::new(AtomicUsize::new(0));
+    for stream in listener.incoming() {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let Ok(mut stream) = stream else { continue };
+        if open.fetch_add(1, Ordering::SeqCst) >= MAX_PEER_CONNECTIONS {
+            open.fetch_sub(1, Ordering::SeqCst);
+            continue;
+        }
+        let (logs, held) = (Arc::clone(&logs), Arc::clone(&open));
+        let spawned = std::thread::Builder::new().spawn(move || {
+            let _ = stream.set_read_timeout(Some(CONNECTION_IDLE));
+            let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
+            while let Ok(frame) = read_peer_frame(&mut stream) {
+                let answer = match frame.split_first() {
+                    Some((&SERVICE_KIND, body)) => logs.answer(&dev_test_master(), body),
+                    _ => Err("unknown request".into()),
+                };
+                let framed = match answer {
+                    Ok(body) => [&[0u8][..], &body].concat(),
+                    Err(why) => [&[1u8][..], why.as_bytes()].concat(),
+                };
+                if write_peer_frame(&mut stream, &framed).is_err() {
+                    break;
+                }
+            }
+            held.fetch_sub(1, Ordering::SeqCst);
+        });
+        if spawned.is_err() {
+            open.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// The journal of a server running as one region of several: the file's
+/// log anchored in the peers, and the peers' logs beside the file.
+fn anchored_journal(path: &std::path::Path, options: &RegionOptions) -> Result<(SharedLog, PeerLogs), StartError> {
+    let open = |file: &std::path::Path| {
+        HostStore::open(file)
+            .map_err(|e| StartError::Journal(format!("cannot open the journal file {}: {e}", file.display())))
+    };
+    let own = options.regions.own();
+    let peers = options
+        .peers
+        .iter()
+        .map(|(region, addr)| Peer { region: region.clone(), link: Arc::new(TcpPeer(*addr)) as Arc<dyn PeerLink> })
+        .collect();
+    let journal = SharedLog::anchored(Box::new(open(path)?), Box::new(Anchor::new(own, peers)));
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let mut stores: Vec<(String, Box<dyn LogStore>)> = Vec::new();
+    for (region, _) in &options.peers {
+        stores.push((region.clone(), Box::new(open(&dir.join(format!("peer-{region}.log")))?)));
+    }
+    Ok((journal, PeerLogs::new(own, stores)))
+}
+
+/// The refusal of a card whose home is region `home`.
+fn wrong_region_reply(home: &str) -> Reply {
+    Reply {
+        status: 422,
+        body: json!({
+            "status": "error",
+            "error": "refused",
+            "reason": WRONG_REGION_REASON,
+            "homeRegion": home,
+            "message": WRONG_REGION_MESSAGE,
+        }),
+    }
 }
 
 impl TestSealServer {
@@ -508,8 +758,19 @@ impl TestSealServer {
         let addr = front.local_addr().map_err(|e| StartError::Listen(e.to_string()))?;
 
         // The journal file, read and verified whole before anything is
-        // served.
-        let journal = open_dev_journal(&options.journal)?;
+        // served; as one region of several, opened at the first session,
+        // once the peers were asked (they may start after this server).
+        let mut peer_service = None;
+        let journal = match &options.regions {
+            None => SessionJournal::Plain(open_dev_journal(&options.journal)?),
+            Some(regions) => {
+                let (journal, logs) = anchored_journal(&options.journal, regions)?;
+                let listener = TcpListener::bind(regions.peer_listen).map_err(|e| StartError::Listen(e.to_string()))?;
+                let peer_addr = listener.local_addr().map_err(|e| StartError::Listen(e.to_string()))?;
+                peer_service = Some((listener, peer_addr, Arc::new(logs)));
+                SessionJournal::Anchored(Arc::new(journal))
+            }
+        };
 
         // A Fill's Phantom Key maker: the wallet core's derivation, for coins
         // on the network the chain check follows (`--network`).
@@ -527,9 +788,16 @@ impl TestSealServer {
             links: Links::default(),
             body_deadline: options.body_deadline,
             in_flight: AtomicUsize::new(0),
+            regions: options.regions.as_ref().map(|r| r.regions.clone()),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
+        let mut peer_addr = None;
+        if let Some((listener, addr, logs)) = peer_service {
+            peer_addr = Some(addr);
+            let stop = Arc::clone(&stop);
+            threads.push(std::thread::spawn(move || serve_peers(listener, logs, stop)));
+        }
         {
             let (shared, stop) = (Arc::clone(&shared), Arc::clone(&stop));
             threads.push(std::thread::spawn(move || accept_front(&front, inner, &shared, &stop)));
@@ -555,7 +823,17 @@ impl TestSealServer {
                 }
             }));
         }
-        Ok(TestSealServer { addr, https: options.tls.is_some(), shared, stop, threads, sessions, key_maker })
+        Ok(TestSealServer { addr, https: options.tls.is_some(), shared, stop, threads, sessions, key_maker, peer_addr })
+    }
+
+    /// The address of its peer port, when it runs as one region of several.
+    pub fn peer_addr(&self) -> Option<SocketAddr> {
+        self.peer_addr
+    }
+
+    /// The region list and its own region, when it runs as one of several.
+    pub fn regions(&self) -> Option<&Regions> {
+        self.shared.regions.as_ref()
     }
 
     /// A Seal as each of the server's sessions runs: the test M, the chain
@@ -573,8 +851,12 @@ impl TestSealServer {
     }
 
     /// A Fill of `card` on the server's Seal and journal, its key made by
-    /// the server's Fill factory.
+    /// the server's Fill factory. A card whose home is another region is
+    /// refused before any card command.
     pub fn fill(&self, card: &mut dyn CardTransport, request: &FillRequest) -> Result<FillOutcome, SealError> {
+        if self.regions().is_some_and(|regions| !regions.is_home(&request.uid)) {
+            return Err(SealError::Registry("this card is served by its home region"));
+        }
         self.seal().fill(card, request, self.key_maker().as_mut())
     }
 
@@ -622,6 +904,10 @@ impl TestSealServer {
             _ => self.addr,
         };
         let _ = TcpStream::connect_timeout(&wake, Duration::from_secs(1));
+        // And the peer port's accept.
+        if let Some(peer) = self.peer_addr {
+            let _ = TcpStream::connect_timeout(&peer, Duration::from_secs(1));
+        }
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
@@ -975,6 +1261,14 @@ fn answer(shared: &Shared, key: SocketAddr, number: u64, request: &mut Request) 
     let Ok(fields) = serde_json::from_slice::<Value>(&body) else {
         return Reply::error(400, "bad-request", "the body is not JSON");
     };
+    // A card whose home is another region: refused before any session.
+    if path == "/v1/check/start"
+        && let Some(regions) = &shared.regions
+        && let Ok(uid) = hex_field::<7>(&fields, "uid").map(CardUid)
+        && !regions.is_home(&uid)
+    {
+        return wrong_region_reply(regions.home(&uid));
+    }
     let result = match path.as_str() {
         "/v1/check/start" => start_check(relay, &fields),
         "/v1/relay/step" => step(relay, &fields),

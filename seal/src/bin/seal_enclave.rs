@@ -61,11 +61,27 @@
 //!   `getrandom`, held only until it is written to the card, and is never
 //!   logged. With the chain check, the loaded registry, the journal and the
 //!   key maker, Check, Fill, Fill confirmation and Open are served.
-//! - The journal does not see a host that cuts the tail of the log while
-//!   the enclave is stopped: the shorter log is still valid at the next
-//!   start. Keeping the log's head where the host cannot reach it is not
-//!   done yet (`docs/sealed-card.md`, "Next"). A cut made while it runs is
-//!   seen at the next session and refused.
+//! - Its region: the release's ordered region list is compiled in
+//!   (`ghost_seal::journal_anchor::RELEASE_REGIONS`), and so is its own
+//!   region id, `SEAL_REGION` at build time ([`OWN_REGION`]), one image per
+//!   region; nothing the host sends names a region. Each card is served by
+//!   its home region only; every other region refuses it `wrong-region`
+//!   before any card traffic. An image built without a region on the list
+//!   installs no journal and serves no card.
+//! - The journal's head is anchored in the other regions
+//!   (`ghost_seal::journal_anchor`): after each append the record
+//!   (ciphertext only) goes to both peer enclaves, through the parent's
+//!   vsock ports 5006 and 5007 (one per peer, in the order of the region
+//!   list, this region left out), which the host's outbound proxy carries to
+//!   their inbound proxies, 10 seconds each; a save is `Ok` only once both
+//!   acknowledged it. Once M is installed, before the log is used, it asks
+//!   every peer for its head of this region's log with a fresh nonce and
+//!   restores from a peer what the host's log lacks (a cut tail, or an empty
+//!   log on a replaced host). With no peer answering, a fork or a bad
+//!   restore, every flow stays `unavailable`, a fixed event is logged, and
+//!   it is tried again every [`JOURNAL_RETRY`]. As a peer it keeps the other
+//!   regions' logs on its parent's store (`/var/lib/seal/peer-<region>.log`,
+//!   the same port 5005) and answers their service requests kind 3 with M.
 //!
 //! It never writes M anywhere, and no frame it sends carries M except a
 //! key-share package, encrypted to the receiving enclave.
@@ -74,8 +90,8 @@
 //! most 8 MiB): 1 (genesis) [|| signed list JSON], 2 (join; anything after
 //! is ignored), 3 (a signed list JSON), 4 (the card registry's text);
 //! answer: a status text. Service request: kind (1 key share, 2 phone
-//! attestation) || body; service answer: 0 || body, or 1 || why it was
-//! refused.
+//! attestation, 3 a peer region's journal head request) || body; service
+//! answer: 0 || body, or 1 || why it was refused.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -92,12 +108,13 @@ use ghost_seal::attestation::{
 use ghost_seal::enclave_serve::{
     ANSWER_OK, ANSWER_REFUSED, ChainStatus, CoreKeyMakerSource, DurableJournal, EnclaveAttestation, EnclaveService,
     KIND_KEY_SHARE, KeyMakerSource, NodeChainStatus, RegistrySource, ServiceConfig, ServiceDeps, ServiceEvent,
-    ServiceLog,
+    ServiceLog, ServicePeer,
 };
 use ghost_seal::enclave_tls::EnclaveTls;
 use ghost_seal::flows::ANSWER_LIFETIME_SECS;
 use ghost_seal::host_journal::HostJournal;
-use ghost_seal::journal_log::SharedLog;
+use ghost_seal::journal_anchor::{Anchor, PEER_PORTS, Peer, PeerLink, PeerLogs, Regions};
+use ghost_seal::journal_log::{LogStore, SharedLog};
 use ghost_seal::key_share::{ControlFrame, Receiver, read_control_frame, read_frame, write_frame};
 use ghost_seal::measurements::{ReleaseKey, TrustedList};
 use ghost_seal::node_list::NodeList;
@@ -125,8 +142,12 @@ const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long the control port waits for a frame.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
-/// How often a journal that could not be opened is tried again.
+/// How often a journal that could not be opened (or anchored) is tried
+/// again.
 const JOURNAL_RETRY: Duration = Duration::from_secs(60);
+/// This image's region id, compiled in (`SEAL_REGION` when it was built):
+/// one of the release's region list. The host cannot change it.
+const OWN_REGION: Option<&str> = option_env!("SEAL_REGION");
 
 /// `/dev/nsm`'s one ioctl: `_IOWR(0x0A, 0, struct nsm_message)`, the message
 /// being two `struct iovec` (32 bytes).
@@ -256,16 +277,58 @@ fn main() {
     };
     // The card registry, empty until the host loads it.
     let registry = LoadedRegistry::new();
+    // The region list and this region, both compiled in. Without a region
+    // on the list no journal is installed and no card is served.
+    let regions = match OWN_REGION.map(Regions::release) {
+        Some(Ok(regions)) => {
+            status(&format!("serves the cards whose home region is {}", regions.own()));
+            Some(regions)
+        }
+        Some(Err(why)) => {
+            status(&format!("no region: {why}; not answering cards"));
+            None
+        }
+        None => {
+            status("no region was compiled into this image; not answering cards");
+            None
+        }
+    };
     // The durable journal: the sealed, chained log kept by the parent's
-    // store (vsock port 5005), opened and verified once M is installed.
-    let journal = SharedLog::new(Box::new(HostJournal::parent()));
+    // store (vsock port 5005), its head anchored in the peer regions
+    // (vsock ports 5006 and 5007), opened, restored and verified once M is
+    // installed. And the logs this enclave keeps for its peers, on the same
+    // store.
+    let (journal, peer_logs) = match &regions {
+        Some(regions) => {
+            let peers: Vec<Peer> = regions
+                .peers()
+                .into_iter()
+                .zip(PEER_PORTS)
+                .map(|(region, port)| Peer {
+                    region: region.to_owned(),
+                    link: Arc::new(ServicePeer::parent(port)) as Arc<dyn PeerLink>,
+                })
+                .collect();
+            let anchor = Anchor::new(regions.own(), peers);
+            let journal = SharedLog::anchored(Box::new(HostJournal::parent()), Box::new(anchor));
+            let stores = regions
+                .peers()
+                .into_iter()
+                .map(|region| (region.to_owned(), Box::new(HostJournal::parent_peer(region)) as Box<dyn LogStore>))
+                .collect();
+            (Some(Arc::new(journal) as Arc<dyn DurableJournal>), Some(Arc::new(PeerLogs::new(regions.own(), stores))))
+        }
+        None => (None, None),
+    };
     // The Phantom Key maker: coins on the network the chain check follows.
     let key_maker = CoreKeyMakerSource { chain_id: NodeList::release().network.chain_id };
     let deps = ServiceDeps {
         chain: Some(Arc::new(chain) as Arc<dyn ChainStatus>),
         registry: Some(Arc::new(registry.clone()) as Arc<dyn RegistrySource>),
-        journal: Some(Arc::new(journal) as Arc<dyn DurableJournal>),
+        journal,
         key_maker: Some(Arc::new(key_maker) as Arc<dyn KeyMakerSource>),
+        regions,
+        peer_logs,
     };
     let config = ServiceConfig {
         measurement,
@@ -347,7 +410,7 @@ fn retry_flows(service: &EnclaveService) {
         // One lock at a time: the state's guard ends with this statement.
         let holds_master = service.state().master.is_some();
         if holds_master && !service.serves_flows() && service.refresh_flows() {
-            status("the durable journal is open; serves the flows");
+            status("the durable journal is open and anchored; serves the flows");
         }
     }
 }

@@ -18,6 +18,8 @@ Short operating notes for the Seal on AWS Nitro Enclaves. The design is in
 - There is no KMS key, backup or export of M to restore from. If every
   enclave stops at once, M is gone and the cards it holds cannot be opened.
   Keep at least two regions running at all times.
+- Never stop a region for long: every Fill and Open waits for both other
+  regions to take its journal record. Keep every region running.
 
 ## Needs
 
@@ -114,6 +116,23 @@ chain check ("can't check right now"). The first region in
 the peer listed for it. Check each host's `/ghost-seal/<stack>` log group for
 `ok: made M (genesis)` and `ok: received M from a running enclave`.
 
+Each image is built for one region: `SEAL_REGION` (one of the region list
+compiled into it, `RELEASE_REGIONS` in `seal/src/journal_anchor.rs`) is set
+when the enclave program is built, so each region has its own build and
+PCRs on the signed list. An image built without it logs
+`no region was compiled into this image; not answering cards`.
+`enclave/Dockerfile` and `compute-pcrs.sh` do not pass `SEAL_REGION` yet:
+until they do, an image they build answers no card.
+`regions.json` must list exactly the compiled region list, in its order;
+`deploy.sh` refuses otherwise. Each stack gets the two other regions as its
+journal anchor peers (`AnchorPeerRegion`, `AnchorPeerRegion2`) and their
+proxies' addresses (`AnchorPeerAddress` for vsock port 5006,
+`AnchorPeerAddress2` for 5007, units `seal-anchor` and `seal-anchor-2`).
+On the first deploy the earlier regions have no address for the later ones
+yet, so `deploy.sh` deploys them again at the end with every address: their
+hosts are replaced before any card is served, join M from a running region
+and restore their (empty) journals from a peer.
+
 ## The journal store
 
 The enclave keeps its journal (what it writes before it changes a card, so
@@ -122,39 +141,64 @@ records it encrypts and MACs under keys derived from M. The host keeps that
 log and sees counters and ciphertext only: no UID, card data, key or M.
 
 - The stack runs it as the unit `seal-journal`:
-  `/opt/seal/seal_proxy journal 5005 /var/lib/seal/journal.log`, the same
-  `seal_proxy` binary, serving the enclave on vsock port 5005.
-  `StateDirectory=seal` gives it `/var/lib/seal`; the file is created mode
-  0600. It starts before the enclave, which reads the whole log as soon as
-  it holds M.
+  `/opt/seal/seal_proxy journal 5005 /var/lib/seal/journal.log <region>=/var/lib/seal/peer-<region>.log <region 2>=/var/lib/seal/peer-<region 2>.log`,
+  the same `seal_proxy` binary, serving the enclave on vsock port 5005: its
+  own log, and the copy of each other region's log it keeps as that region's
+  peer (the peer log files, one per other region). `StateDirectory=seal`
+  gives it `/var/lib/seal`; every file is created mode 0600. It starts
+  before the enclave, which reads the whole log as soon as it holds M.
 - On a host by hand, before `seal_proxy start`:
   `systemctl enable --now seal-journal`, then check
   `/var/log/seal/seal-journal.log` for
-  `serving the journal store /var/lib/seal/journal.log (N records) on vsock port 5005`.
+  `serving the journal store /var/lib/seal/journal.log (N records) on vsock port 5005`
+  and one `serving the peer log of <region>` line per other region.
+- The log's head is anchored in the other regions. After each record the
+  enclave sends it (ciphertext only) to both other regions' enclaves over
+  its vsock ports 5006 and 5007 (units `seal-anchor` and `seal-anchor-2`,
+  outbound to their proxies, 10 seconds each); each checks it with M and
+  keeps it in its host's peer log. A Fill or an Open goes on only once both
+  took it. When the enclave starts, after it holds M and before it serves,
+  it asks both for its log's head with a fresh nonce and restores from a
+  peer any records its host's log lacks.
 - If the enclave logs `the durable journal was refused`, it answers every
   card `unavailable`. Either the store was not reachable (start
   `seal-journal`; the enclave tries again every minute and at each registry
   load) or the log failed the enclave's checks: a record changed, dropped,
   repeated or reordered, or a log of another M. Do not edit, cut or copy
   records into the file; the enclave refuses it.
-- Never delete or truncate `/var/lib/seal/journal.log` while cards are being
-  filled or opened. Never compact it by hand.
+- If the enclave logs `the durable journal could not be anchored in a peer
+  region`, it answers every card `unavailable` and tries again every minute:
+  no other region answered (start `seal-anchor` and `seal-anchor-2`, and the
+  other regions), or a peer holds another log at the same counter (a fork),
+  or a record restored from a peer failed its check. A fork or a bad restore
+  is not fixed by retrying: stop and look at the peer regions' logs.
+- Never delete or truncate `/var/lib/seal/journal.log` or a peer log while
+  cards are being filled or opened. Never compact them by hand.
 
-What it survives and what it does not:
+What it survives, what it costs and what it does not cover:
 
-- It survives the enclave restarting and the host restarting: the file stays
+- It survives the enclave restarting and the host restarting: the files stay
   in `/var/lib/seal`.
-- It does **not** survive the host instance being replaced (a redeploy of
-  the stack, an upgrade, "Replace a lost region"): the new host starts with
-  an empty journal. Before replacing a host, let every Fill and Open on that
-  region finish, and know that the region's new enclave holds no Fill entry
-  for cards sealed before: it refuses to answer them Sealed until a journal
-  that survives a replaced host (kept in more than one region) exists. Each
-  region keeps its own log for now.
-- A host that cuts the end off the log while the enclave is stopped is not
-  caught when the enclave starts again: the shorter log is still valid. A
-  cut made while the enclave runs is caught and refused. Keeping the log's
-  head where the host cannot reach it is not done yet.
+- It survives the host instance being replaced (a redeploy of the stack, an
+  upgrade, "Replace a lost region"): the new host starts with an empty
+  journal, and the new enclave restores the whole log from a peer region
+  before it serves, so a Fill or an Open begun before is finished, never
+  lost or replayed.
+- A host that cuts the end off the log while the enclave is stopped is
+  caught when the enclave starts again, and the cut records are restored
+  from a peer. A cut made while the enclave runs is caught and refused.
+- The cost is availability: while a peer region is down or unreachable,
+  every Fill and Open in the regions that need it waits (refused, nothing
+  changed on the card); with no peer answering at its start an enclave
+  serves no card. Keep every region running. A lost region is replaced by a
+  redeploy, which restores from a peer.
+- It does not cover every region lost at once, nor the hosts of every
+  region cutting the log at once: there is then no copy left to restore
+  from.
+
+Each card is served by its home region only (`docs/sealed-card.md`, "Home
+region"); every other region refuses it `wrong-region`, naming the home, and
+touches no journal, card or log. The app must send each card to its home.
 
 ## Load the card registry
 
@@ -197,5 +241,14 @@ older signed list can bring it back.
 
 Redeploy its stack: the new host starts in join mode from its peer (or from
 any running region: change its `peer` in `regions.json`). Then load the card
-registry into it (above). Its journal starts empty: a replaced host instance
-keeps no journal (see "The journal store").
+registry into it (above). Its host's journal starts empty and the enclave
+restores it from a peer region before it serves (see "The journal store");
+until one other region answers, it serves no card. Its peer logs of the
+other regions start empty too and fill again with their next records.
+
+## Change the region list
+
+The region list is compiled into the image and fixed per release. Changing
+it (adding, dropping or reordering a region) moves cards to other home
+regions. Before a release with another list, finish every Fill and Open on
+every region, then upgrade every region to the new list together.

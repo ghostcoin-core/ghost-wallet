@@ -2,7 +2,9 @@
 //! over local sockets (the sandbox has no vsock): append and read all, the
 //! store's own checks (the next counter only, at most 4096 bytes), a torn
 //! last record dropped at open, the file's mode, no answer before the
-//! flush, a slow or silent host timing out, and both ends restarted.
+//! flush, a slow or silent host timing out, and both ends restarted; and the
+//! logs a host keeps for the peer regions (one file per origin region, on
+//! the same port, ciphertext only), as a peer enclave fills and reads them.
 
 mod support;
 
@@ -16,10 +18,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ghost_seal::host_journal::{
-    self, ANSWER_OK, ANSWER_RECORD, ANSWER_REFUSED, HostJournal, HostStore, JOURNAL_FILE, JOURNAL_PORT, PARENT_CID,
-    REQUEST_APPEND, REQUEST_DEADLINE, REQUEST_READ_ALL, RecordFile, StoreRefused,
+    self, ANSWER_OK, ANSWER_RECORD, ANSWER_REFUSED, HostJournal, HostStore, HostStores, JOURNAL_FILE, JOURNAL_PORT,
+    PARENT_CID, REQUEST_APPEND, REQUEST_DEADLINE, REQUEST_PEER, REQUEST_READ_ALL, RecordFile, StoreRefused,
+    peer_log_file, peer_request,
 };
-use ghost_seal::journal_log::{JournalLog, LogStore, MAX_RECORD_BYTES, SharedLog};
+use ghost_seal::journal_anchor::{Anchor, Peer, PeerLink, PeerLogs};
+use ghost_seal::journal_log::{JournalLog, LogStore, MAX_RECORD_BYTES, MemoryLogStore, SharedLog};
 use ghost_seal::key_share::{read_frame, write_frame};
 use ghost_seal::proxy::{TcpConnector, UnixConnector};
 use ghost_seal::{CardUid, EntryKind, Journal, SealError};
@@ -390,4 +394,165 @@ fn a_restart_of_both_ends_gives_the_same_entries() {
     for clear in [&b"a fill entry"[..], b"an open entry", b"another card", &UID.0, &OTHER.0] {
         assert!(!support::contains(&bytes, clear));
     }
+}
+
+const US: &str = "us-east-1";
+const EU: &str = "eu-central-1";
+const AP: &str = "ap-southeast-1";
+
+/// Serves the journal in `dir` and the peer logs of `origins` beside it, on
+/// one Unix socket; its path.
+fn serve_with_peers(dir: &Path, socket: &str, origins: &[&str]) -> PathBuf {
+    let journal = HostStore::open(&dir.join("journal.log")).unwrap();
+    let peers = origins
+        .iter()
+        .map(|origin| (origin.to_string(), HostStore::open(&dir.join(format!("peer-{origin}.log"))).unwrap()))
+        .collect();
+    let stores = HostStores::new(journal, peers);
+    assert_eq!(stores.origins(), origins.to_vec());
+    let path = dir.join(socket);
+    let listener = UnixListener::bind(&path).unwrap();
+    thread::spawn(move || host_journal::serve(listener, stores, Duration::from_secs(5)));
+    path
+}
+
+#[test]
+fn the_host_keeps_one_log_per_peer_region_on_the_same_port() {
+    assert_eq!(REQUEST_PEER, 3);
+    assert_eq!(peer_log_file(US), "/var/lib/seal/peer-us-east-1.log");
+    assert_eq!(peer_log_file(AP), "/var/lib/seal/peer-ap-southeast-1.log");
+    // Building the parent's client of a peer log opens nothing.
+    let _ = HostJournal::parent_peer(US);
+
+    let dir = scratch("peers");
+    let socket = serve_with_peers(&dir, "s", &[US, AP]);
+    let mut own = client(&socket);
+    let mut us = client(&socket).peer_log(US);
+    let mut ap = client(&socket).peer_log(AP);
+    own.append(1, b"own record").unwrap();
+    us.append(1, b"us record one").unwrap();
+    us.append(2, b"us record two").unwrap();
+    // Each log has its own counters and the store's checks.
+    assert!(matches!(ap.append(2, b"skips one"), Err(SealError::Journal(_))));
+    assert!(matches!(ap.append(1, &record(1, 4097)), Err(SealError::Journal(_))));
+    ap.append(1, b"ap record one").unwrap();
+    assert_eq!(own.read_all().unwrap(), vec![(1, b"own record".to_vec())]);
+    assert_eq!(us.read_all().unwrap(), vec![(1, b"us record one".to_vec()), (2, b"us record two".to_vec())]);
+    assert_eq!(ap.read_all().unwrap(), vec![(1, b"ap record one".to_vec())]);
+
+    // A region the host was given no file for is refused, either way.
+    let mut eu = client(&socket).peer_log(EU);
+    assert!(matches!(eu.read_all(), Err(SealError::Journal(_))));
+    assert!(matches!(eu.append(1, b"nowhere"), Err(SealError::Journal(_))));
+
+    // The wire: REQUEST_PEER || origin length || origin || the request.
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write_frame(&mut stream, &peer_request(US, &[REQUEST_READ_ALL])).unwrap();
+    assert_eq!(read_frame(&mut stream).unwrap(), [&[ANSWER_RECORD][..], &1u64.to_be_bytes(), b"us record one"].concat());
+    assert_eq!(read_frame(&mut stream).unwrap(), [&[ANSWER_RECORD][..], &2u64.to_be_bytes(), b"us record two"].concat());
+    assert_eq!(read_frame(&mut stream).unwrap(), [&[ANSWER_OK][..], &2u64.to_be_bytes()].concat());
+    for bad in [vec![REQUEST_PEER], vec![REQUEST_PEER, 200, b'u'], peer_request("sa-east-1", &[REQUEST_READ_ALL])] {
+        write_frame(&mut stream, &bad).unwrap();
+        assert_eq!(read_frame(&mut stream).unwrap()[0], ANSWER_REFUSED);
+    }
+    drop(stream);
+
+    // Each in its own file, which reopens with what was answered ok.
+    assert_eq!(HostStore::open(&dir.join("journal.log")).unwrap().records().len(), 1);
+    assert_eq!(HostStore::open(&dir.join("peer-us-east-1.log")).unwrap().records().len(), 2);
+    assert_eq!(HostStore::open(&dir.join("peer-ap-southeast-1.log")).unwrap().records().len(), 1);
+    assert!(!dir.join("peer-eu-central-1.log").exists());
+}
+
+/// A peer region's enclave in this process: its answers over its logs.
+struct InProcess(Arc<PeerLogs>);
+
+impl PeerLink for InProcess {
+    fn exchange(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.0.answer(&support::master(), request)
+    }
+}
+
+/// A random source for an anchor (test only).
+struct Counting(u64);
+
+impl ghost_seal::SealRandom for Counting {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), SealError> {
+        for chunk in out.chunks_mut(32) {
+            self.0 += 1;
+            let block = ghost_seal::primitives::sha3_256(&[b"host journal anchor test", &self.0.to_be_bytes()]);
+            chunk.copy_from_slice(&block[..chunk.len()]);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_peer_enclave_keeps_another_regions_log_on_its_host_and_a_replaced_host_restores_from_it() {
+    // eu-central-1's host keeps the log of us-east-1 for its enclave.
+    let dir = scratch("peer-enclave");
+    let socket = serve_with_peers(&dir, "s", &[US, AP]);
+    let peer = |socket: &Path| -> Arc<PeerLogs> {
+        let stores: Vec<(String, Box<dyn LogStore>)> = vec![
+            (US.to_string(), Box::new(client(socket).peer_log(US))),
+            (AP.to_string(), Box::new(client(socket).peer_log(AP))),
+        ];
+        Arc::new(PeerLogs::new(EU, stores))
+    };
+    let eu = peer(&socket);
+    let anchor = |logs: &Arc<PeerLogs>, seed: u64| {
+        let peers = vec![Peer { region: EU.into(), link: Arc::new(InProcess(Arc::clone(logs))) as Arc<dyn PeerLink> }];
+        Anchor::with_random(US, peers, Box::new(Counting(seed << 32)))
+    };
+
+    // us-east-1 writes four records; each reaches eu-central-1's host.
+    let us_store = MemoryLogStore::new();
+    let mut log =
+        JournalLog::open_anchored(&support::master(), Box::new(us_store.clone()), Box::new(Counting(1)), Box::new(anchor(&eu, 1)))
+            .unwrap();
+    log.save(&UID, EntryKind::Fill, b"a fill entry".to_vec()).unwrap();
+    log.save(&UID, EntryKind::Open, b"an open entry".to_vec()).unwrap();
+    log.save(&OTHER, EntryKind::Fill, b"another card".to_vec()).unwrap();
+    log.save(&UID, EntryKind::Fill, b"the fill entry replaced".to_vec()).unwrap();
+    drop(log);
+    let on_disk = HostStore::open(&dir.join("peer-us-east-1.log")).unwrap();
+    assert_eq!(on_disk.records(), us_store.records().as_slice(), "the peer's host holds us-east-1's records as written");
+    assert!(HostStore::open(&dir.join("peer-ap-southeast-1.log")).unwrap().records().is_empty());
+    let bytes = std::fs::read(dir.join("peer-us-east-1.log")).unwrap();
+    for clear in [&b"a fill entry"[..], b"an open entry", b"another card", &UID.0, &OTHER.0] {
+        assert!(!support::contains(&bytes, clear), "the peer log is ciphertext only");
+    }
+
+    // eu-central-1's host and enclave restart on the same files, and
+    // us-east-1's host is replaced: an empty store, restored from the peer.
+    let socket = serve_with_peers(&dir, "second", &[US, AP]);
+    let eu = peer(&socket);
+    let replaced = MemoryLogStore::new();
+    let log =
+        JournalLog::open_anchored(&support::master(), Box::new(replaced.clone()), Box::new(Counting(2)), Box::new(anchor(&eu, 2)))
+            .unwrap();
+    assert_eq!(log.counter(), 4);
+    assert_eq!(replaced.records(), us_store.records());
+    assert_eq!(log.load(&UID, EntryKind::Fill), Some(b"the fill entry replaced".to_vec()));
+    assert_eq!(log.load(&UID, EntryKind::Open), Some(b"an open entry".to_vec()));
+
+    // A peer log the host changed fails the peer's own check: it answers
+    // nothing about it, and the origin's log does not open.
+    let path = dir.join("peer-us-east-1.log");
+    let mut records = HostStore::open(&path).unwrap().records().to_vec();
+    records[1].1[20] ^= 0x01;
+    std::fs::remove_file(&path).unwrap();
+    let mut store = HostStore::open(&path).unwrap();
+    for (counter, record) in &records {
+        store.append(*counter, record).unwrap();
+    }
+    drop(store);
+    let socket = serve_with_peers(&dir, "third", &[US, AP]);
+    let eu = peer(&socket);
+    let empty = MemoryLogStore::new();
+    let refused =
+        JournalLog::open_anchored(&support::master(), Box::new(empty.clone()), Box::new(Counting(3)), Box::new(anchor(&eu, 3)));
+    assert!(refused.is_err());
+    assert!(empty.records().is_empty(), "nothing restored from a log that fails its checks");
 }

@@ -10,12 +10,17 @@
 //!     [--network CHAIN_ID:GENESIS_HEX] [--listen ADDR:PORT]
 //!     [--tls-cert CERT.pem --tls-key KEY.pem] [--idle-ms N]
 //!     [--total-ms N] [--max-sessions N] [--body-ms N]
+//!     [--region ID --regions A,B,C --peer-listen ADDR:PORT
+//!      --peer REGION=ADDR:PORT ...]
 //! ```
 //!
 //! Without the registry, with fewer than two nodes or without the journal
 //! file it refuses to start, with one line; so it does for a journal file
 //! that fails its checks. The journal file (created mode 0600) keeps the
-//! test Seal's journal across restarts.
+//! test Seal's journal across restarts. With `--region` and `--regions` it
+//! runs as one region of several: it serves only the cards whose home is
+//! its region, refusing the others `wrong-region`, and anchors its journal
+//! in the other regions' test servers (one `--peer` each).
 
 use ghost_seal::test_server::{DEV_ENV, Options, StartError, TestSealServer, USAGE, WARNING};
 
@@ -36,5 +41,8 @@ fn main() {
         std::process::exit(2);
     });
     eprintln!("test_seal_server: serving the relay on {}", server.url());
+    if let (Some(regions), Some(peer)) = (server.regions(), server.peer_addr()) {
+        eprintln!("test_seal_server: region {} of {}; peer port {peer}", regions.own(), regions.list().join(","));
+    }
     server.wait();
 }

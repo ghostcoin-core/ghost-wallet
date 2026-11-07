@@ -8,9 +8,30 @@
 //!   Fill, Fill confirmation and Open for phones, and the phone attestation.
 //! - `0x00` (the top byte of a frame length of at most 64 KiB): the framed
 //!   service protocol: kind (1 key-share request, 2 phone attestation with a
-//!   32-byte challenge) || body; the answer is 0 || body, or 1 || why it was
-//!   refused.
+//!   32-byte challenge, 3 a journal head request from a peer region) ||
+//!   body; the answer is 0 || body, or 1 || why it was refused.
 //! - anything else: the connection is closed unanswered.
+//!
+//! **Home region.** With the region list installed ([`ServiceDeps::regions`]),
+//! a Check, Fill, Fill confirmation or Open start of a card whose home is
+//! another region (`journal_anchor`) is answered HTTP 422 `refused` with the
+//! reason `wrong-region` and the home region (`homeRegion`), before any
+//! session: no card command, no journal read or write, no log line
+//! ([`EnclaveService::answer`]). Over TLS the service then reads the HTTP
+//! requests itself (the same limits as `relay_http::serve_http`), so the
+//! refusal comes before the relay's routes.
+//!
+//! **Peer regions.** A kind 3 request is a peer region's append, head or
+//! fetch of its own log, answered from the logs this enclave keeps for the
+//! other regions on its host ([`ServiceDeps::peer_logs`],
+//! `journal_anchor::PeerLogs`), with the M it holds; it needs M only, not
+//! the flows, so two regions starting at once can anchor each other. The
+//! enclave's own log is anchored in its peers through [`ServicePeer`]s (the
+//! parent's vsock ports 5006 and 5007, one per peer): the journal is opened
+//! only once a peer has answered its head, and a journal that cannot be
+//! anchored (no peer answered, a fork, a bad restore) leaves every flow 503
+//! and logs [`ServiceEvent::JournalUnanchored`]; it is tried again like a
+//! journal that could not be read.
 //!
 //! Fail closed: the flows are served only once the enclave holds M **and**
 //! a chain status check, a card registry (loaded) and a durable journal are
@@ -42,10 +63,12 @@
 //! logged.
 
 use core::fmt;
-use std::io::{self, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use zeroize::Zeroizing;
+use serde_json::{Value, json};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::attestation::{AttestationSource, AttestationVerifier};
 use crate::card_keys::CardUid;
@@ -56,15 +79,23 @@ use crate::enclave_tls::EnclaveTls;
 use crate::error::SealError;
 use crate::flows::{Seal, SealConfig};
 use crate::journal::{EntryKind, Journal};
+use crate::journal_anchor::{
+    PEER_DEADLINE, PeerLink, PeerLogs, Regions, SERVICE_KIND, WRONG_REGION_MESSAGE, WRONG_REGION_REASON,
+    is_anchor_error,
+};
 use crate::journal_log::SharedLog;
 use crate::key_maker::CoreKeyMaker;
 use crate::key_share::{self, GiverContext, read_frame, write_frame};
 use crate::measurements::TrustedList;
 use crate::node_rpc::RpcNode;
 use crate::phone_attestation::{self, CHALLENGE_BYTES};
+use crate::proxy::{Connector, DeadlineStream, VsockConnector};
 use crate::registry::CardRegistry;
-use crate::relay::{KeyMakerFactory, PaymentCheckFactory, Relay, RelayLimits, SealFactory};
-use crate::relay_http::{AttestRefused, Flows, PhoneAttester, ReadWrite, Routes};
+use crate::relay::{KeyMakerFactory, PaymentCheckFactory, Relay, RelayLimits, SealFactory, from_hex};
+use crate::relay_http::{
+    AttestRefused, Flows, MAX_BODY_BYTES, MAX_HEAD_BYTES, MAX_HEADERS, PhoneAttester, ReadWrite, Reply, Routes,
+    write_reply,
+};
 use crate::secrets::MasterKey;
 use crate::traits::{ChainCheck, Clock, CoinClaim, PaymentVerdict, PhantomKeyMaker, SystemRandom};
 
@@ -77,6 +108,10 @@ pub const FIRST_BYTE_FRAME: u8 = 0x00;
 pub const KIND_KEY_SHARE: u8 = 1;
 /// A framed phone attestation request (a 32-byte challenge).
 pub const KIND_PHONE_ATTESTATION: u8 = 2;
+/// A framed journal head request from a peer region (`journal_anchor`).
+pub const KIND_JOURNAL_HEAD: u8 = SERVICE_KIND;
+/// The parent instance's context ID, as seen from an enclave.
+const PARENT_CID: u32 = 3;
 /// A framed answer: the body follows.
 pub const ANSWER_OK: u8 = 0;
 /// A framed answer: why it was refused follows.
@@ -233,6 +268,15 @@ pub struct ServiceDeps {
     /// The Phantom Key maker. Without it a Fill is answered `unavailable`
     /// even when the other flows are served.
     pub key_maker: Option<Arc<dyn KeyMakerSource>>,
+    /// The release's ordered region list and this enclave's region in it:
+    /// a card whose home is another region is refused `wrong-region` before
+    /// any session. The enclave program installs it from what is compiled
+    /// into its image; without it no card is pinned to a region.
+    pub regions: Option<Regions>,
+    /// The logs this enclave keeps for the other regions, which answer their
+    /// journal head requests (service request kind 3). Without them a kind 3
+    /// request is refused.
+    pub peer_logs: Option<Arc<PeerLogs>>,
 }
 
 impl ServiceDeps {
@@ -246,6 +290,92 @@ impl ServiceDeps {
     pub fn ready(&self) -> bool {
         self.chain.is_some() && self.registry.as_ref().is_some_and(|r| r.loaded()) && self.journal.is_some()
     }
+}
+
+/// A peer region's enclave, as this enclave reaches it: one framed service
+/// request kind [`KIND_JOURNAL_HEAD`] per exchange, through `connector` (in
+/// the enclave, the parent's outbound proxy on vsock port 5006 or 5007, to
+/// the peer region's inbound proxy), the whole exchange within its deadline.
+pub struct ServicePeer<C: Connector = VsockConnector> {
+    connector: C,
+    deadline: Duration,
+}
+
+impl ServicePeer<VsockConnector> {
+    /// The peer the parent carries vsock `port` to (CID 3), within
+    /// `journal_anchor::PEER_DEADLINE`.
+    pub fn parent(port: u32) -> ServicePeer<VsockConnector> {
+        ServicePeer::new(VsockConnector { cid: PARENT_CID, port }, PEER_DEADLINE)
+    }
+}
+
+impl<C: Connector> ServicePeer<C> {
+    /// The peer `connector` reaches, each exchange limited to `deadline`.
+    pub fn new(connector: C, deadline: Duration) -> ServicePeer<C> {
+        ServicePeer { connector, deadline }
+    }
+}
+
+impl<C: Connector> PeerLink for ServicePeer<C> {
+    fn exchange(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        let stream = self.connector.connect_stream().map_err(|_| "the peer region cannot be reached".to_owned())?;
+        let mut stream = DeadlineStream::new(stream, Instant::now() + self.deadline);
+        let answer = write_frame(&mut stream, &[&[KIND_JOURNAL_HEAD][..], request].concat())
+            .and_then(|()| read_frame(&mut stream));
+        stream.close();
+        let answer = answer.map_err(|_| "the peer region did not answer in time".to_owned())?;
+        match answer.split_first() {
+            Some((&ANSWER_OK, body)) => Ok(body.to_vec()),
+            Some((&ANSWER_REFUSED, why)) => Err(String::from_utf8_lossy(why).into_owned()),
+            _ => Err("the peer region's answer is malformed".to_owned()),
+        }
+    }
+}
+
+/// The flow starts a card's home region alone serves.
+pub const PINNED_PATHS: [&str; 4] = ["/v1/check/start", "/v1/fill/start", "/v1/fill/confirm", "/v1/open/start"];
+
+/// The refusal of a card whose home is region `home`: HTTP 422 `refused`,
+/// reason `wrong-region`, naming the home region.
+pub fn wrong_region_reply(home: &str) -> Reply {
+    let body = json!({
+        "status": "error",
+        "error": "refused",
+        "reason": WRONG_REGION_REASON,
+        "homeRegion": home,
+        "message": WRONG_REGION_MESSAGE,
+    });
+    Reply { status: 422, body: body.to_string() }
+}
+
+/// The refusal of a request that starts a flow (`PINNED_PATHS`) for a card
+/// whose home, under `regions`, is another region; `None` for any other
+/// request, which the routes answer as they would (a malformed one
+/// included). The PIN a body may carry is wiped from the parsed copy.
+pub fn wrong_region(regions: &Regions, method: &str, path: &str, body: &[u8]) -> Option<Reply> {
+    let route = path.split('?').next().unwrap_or("");
+    if method != "POST" || !PINNED_PATHS.contains(&route) || body.len() > MAX_BODY_BYTES {
+        return None;
+    }
+    let mut fields = serde_json::from_slice::<Value>(body).ok()?;
+    let uid = fields
+        .get("uid")
+        .and_then(Value::as_str)
+        .and_then(from_hex)
+        .and_then(|bytes| <[u8; 7]>::try_from(bytes).ok())
+        .map(CardUid);
+    if let Some(Value::String(pin)) = fields.get_mut("pin") {
+        pin.zeroize();
+    }
+    let uid = uid?;
+    (!regions.is_home(&uid)).then(|| wrong_region_reply(regions.home(&uid)))
+}
+
+/// A copy of `master`, for a caller that must not hold the state's lock
+/// while it works (each copy is wiped when dropped).
+fn copy_master(master: &MasterKey) -> MasterKey {
+    let mut bytes = *master.derive_from();
+    MasterKey::take(&mut bytes)
 }
 
 /// The enclave's own attestation: its NSM in a real enclave, a fake in
@@ -279,6 +409,10 @@ pub enum ServiceEvent {
     /// The durable journal could not be opened or verified with M (or a
     /// session's could not be handed out): no flow is served on it.
     JournalRefused,
+    /// The durable journal's head could not be anchored in the peer regions
+    /// (no peer answered, a peer holds a fork, or a restored record failed
+    /// its check): no flow is served; it is tried again.
+    JournalUnanchored,
     /// A key-share request was refused.
     KeyShareRefused,
     /// A connection began with neither a TLS record nor a frame, and was
@@ -298,6 +432,9 @@ impl fmt::Display for ServiceEvent {
             ServiceEvent::JournalRefused => {
                 f.write_str("the durable journal was refused (unreadable, failed its checks or rolled back)")
             }
+            ServiceEvent::JournalUnanchored => f.write_str(
+                "the durable journal could not be anchored in a peer region (none answered, a fork or a bad restore); not answering cards",
+            ),
             ServiceEvent::KeyShareRefused => f.write_str("refused a key-share request"),
             ServiceEvent::UnknownProtocol => f.write_str("closed a connection of no known protocol"),
         }
@@ -463,15 +600,14 @@ impl EnclaveService {
         if routes.serves_flows() {
             return true;
         }
-        let flows = {
-            let held = lock(&self.shared.state);
-            let Some(master) = held.master.as_ref() else { return false };
-            if !self.deps.ready() {
-                return false;
-            }
-            self.flows(master)
-        };
-        let Some(flows) = flows else { return false };
+        // The state's lock is not held while the journal is opened: opening
+        // it may ask the peer regions, whose own requests to this enclave
+        // need M.
+        let Some(master) = lock(&self.shared.state).master.as_ref().map(copy_master) else { return false };
+        if !self.deps.ready() {
+            return false;
+        }
+        let Some(flows) = self.flows(&master) else { return false };
         *routes = Arc::new(Routes::new(Some(flows), Some(Arc::new(Attester(Arc::clone(&self.shared))))));
         self.shared.log.record(ServiceEvent::FlowsServed);
         true
@@ -486,11 +622,14 @@ impl EnclaveService {
     /// serving the flows with Seals holding it.
     pub fn install_master(&self, master: MasterKey) {
         let answer_key = phone_attestation::answer_key(&master);
-        let flows = self.deps.ready().then(|| self.flows(&master)).flatten();
-        let serves_flows = flows.is_some();
-        let routes = Routes::new(flows, Some(Arc::new(Attester(Arc::clone(&self.shared)))));
+        // M is held first, so the peer regions this enclave's journal asks
+        // while it opens are answered theirs.
+        let held = copy_master(&master);
         *lock(&self.shared.answer_key) = Some(answer_key);
         lock(&self.shared.state).master = Some(master);
+        let flows = self.deps.ready().then(|| self.flows(&held)).flatten();
+        let serves_flows = flows.is_some();
+        let routes = Routes::new(flows, Some(Arc::new(Attester(Arc::clone(&self.shared)))));
         *lock(&self.routes) = Arc::new(routes);
         self.shared.log.record(ServiceEvent::MasterInstalled { serves_flows });
     }
@@ -505,8 +644,12 @@ impl EnclaveService {
         // Opens and verifies the journal once, with the M just installed. A
         // journal that fails leaves every flow unserved (HTTP 503); the next
         // `refresh_flows` tries again.
-        if journal.journal(master).is_err() {
-            self.shared.log.record(ServiceEvent::JournalRefused);
+        if let Err(error) = journal.journal(master) {
+            self.shared.log.record(if is_anchor_error(&error) {
+                ServiceEvent::JournalUnanchored
+            } else {
+                ServiceEvent::JournalRefused
+            });
             return None;
         }
         let log = Arc::clone(&self.shared.log);
@@ -562,12 +705,97 @@ impl EnclaveService {
         }
         let mut stream = Prefixed { first: Some(first[0]), inner: stream };
         match first[0] {
+            FIRST_BYTE_TLS if self.deps.regions.is_some() => self.serve_tls_pinned(&mut stream),
             FIRST_BYTE_TLS => {
                 let routes = self.routes();
                 self.tls.serve(&mut stream, &routes);
             }
             FIRST_BYTE_FRAME => self.serve_frames(&mut stream),
             _ => self.shared.log.record(ServiceEvent::UnknownProtocol),
+        }
+    }
+
+    /// The answer to one HTTP request: a flow start for a card whose home is
+    /// another region is refused `wrong-region` before anything else
+    /// ([`wrong_region`]); every other request is the routes' to answer.
+    pub fn answer(&self, method: &str, path: &str, body: &[u8]) -> Reply {
+        if let Some(regions) = &self.deps.regions
+            && let Some(refused) = wrong_region(regions, method, path, body)
+        {
+            return refused;
+        }
+        self.routes().answer(method, path, body)
+    }
+
+    /// Ends TLS on `stream` and serves its HTTP requests through
+    /// [`EnclaveService::answer`], as `EnclaveTls::serve` serves the routes.
+    fn serve_tls_pinned(&self, stream: &mut dyn ReadWrite) {
+        let Ok(mut connection) = rustls::ServerConnection::new(self.tls.config()) else {
+            return;
+        };
+        {
+            let mut io: &mut dyn ReadWrite = &mut *stream;
+            let mut tls = rustls::Stream::new(&mut connection, &mut io);
+            let mut buffer: Vec<u8> = Vec::with_capacity(READ_CHUNK_BYTES);
+            self.serve_requests(&mut tls, &mut buffer);
+            buffer.zeroize();
+        }
+        connection.send_close_notify();
+        while connection.wants_write() {
+            if connection.write_tls(&mut *stream).is_err() {
+                break;
+            }
+        }
+        let _ = stream.flush();
+    }
+
+    /// HTTP/1.1 requests on `stream`, with the limits and answers of
+    /// `relay_http::serve_http`, each answered by [`EnclaveService::answer`].
+    fn serve_requests(&self, stream: &mut dyn ReadWrite, buffer: &mut Vec<u8>) {
+        let bad = |why: &str| Reply { status: 400, body: json!({ "status": "error", "error": "bad-request", "message": why }).to_string() };
+        loop {
+            let end = loop {
+                if let Some(end) = head_end(buffer) {
+                    break end;
+                }
+                if buffer.len() > MAX_HEAD_BYTES {
+                    let _ = write_reply(stream, &bad("the request head is too large"), true);
+                    return;
+                }
+                if !read_more(stream, buffer) {
+                    return;
+                }
+            };
+            if end > MAX_HEAD_BYTES {
+                let _ = write_reply(stream, &bad("the request head is too large"), true);
+                return;
+            }
+            let head = match parse_head(&buffer[..end]) {
+                Ok(head) => head,
+                Err(why) => {
+                    let _ = write_reply(stream, &bad(why), true);
+                    return;
+                }
+            };
+            if head.content_length > MAX_BODY_BYTES {
+                // Answered unread: the routes refuse it by its path, method
+                // or size.
+                let reply = self.answer(&head.method, &head.path, &[0u8; MAX_BODY_BYTES + 1]);
+                let _ = write_reply(stream, &reply, true);
+                return;
+            }
+            let whole = end + head.content_length;
+            while buffer.len() < whole {
+                if !read_more(stream, buffer) {
+                    return;
+                }
+            }
+            let reply = self.answer(&head.method, &head.path, &buffer[end..whole]);
+            buffer[..whole].zeroize();
+            buffer.drain(..whole);
+            if write_reply(stream, &reply, head.close).is_err() || head.close {
+                return;
+            }
         }
     }
 
@@ -595,6 +823,13 @@ impl EnclaveService {
                     AttestRefused::NotReady => "this enclave holds no M yet".to_owned(),
                     AttestRefused::Failed => "no attestation could be made".to_owned(),
                 })
+            }
+            KIND_JOURNAL_HEAD => {
+                let logs = self.deps.peer_logs.as_ref().ok_or("this enclave keeps no peer logs")?;
+                // A copy of M, so the state's lock is not held while the
+                // host's store is asked.
+                let master = lock(&self.shared.state).master.as_ref().map(copy_master);
+                logs.answer(&master.ok_or("this enclave holds no M yet")?, body)
             }
             _ => Err("unknown request".into()),
         }
@@ -626,6 +861,78 @@ impl EnclaveService {
                 self.shared.log.record(ServiceEvent::KeyShareRefused);
                 Err(why.to_string())
             }
+        }
+    }
+}
+
+/// How much is read from the stream at once.
+const READ_CHUNK_BYTES: usize = 2048;
+
+/// What the head of one request says.
+struct Head {
+    method: String,
+    path: String,
+    content_length: usize,
+    close: bool,
+}
+
+/// The head of one request, as `relay_http` reads it: one content length
+/// of at most ten digits, given once or the same each time, no transfer
+/// encoding, HTTP/1.0 or `Connection: close` closing after the answer.
+fn parse_head(bytes: &[u8]) -> Result<Head, &'static str> {
+    let malformed = "the request head is malformed";
+    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
+    let mut request = httparse::Request::new(&mut headers);
+    match request.parse(bytes) {
+        Ok(httparse::Status::Complete(length)) if length == bytes.len() => {}
+        _ => return Err(malformed),
+    }
+    let (Some(method), Some(path), Some(version)) = (request.method, request.path, request.version) else {
+        return Err(malformed);
+    };
+    let mut content_length = None;
+    let mut close = version != 1;
+    for header in request.headers.iter() {
+        if header.name.eq_ignore_ascii_case("content-length") {
+            let value = std::str::from_utf8(header.value).map(str::trim).unwrap_or("");
+            let parsed = (!value.is_empty() && value.len() <= 10 && value.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| value.parse::<usize>().ok())
+                .flatten()
+                .ok_or("the content length is malformed")?;
+            if content_length.is_some_and(|seen| seen != parsed) {
+                return Err("the content length is given twice");
+            }
+            content_length = Some(parsed);
+        } else if header.name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err("only bodies with a content length are taken");
+        } else if header.name.eq_ignore_ascii_case("connection") {
+            let value = std::str::from_utf8(header.value).unwrap_or("");
+            if value.split(',').any(|token| token.trim().eq_ignore_ascii_case("close")) {
+                close = true;
+            }
+        }
+    }
+    Ok(Head { method: method.to_owned(), path: path.to_owned(), content_length: content_length.unwrap_or(0), close })
+}
+
+fn head_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n").map(|at| at + 4)
+}
+
+/// Reads more of `stream` into `buffer`; `false` when the stream ended or
+/// failed (its deadline included). The chunk read is wiped.
+fn read_more(stream: &mut dyn Read, buffer: &mut Vec<u8>) -> bool {
+    let mut chunk = [0u8; READ_CHUNK_BYTES];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return false,
+            Ok(n) => {
+                buffer.extend_from_slice(&chunk[..n]);
+                chunk[..n].zeroize();
+                return true;
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return false,
         }
     }
 }

@@ -185,10 +185,12 @@ is refused.
   the Seal; there is no function that exports it or backs it up.
 - **The journal store**: it must keep entries durably. It sees only sealed
   bytes, and a store that changes, drops, repeats or reorders records, or
-  rolls the log back while the Seal runs, is caught and refused. But it can
-  delete the log, or cut its tail while the Seal is stopped (the shorter log
-  still verifies at the next start), and deleting an Open entry after the
-  key slot was wiped would lose that key.
+  rolls the log back while the Seal runs, is caught and refused. A log
+  deleted, or cut while the Seal is stopped, is restored from a peer region
+  at the next start ("Journal"). What is still trusted: that the hosts of
+  every region do not cut or delete the log at once, and that not every
+  region is lost at once; and that a peer region is reachable, or no Fill or
+  Open is served.
 - **The chain nodes**: that the nodes of the release node list do not all
   lie the same way at once. One node that is wrong, behind or unreachable
   only stops the answer.
@@ -226,12 +228,18 @@ Next:
 
 - Key 3 is kept for SUN messages, so a Check can also prove the tap is live.
 - Rate-limit Opens and Checks per card in the Seal.
-- The sealed journal log replicated to the other regions, with rollback
-  protection: its head (last counter and tag) kept where the host cannot
-  touch it, so a host that cuts the tail of the log while the enclave is
-  stopped is caught at the next start (today only a cut while it runs is),
-  and a journal that survives the host instance being replaced. Each region
-  keeps its own log for now.
+- The app and DNS sending each card to its home region (today a Seal that is
+  not the card's home refuses it `wrong-region`, naming the home).
+- Fill and Open while one peer region is down: today every save waits for
+  both peers (the conservative choice), so a region down stops Fills and
+  Opens elsewhere until it is back or replaced.
+
+In place since the journal's head is anchored in the other regions: a host
+that cuts the tail of the log while the enclave is stopped is caught at the
+next start and the cut records restored from a peer; a journal that
+survives the host instance being replaced (restored from a peer); and each
+card served by one home region, so an Open begun in one region is never
+finished, or certified Sealed, by another ("Journal", "Home region").
 
 ## Card keys
 
@@ -466,13 +474,68 @@ only: no UID, entry kind, card data or key, and never M. A record is at most
 - One log per Seal, behind one lock, shared by every session, so counters
   never collide.
 
-What it does not catch: a host that cuts the tail of the log while the Seal
-is stopped, then starts it, shows it a shorter log that is still valid; the
-checks cannot see records that were never shown to it. A cut while the Seal
-runs is caught. Closing that needs the log's head kept where the host cannot
-touch it (the other regions): "Next" above. The log is not compacted, and
-it survives the enclave and the host restarting, not the host instance
-being replaced.
+The host's log alone cannot show a cut made while the Seal is stopped (the
+shorter log is still valid) or a host replaced by one with an empty log. So
+the log's head is anchored in the other regions (`seal/src/journal_anchor.rs`):
+
+- **Peers.** Each other region's enclave is a peer. It keeps a copy of this
+  region's log, ciphertext only, in a log per origin region on its own host
+  (`/var/lib/seal/peer-<region>.log`, the same store and checks, the same
+  vsock port 5005). It checks each record with M before it keeps it: the
+  next counter, a good tag chained to the last record it holds, and that it
+  decodes. A peer never holds a UID, an entry kind, card data, a key or M in
+  the clear.
+- **Save.** After the host's append is durable, the record goes to every
+  peer (service request kind 3 over the service port, through the parent's
+  vsock ports 5006 and 5007 and the host's proxy to the peer region's
+  inbound proxy, 10 seconds each). The save is `Ok`, and a card changed,
+  only once every peer answered a head that holds it. A peer that is
+  unreachable or refuses fails the save: the card is unchanged, and the
+  record is held back (not loaded) until a later save has every peer take
+  it; a host that then drops it is a rollback. A peer that missed records
+  while it was down is sent them first.
+- **Start.** Once M is installed and before the log is used, the enclave
+  asks every peer for its head of this region's log with a fresh 32-byte
+  nonce. Unless at least one peer answers, it serves no flow (HTTP 503, the
+  fixed event `the durable journal could not be anchored`, tried again
+  every minute). A peer ahead of the host's log (a cut tail), or holding
+  records while the host's log is empty (a replaced host), has the missing
+  records fetched, each checked with M onto the host's chain and appended to
+  the host's store, before anything is served. A peer head with the same
+  counter and another tag (a fork), a restored record that fails its check,
+  or a restore that does not end on the peer's head, is a refusal.
+- **Heads.** Every answer about a head is counter (u64) || tag || HMAC-SHA3-256
+  under the head key (HKDF(M), label `ghost-seal/v1/journal-head`, salt and
+  info) over `ghost-seal/v1/journal-head` || origin length (1) || origin ||
+  counter || tag || the asker's nonce. Every holder of M is an enclave
+  attested when M was handed over, so a good MAC is a peer enclave's answer,
+  and the fresh nonce means an old answer is never taken again. No
+  signature crate is needed.
+- Because a save reaches every peer and a start needs one, a start always
+  meets a peer that holds the last acknowledged record.
+
+What it does not catch: every region lost at once, or the hosts of every
+region cutting the log at once (no copy is left to restore from). The cost is
+availability: Fill and Open wait while a peer region is down. The log is not
+compacted; it survives the enclave and the host restarting and the host
+instance being replaced.
+
+### Home region
+
+Each card is served by one region only, its home: of the release's ordered
+region list (compiled into the image, `RELEASE_REGIONS`: `us-east-1`,
+`eu-central-1`, `ap-southeast-1`), the region id whose
+SHA3-256(`ghost-seal/v1/home-region` || region id || UID) is the greatest,
+compared as big-endian bytes (on a tie, the earlier region). Each enclave's
+own region id is compiled into its image too (`SEAL_REGION` at build time),
+never taken from the host. A Check, Fill, Fill confirmation or Open start of
+a card whose home is another region is refused HTTP 422 with the reason
+`wrong-region` and the home region in `homeRegion` (`docs/seal-relay.md`),
+before any session: no card command, no journal read or write, no log line.
+Check is pinned too: a region that never saw an Open would certify a card
+Sealed. Fixed vectors are in `seal/tests/vectors/home-region.json`. The list
+is fixed per release; changing it moves cards, so every Fill and Open is
+finished first (`enclave/RUNBOOK.md`).
 
 ## Every derivation label
 
@@ -483,6 +546,8 @@ being replaced.
 | `ghost-seal/v1/open-pin` | the key of the Open PIN hash (info: label, UID, generation); the hash is HMAC-SHA3-256 over the label and the PIN, first 16 bytes |
 | `ghost-seal/v1/journal` | the journal's AES-256 and HMAC keys |
 | `ghost-seal/v1/host-journal` | the journal log's AES-256 and HMAC keys (salt and info), and the first part of each record's tag |
+| `ghost-seal/v1/journal-head` | the head key a peer region MACs its answers about a log's head with (salt and info), and the first part of each head MAC |
+| `ghost-seal/v1/home-region` | not a key: the first part of the hash that picks a card's home region |
 | `ghost-seal/v1/open-release` | the release's AES-256 and HMAC keys, from the ML-KEM shared secret |
 | `ghost-seal/v1/record-check` | the check of each record frame |
 | `ghost-seal/v1/phone-key` | the hash of a bound phone key |
