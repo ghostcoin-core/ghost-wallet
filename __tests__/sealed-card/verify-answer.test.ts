@@ -52,9 +52,10 @@ beforeEach(() => {
 });
 
 describe('the pinned measurements', () => {
-  it('pins no Seal today, so every Seal is refused', () => {
-    expect(PINNED_MEASUREMENTS.builds).toEqual([]);
-    expect(pinnedAnswerMeasurements()).toEqual([]);
+  it("pins the PCR0 of each of the live Seal's builds, and not the fake Seal's", () => {
+    expect(pinnedAnswerMeasurements().map(hexOf)).toEqual(PINNED_MEASUREMENTS.builds.map((b) => b.pcr0));
+    expect(pinnedAnswerMeasurements()).toHaveLength(3);
+    expect(pinnedAnswerMeasurements().map(hexOf)).not.toContain(FAKE_MEASUREMENT_HEX);
   });
 
   it('pins the PCR0 of each allowed build, and never a revoked one', () => {
@@ -277,7 +278,7 @@ describe('the card status of a Check', () => {
     }
   });
 
-  it('is "Can\'t verify this card" for a perfectly signed answer while the pinned list is empty', async () => {
+  it('is "Can\'t verify this card" for a perfectly signed answer from a Seal the app\'s list does not pin', async () => {
     expect(await checked((w) => void w.sealedCard(5n * GHOST), PINNED_MEASUREMENTS)).toEqual({ kind: 'cant-verify' });
   });
 

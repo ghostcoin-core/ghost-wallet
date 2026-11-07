@@ -71,8 +71,21 @@ describe('the pinned measurements', () => {
     expect(checkMeasurements(parsed, { pcr0: 'a1', pcr1: hex('b1'), pcr2: hex('c1') })).toEqual({ ok: false, reason: 'malformed' });
   });
 
-  it('pins no build until the first one is published, so every Seal is refused', () => {
-    expect(PINNED_MEASUREMENTS.builds).toEqual([]);
+  it("pins the live Seal's three builds, and refuses any other Seal", () => {
+    expect(PINNED_MEASUREMENTS.builds.map((b) => [b.name, b.released, b.status])).toEqual([
+      ['seal-2026-11-07c-us-east-1', '2026-11-07', 'allowed'],
+      ['seal-2026-11-07c-eu-central-1', '2026-11-07', 'allowed'],
+      ['seal-2026-11-07c-ap-southeast-1', '2026-11-07', 'allowed'],
+    ]);
+    for (const build of PINNED_MEASUREMENTS.builds) {
+      expect(checkMeasurements(PINNED_MEASUREMENTS, build)).toEqual({ ok: true, build });
+    }
+    const [first, second] = PINNED_MEASUREMENTS.builds;
+    // A mix of two builds' PCRs is no build.
+    expect(checkMeasurements(PINNED_MEASUREMENTS, { pcr0: first.pcr0, pcr1: first.pcr1, pcr2: second.pcr2 })).toEqual({
+      ok: false,
+      reason: 'not-listed',
+    });
     expect(checkMeasurements(PINNED_MEASUREMENTS, { pcr0: hex('a1'), pcr1: hex('b1'), pcr2: hex('c1') })).toEqual({
       ok: false,
       reason: 'not-listed',

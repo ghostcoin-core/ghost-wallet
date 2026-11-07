@@ -1,22 +1,36 @@
 // Each Sealed card is served by one home region (docs/sealed-card.md, "Home
 // region"), and the app reaches it: the list of live regions is in
-// lib/seal/seal-config.ts (empty until the deploy fills it in), the native
+// lib/seal/seal-config.ts (the live Seal's regions), the native
 // relay chooses the card's home region with the native core's rule once the
 // UID is read (core/src/seal_home_region.rs, tested against the Seal's
 // vectors in core/tests/seal_home_region.rs), and JavaScript never chooses a
 // region and has no hash code of its own.
 //
-// Here: the committed list is empty, and with it empty no card flow fetches,
-// opens a card sheet or relays anything; and the Swift relay and the bridge,
-// read as text (they cannot run here), call the home rule over the whole
-// list, send one start request per tap, never try another region after a
-// refusal, and never log.
+// Here: the committed list is the live Seal's three regions in its release
+// order; with no region no card flow fetches, opens a card sheet or relays
+// anything, and with the live list but no attestation that checks no card
+// flow opens a card sheet or relays anything either; and the Swift relay and
+// the bridge, read as text (they cannot run here), call the home rule over
+// the whole list, send one start request per tap, never try another region
+// after a refusal, and never log.
 import * as fs from 'fs';
 import * as path from 'path';
 
 import { checkCard, confirmFill, fillCard, openCard, sealDeps } from '../../lib/seal/flows';
-import { SEAL_REGIONS } from '../../lib/seal/seal-config';
+import type { SealRegion } from '../../lib/seal/seal-config';
 import { forgetTrustedSeals, refreshTrustedSeals } from '../../lib/seal/trusted-seal';
+
+// The region list the card flows see: the committed one unless a test sets another.
+const mockRegions: { list: readonly SealRegion[] | null } = { list: null };
+jest.mock('../../lib/seal/seal-config', () => {
+  const actual = jest.requireActual('../../lib/seal/seal-config');
+  return {
+    get SEAL_REGIONS() {
+      return mockRegions.list ?? actual.SEAL_REGIONS;
+    },
+  };
+});
+const COMMITTED: readonly SealRegion[] = jest.requireActual('../../lib/seal/seal-config').SEAL_REGIONS;
 
 const mockCalls: { native: string[]; core: string[] } = { native: [], core: [] };
 
@@ -87,17 +101,20 @@ const LOGGING = /\bprint\s*\(|\bNSLog\b|\bos_log\b|\bLogger\s*\(|\bdebugPrint\s*
 
 beforeEach(() => {
   forgetTrustedSeals();
+  mockRegions.list = null;
   mockCalls.native.length = 0;
   mockCalls.core.length = 0;
   mockFiles.clear();
 });
 
 describe('the committed region list', () => {
-  it('is empty: the live ids and addresses come from the deploy', () => {
-    expect(SEAL_REGIONS).toEqual([]);
+  it("is the live Seal's three regions, in its release order, each at its https address", () => {
+    expect(COMMITTED.map((r) => r.id)).toEqual(['us-east-1', 'eu-central-1', 'ap-southeast-1']);
+    for (const region of COMMITTED) {
+      expect(new URL(region.url).protocol).toBe('https:');
+    }
     const source = read('lib', 'seal', 'seal-config.ts');
-    expect(source).toMatch(/export const SEAL_REGIONS: readonly SealRegion\[\] = \[\];/);
-    expect(source).not.toMatch(/https?:\/\/[a-z0-9]/i);
+    expect(source).not.toMatch(/http:\/\//i);
     // The one address there was is gone, and nothing reads it.
     expect(source).not.toMatch(/SEAL_URL/);
     for (const file of ['flows.ts', 'seal-attestation.ts', 'trusted-seal.ts']) {
@@ -106,8 +123,27 @@ describe('the committed region list', () => {
   });
 });
 
+const RELAY = /^(relayCheck|relayFill|relayFillConfirm|relayOpen|beginSession|transceive)$/;
+
+describe('with the live regions but no attestation that checks', () => {
+  it('every card flow gives "Can\'t verify this card" and relays nothing, opening no card sheet', async () => {
+    expect(await checkCard(sealDeps())).toEqual({ kind: 'cant-verify' });
+    expect(await fillCard(sealDeps(), 10n ** 18n, null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
+    expect(await confirmFill(sealDeps())).toEqual({ kind: 'cant-verify' });
+    expect(await openCard(sealDeps(), null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
+    // The flows asked each live region for its attestation, and nothing else.
+    expect(mockCalls.native).toContain('fetchSealAttestation');
+    expect(mockCalls.native.filter((name) => RELAY.test(name))).toEqual([]);
+    expect(mockFiles.size).toBe(0);
+  });
+});
+
 describe('with no region', () => {
   const RELAY_OR_FETCH = /^(fetchSealAttestation|setSealPin|relayCheck|relayFill|relayFillConfirm|relayOpen|beginSession|transceive)$/;
+
+  beforeEach(() => {
+    mockRegions.list = [];
+  });
 
   it('every card flow gives "Can\'t verify this card", fetching nothing and opening no card sheet', async () => {
     expect(await checkCard(sealDeps())).toEqual({ kind: 'cant-verify' });
