@@ -3,7 +3,9 @@
 //! enclave; it has no networking and no cloud code. Everything it needs from
 //! outside (randomness, the clock, the card transport the phone relays, the
 //! chain nodes, the wallet core's Phantom Key derivation and the journal
-//! store) comes in through a trait. The chain check (`chain_check`) reuses
+//! store) comes in through a trait. The Phantom Key maker (`key_maker`,
+//! `CoreKeyMaker`) is the wallet core's own derivation, drawing its
+//! randomness from the Seal's source. The chain check (`chain_check`) reuses
 //! the wallet core's coin-tree check, coin leaf code and settlement depth.
 //! `Seal::new` is the only way to build a Seal, and it takes the chain
 //! status check and the card registry (`registry`): no Seal answers Sealed
@@ -61,6 +63,7 @@ pub mod flows;
 pub mod host_journal;
 pub mod journal;
 pub mod journal_log;
+pub mod key_maker;
 #[cfg(feature = "nitro")]
 pub mod key_share;
 pub mod link;
@@ -97,6 +100,7 @@ pub use error::SealError;
 pub use flows::{CheckRequest, FillOutcome, FillRequest, OpenOutcome, OpenRequest, Seal, SealConfig};
 pub use journal::{EntryKind, Journal, MemoryJournal};
 pub use journal_log::{JournalLog, LogStore, MemoryLogStore, SharedLog};
+pub use key_maker::CoreKeyMaker;
 pub use record::CardState;
 pub use node_list::{NodeEntry, NodeList};
 pub use registry::{CardRegistry, FileRegistry, LoadedRegistry, MemoryRegistry, RegistryEntry};

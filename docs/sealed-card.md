@@ -90,6 +90,19 @@ commit data (from the journal), never a new key, so a Vanish sent for a lost
 answer is never stranded. A Fill with another amount or PIN is refused until
 the waiting one is paid.
 
+The key of step 5 is made inside the Seal, in the enclave, by
+`CoreKeyMaker` (`seal/src/key_maker.rs`): 32 fresh bytes from the Seal's
+random source (the enclave's `getrandom`) are the key's secret, its bytes
+are the core's (`0x20`, then the 32 bytes, as the key slot and an Open
+release hold them), and its coin is the core's coin commit number 0 for the
+chain the chain check follows, its salt and note nonce from the same draw.
+No elliptic-curve key is involved. The key exists in enclave memory only
+from the maker's `make` until the key slot is written and read back (step
+7): the Seal then wipes it, and keeps no copy. The Seal never makes its
+24 words, and the key appears in no answer, no log line and no journal plaintext:
+the journal holds only the coin's public commit data and spend marker. The
+card is its only copy until an Open releases it, encrypted, to the phone.
+
 ### Check
 
 1. Read the version of key 1: the generation of the check key.

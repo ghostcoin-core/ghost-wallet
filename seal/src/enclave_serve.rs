@@ -22,10 +22,12 @@
 //!
 //! The enclave program installs the chain status check over the release
 //! node list ([`NodeChainStatus`]), the registry the host loads
-//! (`LoadedRegistry`) and the durable journal: the append-only sealed log
+//! (`LoadedRegistry`), the durable journal: the append-only sealed log
 //! (`journal_log::SharedLog`) over the parent's store
-//! (`host_journal::HostJournal`). When the first registry load arrives
-//! after M, [`EnclaveService::refresh_flows`] rebuilds the routes.
+//! (`host_journal::HostJournal`), and the Phantom Key maker a Fill needs
+//! ([`CoreKeyMakerSource`], the wallet core's derivation, on the network the
+//! chain check follows). When the first registry load arrives after M,
+//! [`EnclaveService::refresh_flows`] rebuilds the routes.
 //!
 //! The journal is opened and verified once, with the M just installed
 //! ([`DurableJournal::journal`]). A journal that cannot be read, fails its
@@ -55,6 +57,7 @@ use crate::error::SealError;
 use crate::flows::{Seal, SealConfig};
 use crate::journal::{EntryKind, Journal};
 use crate::journal_log::SharedLog;
+use crate::key_maker::CoreKeyMaker;
 use crate::key_share::{self, GiverContext, read_frame, write_frame};
 use crate::measurements::TrustedList;
 use crate::node_rpc::RpcNode;
@@ -199,12 +202,26 @@ pub trait KeyMakerSource: Send + Sync {
     fn key_maker(&self) -> Box<dyn PhantomKeyMaker>;
 }
 
+/// The enclave's Phantom Key maker: a fresh [`CoreKeyMaker`] for each Fill,
+/// making coins on `chain_id`, the network the chain check follows. It
+/// draws from the session Seal's random source (the enclave's `getrandom`).
+#[derive(Clone, Copy)]
+pub struct CoreKeyMakerSource {
+    /// The chain the coins are made for.
+    pub chain_id: u64,
+}
+
+impl KeyMakerSource for CoreKeyMakerSource {
+    fn key_maker(&self) -> Box<dyn PhantomKeyMaker> {
+        Box::new(CoreKeyMaker::new(self.chain_id))
+    }
+}
+
 /// What the enclave must be given before it may answer a card. The enclave
-/// program installs the chain status check, the registry and the durable
-/// journal (the sealed log over the parent's store); until the journal has
-/// been opened and verified with M it still answers every flow request
-/// `unavailable`. It installs no key maker yet, so a Fill stays
-/// `unavailable`.
+/// program installs the chain status check, the registry, the durable
+/// journal (the sealed log over the parent's store) and the Phantom Key
+/// maker ([`CoreKeyMakerSource`]); until the journal has been opened and
+/// verified with M it still answers every flow request `unavailable`.
 #[derive(Clone, Default)]
 pub struct ServiceDeps {
     /// The chain status check.

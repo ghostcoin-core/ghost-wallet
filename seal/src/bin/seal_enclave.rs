@@ -53,10 +53,14 @@
 //!   log and checks every counter and tag; a log that cannot be read or
 //!   fails a check leaves every flow `unavailable` and logs a fixed event,
 //!   and it is tried again every [`JOURNAL_RETRY`] and at each registry
-//!   load. With the chain check, the loaded registry and the journal, Check,
-//!   Fill confirmation and Open are served.
-//! - It installs no `KeyMakerSource` yet, which a Fill needs: a Fill is
-//!   still answered `unavailable`.
+//!   load.
+//! - It installs the Phantom Key maker a Fill needs: the wallet core's
+//!   derivation (`ghost_seal::enclave_serve::CoreKeyMakerSource`, a fresh
+//!   `CoreKeyMaker` per Fill) on the chain of the release network, the one
+//!   the chain check follows. Each key is made inside the enclave from its
+//!   `getrandom`, held only until it is written to the card, and is never
+//!   logged. With the chain check, the loaded registry, the journal and the
+//!   key maker, Check, Fill, Fill confirmation and Open are served.
 //! - The journal does not see a host that cuts the tail of the log while
 //!   the enclave is stopped: the shorter log is still valid at the next
 //!   start. Keeping the log's head where the host cannot reach it is not
@@ -86,8 +90,9 @@ use ghost_seal::attestation::{
     AttestationError, AttestationSource, AttestationVerifier, NitroVerifier, NsmDevice, NsmSource,
 };
 use ghost_seal::enclave_serve::{
-    ANSWER_OK, ANSWER_REFUSED, ChainStatus, DurableJournal, EnclaveAttestation, EnclaveService, KIND_KEY_SHARE,
-    NodeChainStatus, RegistrySource, ServiceConfig, ServiceDeps, ServiceEvent, ServiceLog,
+    ANSWER_OK, ANSWER_REFUSED, ChainStatus, CoreKeyMakerSource, DurableJournal, EnclaveAttestation, EnclaveService,
+    KIND_KEY_SHARE, KeyMakerSource, NodeChainStatus, RegistrySource, ServiceConfig, ServiceDeps, ServiceEvent,
+    ServiceLog,
 };
 use ghost_seal::enclave_tls::EnclaveTls;
 use ghost_seal::flows::ANSWER_LIFETIME_SECS;
@@ -254,11 +259,13 @@ fn main() {
     // The durable journal: the sealed, chained log kept by the parent's
     // store (vsock port 5005), opened and verified once M is installed.
     let journal = SharedLog::new(Box::new(HostJournal::parent()));
+    // The Phantom Key maker: coins on the network the chain check follows.
+    let key_maker = CoreKeyMakerSource { chain_id: NodeList::release().network.chain_id };
     let deps = ServiceDeps {
         chain: Some(Arc::new(chain) as Arc<dyn ChainStatus>),
         registry: Some(Arc::new(registry.clone()) as Arc<dyn RegistrySource>),
         journal: Some(Arc::new(journal) as Arc<dyn DurableJournal>),
-        key_maker: None,
+        key_maker: Some(Arc::new(key_maker) as Arc<dyn KeyMakerSource>),
     };
     let config = ServiceConfig {
         measurement,
