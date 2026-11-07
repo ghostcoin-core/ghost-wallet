@@ -38,18 +38,37 @@ libc = { version = "=0.2.191", optional = true }
 p384 = { version = "=0.14.0", default-features = false, features = ["ecdsa"], optional = true }
 sha2 = { version = "=0.11.1", default-features = false, optional = true }
 vsock = { version = "=0.5.5", optional = true }
+# Also only with `nitro`: TLS ended inside the enclave (rustls, TLS 1.3 only,
+# the `ring` provider alone, no TLS 1.2 code), the enclave's fresh
+# self-signed ECDSA P-256 certificate made at each start (rcgen, `ring`
+# backend only), HTTP/1.1 request heads (httparse) and JSON (serde_json,
+# above). No elliptic-curve code is written here; these crates do it.
+httparse = { version = "=1.10.1", default-features = false, optional = true }
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring"], optional = true }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring"], optional = true }
 
 # Only with the `test-server` feature (the development test Seal server, its
 # binary and its tests): an HTTP server with rustls for HTTPS, and JSON for
-# the relay's requests and answers. The default build has neither.
+# the relay's requests and answers (also used by `nitro`). The default build
+# has neither.
 serde_json = { version = "=1.0.154", optional = true }
 tiny_http = { version = "=0.12.0", default-features = false, features = ["ssl-rustls"], optional = true }
 
 [features]
 default = []
 # The Nitro Enclaves build: the published measurements, attestation, the M
-# handover between enclaves, the phones' attestation and the parent proxy.
-nitro = ["dep:libc", "dep:p384", "dep:sha2", "dep:vsock"]
+# handover between enclaves, the phones' attestation, the parent proxy, and
+# the relay served to phones over TLS ended inside the enclave.
+nitro = [
+    "dep:httparse",
+    "dep:libc",
+    "dep:p384",
+    "dep:rcgen",
+    "dep:rustls",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:vsock",
+]
 # The development test Seal server: the relay protocol over HTTP(S), the test
 # M only. Never for real money.
 test-server = ["dep:serde_json", "dep:tiny_http"]
@@ -94,10 +113,27 @@ name = "proxy"
 path = "tests/proxy.rs"
 required-features = ["nitro"]
 
+[[test]]
+name = "relay_http"
+path = "tests/relay_http.rs"
+required-features = ["nitro"]
+
+[[test]]
+name = "enclave_tls"
+path = "tests/enclave_tls.rs"
+required-features = ["nitro"]
+
+[[test]]
+name = "enclave_serve"
+path = "tests/enclave_serve.rs"
+required-features = ["nitro"]
+
 # The lattice signatures and key encapsulation are slow unoptimised; build the
-# dependencies optimised in the tests too.
+# dependencies optimised in the tests too, without debug info, so that linking
+# the test programs side by side stays small.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 # The enclave program's release build is reproducible: one codegen unit, no
 # incremental state, no debug info, symbols stripped, and (set by the build

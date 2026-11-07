@@ -437,8 +437,9 @@ ML-DSA-65 signature verifies under the Seal's key (context
 32-byte challenge the native relay made and sent, about the card it tapped,
 and not expired. The Seal's key and measurement come from one function,
 `trustedSeal` in `lib/seal/trusted-seal.ts`. They will come from the Seal's
-Nitro attestation (`GPA1`, `docs/seal-enclave.md`), which the app does not
-fetch yet, so today it returns nothing, and the pinned list is empty too:
+Nitro attestation (`GPA2`, `docs/seal-enclave.md`, which also binds the TLS
+certificate the enclave serves), which the app does not fetch yet, so today
+it returns nothing, and the pinned list is empty too:
 every card shows "Can't verify this card".
 
 ### Check NFC Chip

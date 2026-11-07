@@ -23,11 +23,20 @@
 //! - After it has started, takes a later list on the control port only if
 //!   it is signed by the compiled-in release key and extends the one held.
 //! - On its service port (vsock [`SERVICE_PORT`], which the parent proxy
-//!   forwards to from the internet) it answers key-share requests (handing
-//!   M only to an attested build on its trusted list, through the protocol)
-//!   and phone attestation requests, on a fixed pool of [`SERVICE_WORKERS`]
-//!   threads with a queue of [`SERVICE_QUEUE`] and [`SERVICE_TIMEOUT`] for a
-//!   whole connection; a connection that finds the queue full is closed.
+//!   forwards to from the internet, still encrypted) it serves, by each
+//!   connection's first byte, TLS ended inside the enclave and the relay's
+//!   HTTP routes for phones (Check, Fill, Fill confirmation, Open and the
+//!   phone attestation), or the framed protocol (key-share requests, handing
+//!   M only to an attested build on its trusted list, and framed phone
+//!   attestation requests): see `ghost_seal::enclave_serve`. All on a fixed
+//!   pool of [`SERVICE_WORKERS`] threads with a queue of [`SERVICE_QUEUE`]
+//!   and [`SERVICE_TIMEOUT`] for a whole connection, a TLS handshake
+//!   included; a connection that finds the queue full is closed.
+//! - It makes its TLS key pair and self-signed certificate fresh at each
+//!   start, inside itself, and keeps them in memory only.
+//! - It installs no chain status check, card registry or durable journal
+//!   yet, so it answers every Check, Fill, Fill confirmation and Open
+//!   `unavailable` and sends no card traffic.
 //!
 //! It never writes M anywhere, and no frame it sends carries M except a
 //! key-share package, encrypted to the receiving enclave.
@@ -43,16 +52,23 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ghost_seal::attestation::{AttestationError, NitroVerifier, NsmDevice, NsmSource};
-use ghost_seal::key_share::{self, ControlFrame, GiverContext, Receiver, read_frame, write_frame};
+use ghost_seal::attestation::{
+    AttestationError, AttestationSource, AttestationVerifier, NitroVerifier, NsmDevice, NsmSource,
+};
+use ghost_seal::enclave_serve::{
+    ANSWER_OK, ANSWER_REFUSED, EnclaveAttestation, EnclaveService, KIND_KEY_SHARE, ServiceConfig, ServiceDeps,
+    ServiceEvent, ServiceLog,
+};
+use ghost_seal::enclave_tls::EnclaveTls;
+use ghost_seal::flows::ANSWER_LIFETIME_SECS;
+use ghost_seal::key_share::{ControlFrame, Receiver, read_frame, write_frame};
 use ghost_seal::measurements::{ReleaseKey, TrustedList};
-use ghost_seal::phone_attestation::{self, CHALLENGE_BYTES};
-use ghost_seal::proxy::{BoundedService, DeadlineStream, ProxyStream, ServiceLimits};
-use ghost_seal::{Clock, MasterKey, SealRandom, SystemClock, SystemRandom};
+use ghost_seal::proxy::{BoundedService, DeadlineStream, ServiceLimits};
+use ghost_seal::{Clock, MasterKey, RelayLimits, SealRandom, SystemClock, SystemRandom};
 use ml_kem::{DecapsulationKey, KeyExport, MlKem768};
 use vsock::{VMADDR_CID_ANY, VsockListener, VsockStream};
 
@@ -74,11 +90,6 @@ const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long the control port waits for a frame.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
-
-const KIND_KEY_SHARE: u8 = 1;
-const KIND_PHONE_ATTESTATION: u8 = 2;
-const ANSWER_OK: u8 = 0;
-const ANSWER_REFUSED: u8 = 1;
 
 /// `/dev/nsm`'s one ioctl: `_IOWR(0x0A, 0, struct nsm_message)`, the message
 /// being two `struct iovec` (32 bytes).
@@ -131,22 +142,32 @@ fn nsm() -> Result<NsmSource<DevNsm>, String> {
     DevNsm::open().map(NsmSource::new).map_err(|e| e.to_string())
 }
 
-/// What the enclave holds.
-struct State {
-    started: bool,
-    master: Option<MasterKey>,
-    /// The only list another enclave is checked against.
-    trusted: TrustedList,
-    answer_key: Vec<u8>,
-    kem_key: Vec<u8>,
+/// The enclave's own attestation: its NSM, and the pinned AWS root for other
+/// enclaves' documents.
+struct Nitro;
+
+impl EnclaveAttestation for Nitro {
+    fn source(&self) -> Result<Box<dyn AttestationSource>, String> {
+        Ok(Box::new(nsm()?))
+    }
+
+    fn verifier(&self) -> Box<dyn AttestationVerifier> {
+        Box::new(NitroVerifier::aws())
+    }
+}
+
+/// The service's fixed events, on standard error. No event carries bytes a
+/// connection carried.
+struct StatusLog;
+
+impl ServiceLog for StatusLog {
+    fn record(&self, event: ServiceEvent) {
+        status(&event.to_string());
+    }
 }
 
 fn status(text: &str) {
     eprintln!("seal_enclave: {text}");
-}
-
-fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
-    state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn main() {
@@ -165,21 +186,49 @@ fn main() {
     let own = nsm().and_then(|mut source| {
         trusted.trust_own_build(&mut source, &NitroVerifier::aws(), SystemClock.now_unix()).map_err(|e| e.to_string())
     });
-    match own {
-        Ok(_) => status("trusts the compiled-in builds and its own build"),
-        Err(why) => status(&format!("trusts only the compiled-in builds: {why}")),
-    }
+    // The answers carry the enclave's own PCR0. Without its own document the
+    // enclave cannot attest anything, and serves no flow anyway.
+    let measurement = match own {
+        Ok(pcrs) => {
+            status("trusts the compiled-in builds and its own build");
+            pcrs.pcr0
+        }
+        Err(why) => {
+            status(&format!("trusts only the compiled-in builds: {why}"));
+            [0u8; 48]
+        }
+    };
 
-    let state = Arc::new(Mutex::new(State {
-        started: false,
-        master: None,
+    // TLS ends here: a fresh key pair and certificate, in memory only.
+    let tls = match EnclaveTls::generate() {
+        Ok(tls) => tls,
+        Err(error) => {
+            status(&format!("no TLS: {error}"));
+            std::process::exit(1);
+        }
+    };
+
+    // No chain status check, card registry or durable journal is installed
+    // yet: every Check, Fill, Fill confirmation and Open is refused
+    // `unavailable` until they are.
+    let config = ServiceConfig {
+        measurement,
+        answer_lifetime_secs: ANSWER_LIFETIME_SECS,
+        relay_limits: RelayLimits::default(),
+        clock: Arc::new(SystemClock),
+    };
+    let service = Arc::new(EnclaveService::new(
+        tls,
+        kem.encapsulation_key().to_bytes().to_vec(),
         trusted,
-        answer_key: Vec::new(),
-        kem_key: kem.encapsulation_key().to_bytes().to_vec(),
-    }));
+        Arc::new(Nitro),
+        ServiceDeps::none(),
+        config,
+        Arc::new(StatusLog),
+    ));
 
-    let service_state = state.clone();
-    if let Err(error) = thread::Builder::new().name("service".into()).spawn(move || service(service_state)) {
+    let served = service.clone();
+    if let Err(error) = thread::Builder::new().name("service".into()).spawn(move || serve_port(served)) {
         status(&format!("no thread for the service port: {error}"));
         std::process::exit(1);
     }
@@ -202,7 +251,7 @@ fn main() {
         let _ = stream.set_read_timeout(Some(CONTROL_TIMEOUT));
         let _ = stream.set_write_timeout(Some(CONTROL_TIMEOUT));
         let answer = match read_frame(&mut stream) {
-            Ok(frame) => control_frame(&frame, &state),
+            Ok(frame) => control_frame(&frame, &service),
             Err(error) => format!("refused: {error}"),
         };
         status(&answer);
@@ -210,8 +259,9 @@ fn main() {
     }
 }
 
-/// The service port, on a fixed pool of workers.
-fn service(state: Arc<Mutex<State>>) {
+/// The service port, on a fixed pool of workers: TLS and the HTTP routes,
+/// or the framed protocol, by each connection's first byte.
+fn serve_port(service: Arc<EnclaveService>) {
     let listener = match VsockListener::bind_with_cid_port(VMADDR_CID_ANY, SERVICE_PORT) {
         Ok(listener) => listener,
         Err(error) => {
@@ -220,17 +270,18 @@ fn service(state: Arc<Mutex<State>>) {
         }
     };
     let limits = ServiceLimits { workers: SERVICE_WORKERS, queue: SERVICE_QUEUE, connection_time: SERVICE_TIMEOUT };
-    if let Err(error) = BoundedService::new(listener, limits).serve(move |stream| serve(stream, &state), None) {
+    let handler = move |stream: &mut DeadlineStream<VsockStream>| service.serve_connection(stream);
+    if let Err(error) = BoundedService::new(listener, limits).serve(handler, None) {
         status(&format!("service port stopped: {error}"));
     }
 }
 
 /// Handles one control frame.
-fn control_frame(frame: &[u8], state: &Mutex<State>) -> String {
+fn control_frame(frame: &[u8], service: &EnclaveService) -> String {
     match ControlFrame::parse(frame) {
         Err(why) => format!("refused: {why}"),
         Ok(ControlFrame::SignedList(text)) => {
-            let mut held = lock(state);
+            let mut held = service.state();
             if !held.started {
                 return "refused: a list comes after the start".into();
             }
@@ -239,8 +290,8 @@ fn control_frame(frame: &[u8], state: &Mutex<State>) -> String {
                 Err(why) => format!("refused: {why}"),
             }
         }
-        Ok(ControlFrame::Genesis { signed_list }) => start(true, signed_list, state),
-        Ok(ControlFrame::Join) => start(false, None, state),
+        Ok(ControlFrame::Genesis { signed_list }) => start(true, signed_list, service),
+        Ok(ControlFrame::Join) => start(false, None, service),
     }
 }
 
@@ -252,9 +303,9 @@ fn install_signed(trusted: &mut TrustedList, text: &str) -> Result<(), String> {
 
 /// Handles the one start. A join takes no list from the host: it checks its
 /// giver against what this image trusts by itself.
-fn start(genesis: bool, signed_list: Option<&str>, state: &Mutex<State>) -> String {
+fn start(genesis: bool, signed_list: Option<&str>, service: &EnclaveService) -> String {
     let trusted = {
-        let mut held = lock(state);
+        let mut held = service.state();
         if held.started {
             return "refused: already started".into();
         }
@@ -278,9 +329,7 @@ fn start(genesis: bool, signed_list: Option<&str>, state: &Mutex<State>) -> Stri
             Err(why) => return format!("refused: join failed: {why}"),
         }
     };
-    let mut held = lock(state);
-    held.answer_key = phone_attestation::answer_key(&master);
-    held.master = Some(master);
+    service.install_master(master);
     if genesis { "ok: made M (genesis)".into() } else { "ok: received M from a running enclave".into() }
 }
 
@@ -306,61 +355,5 @@ fn join(trusted: &TrustedList) -> Result<MasterKey, String> {
         }
         Some((&ANSWER_REFUSED, why)) => Err(format!("the giver refused: {}", String::from_utf8_lossy(why))),
         _ => Err("the giver's answer is not a frame".into()),
-    }
-}
-
-/// Answers service frames on one connection until it closes or its time is
-/// up.
-fn serve<S: ProxyStream>(stream: &mut DeadlineStream<S>, state: &Mutex<State>) {
-    while let Ok(frame) = read_frame(stream) {
-        if stream.expired() {
-            break;
-        }
-        let answer = match answer(&frame, state) {
-            Ok(body) => [&[ANSWER_OK][..], &body].concat(),
-            Err(why) => [&[ANSWER_REFUSED][..], why.as_bytes()].concat(),
-        };
-        if write_frame(stream, &answer).is_err() {
-            break;
-        }
-    }
-}
-
-fn answer(frame: &[u8], state: &Mutex<State>) -> Result<Vec<u8>, String> {
-    let (&kind, body) = frame.split_first().ok_or("an empty frame")?;
-    match kind {
-        KIND_KEY_SHARE => {
-            let held = lock(state);
-            let master = held.master.as_ref().ok_or("this enclave holds no M yet")?;
-            let mut source = nsm()?;
-            let given = key_share::package_for(
-                master,
-                body,
-                GiverContext {
-                    verifier: &NitroVerifier::aws(),
-                    list: &held.trusted,
-                    source: &mut source,
-                    random: &mut SystemRandom,
-                    now_unix: SystemClock.now_unix(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            status(&format!("handed M to build {}", given.receiver.name));
-            Ok(given.package)
-        }
-        KIND_PHONE_ATTESTATION => {
-            let challenge: [u8; CHALLENGE_BYTES] = body.try_into().map_err(|_| "a challenge is 32 bytes")?;
-            // The keys are public; the state is not held while the NSM works.
-            let (answer_key, kem_key) = {
-                let held = lock(state);
-                if held.master.is_none() {
-                    return Err("this enclave holds no M yet".into());
-                }
-                (held.answer_key.clone(), held.kem_key.clone())
-            };
-            let mut source = nsm()?;
-            phone_attestation::make(&mut source, &answer_key, &kem_key, &challenge).map_err(|e| e.to_string())
-        }
-        _ => Err("unknown request".into()),
     }
 }

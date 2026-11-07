@@ -9,8 +9,12 @@
 pub mod nodes;
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use ghost_seal::journal::{EntryKind, Journal};
+use ghost_seal::{Finished, FlowStep, Relay, RelayError};
 
 use ghost_seal::card_keys::{card_keys, key_version};
 use ghost_seal::flows::record_file_settings;
@@ -584,4 +588,123 @@ pub fn sealed_card(pin: Option<&str>) -> SealedCard {
     card.write_lengths.clear();
     card.transcript.clear();
     SealedCard { card, journal, clock, maker, commit_data: filled.commit_data, amount_wei: AMOUNT }
+}
+
+// ---------------------------------------------------------------------------
+// Stand-ins a relay's workers can use: each session's Seal is made on its own
+// thread, so what it is given must be `Send + Sync`.
+
+/// A journal in memory that threads share: clones share the same entries, so
+/// every session's Seal (and the test) sees what the others saved. Test only:
+/// it is not durable.
+#[derive(Clone, Default)]
+pub struct SharedJournal {
+    pub entries: Arc<Mutex<BTreeMap<(CardUid, EntryKind), Vec<u8>>>>,
+}
+
+impl SharedJournal {
+    pub fn has_open(&self, uid: &CardUid) -> bool {
+        self.entries.lock().unwrap().contains_key(&(*uid, EntryKind::Open))
+    }
+
+    /// Every sealed entry, as the store holds them.
+    pub fn sealed_entries(&self) -> Vec<Vec<u8>> {
+        self.entries.lock().unwrap().values().cloned().collect()
+    }
+}
+
+impl Journal for SharedJournal {
+    fn load(&self, uid: &CardUid, kind: EntryKind) -> Option<Vec<u8>> {
+        self.entries.lock().unwrap().get(&(*uid, kind)).cloned()
+    }
+
+    fn save(&mut self, uid: &CardUid, kind: EntryKind, sealed: Vec<u8>) -> Result<(), SealError> {
+        self.entries.lock().unwrap().insert((*uid, kind), sealed);
+        Ok(())
+    }
+}
+
+/// A clock that stays at one time.
+#[derive(Clone, Copy)]
+pub struct FixedClock(pub u64);
+
+impl Clock for FixedClock {
+    fn now_unix(&self) -> u64 {
+        self.0
+    }
+}
+
+/// [`StubMaker`] for threads: the same keys and commit data, kept where the
+/// test can read them.
+#[derive(Clone, Default)]
+pub struct SyncMaker {
+    pub made: Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>>,
+}
+
+impl SyncMaker {
+    /// The key whose coin has `commit_data`.
+    pub fn key_for(&self, commit_data: &[u8]) -> Vec<u8> {
+        self.made.lock().unwrap().iter().find(|(_, data)| data == commit_data).expect("a key for this coin").0.clone()
+    }
+
+    /// The spend marker of the coin with `commit_data`.
+    pub fn marker_for(&self, commit_data: &[u8]) -> [u8; 32] {
+        stub_spend_marker(&self.key_for(commit_data))
+    }
+}
+
+impl PhantomKeyMaker for SyncMaker {
+    fn make(&mut self, amount_wei: u128, random: &mut dyn SealRandom) -> Result<MadeKey, SealError> {
+        let mut stub = StubMaker::default();
+        let made = stub.make(amount_wei, random)?;
+        self.made.lock().unwrap().extend(stub.made.borrow().iter().cloned());
+        Ok(made)
+    }
+}
+
+/// [`StubChain`] for threads: Paid for the coins the test marked paid.
+#[derive(Clone, Default)]
+pub struct SyncChain {
+    pub paid: Arc<Mutex<BTreeSet<([u8; 32], u128)>>>,
+}
+
+impl SyncChain {
+    pub fn pay(&self, commit_data: &[u8], amount_wei: u128) {
+        self.paid.lock().unwrap().insert((sha3_256(&[commit_data]), amount_wei));
+    }
+}
+
+impl ChainCheck for SyncChain {
+    fn confirm_payment(&self, claim: &CoinClaim) -> PaymentVerdict {
+        if self.paid.lock().unwrap().contains(&(claim.coin, claim.amount_wei)) {
+            PaymentVerdict::Paid
+        } else {
+            PaymentVerdict::NotYet
+        }
+    }
+}
+
+/// Carries a relayed flow round trip by round trip between `card` and
+/// `relay`, as the phone does, from its `first` step: each APDU to the card,
+/// each raw answer back. Returns the flow's end and the Seal round trips
+/// (the start included). A card that drops ends the session with an abort.
+pub fn carry(card: &mut SimCard, relay: &Relay, first: Result<FlowStep, RelayError>) -> (Result<Finished, RelayError>, usize) {
+    let mut round_trips = 1;
+    let mut step = first;
+    loop {
+        match step {
+            Ok(FlowStep::Done(finished)) => return (Ok(finished), round_trips),
+            Err(error) => return (Err(error), round_trips),
+            Ok(FlowStep::Apdu { session, apdu }) => match card.transceive(&apdu) {
+                Ok(answer) => {
+                    round_trips += 1;
+                    step = relay.step_flow(&session, &answer);
+                }
+                Err(Dropped) => {
+                    relay.abort(&session).expect("the session was running");
+                    return (Err(RelayError::Seal(SealError::Dropped)), round_trips);
+                }
+            },
+        }
+    }
 }
