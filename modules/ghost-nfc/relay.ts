@@ -140,11 +140,18 @@ export type RelayProblem = keyof typeof RELAY_PROBLEMS;
 /** A flow through the Seal failed; the message is plain text for the screen. */
 export class SealRelayError extends Error {
   readonly problem: RelayProblem;
+  /**
+   * A short code of what failed, for the "Can't verify this card" screen:
+   * the problem itself, or, for an attestation fetch, its native cause
+   * (`attest-network(-1200)`). Never a key, hash or challenge.
+   */
+  readonly reason: string;
 
-  constructor(problem: RelayProblem) {
+  constructor(problem: RelayProblem, reason: string = problem) {
     super(RELAY_PROBLEMS[problem]);
     this.name = 'SealRelayError';
     this.problem = problem;
+    this.reason = reason;
   }
 }
 
@@ -224,17 +231,53 @@ function ready<T extends GhostNfcRelayNative>(sealUrl: string, nfc: T | null): {
   return { address, home, nfc };
 }
 
+/** A native failure as JavaScript throws it: the sheet closed is `CardCancelled`, anything else a `SealRelayError`. */
+function relayError(error: unknown): Error {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'ERR_NFC_CANCELLED') {
+    return new CardCancelled();
+  }
+  return new SealRelayError((typeof code === 'string' && NATIVE_PROBLEMS[code]) || 'failed');
+}
+
 /** Runs a native relay call; the sheet closed is `CardCancelled`, anything else a `SealRelayError`. */
 async function relayed<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {
-    const code = (error as { code?: unknown } | null)?.code;
-    if (code === 'ERR_NFC_CANCELLED') {
-      throw new CardCancelled();
-    }
-    throw new SealRelayError((typeof code === 'string' && NATIVE_PROBLEMS[code]) || 'failed');
+    throw relayError(error);
   }
+}
+
+/** The native attestation fetch's failure codes with no number (ios/SealAttestation.swift), and their reasons. */
+const ATTESTATION_FAILURES: Record<string, { problem: RelayProblem; reason: string }> = {
+  ERR_SEAL_ATTEST_NO_LEAF: { problem: 'bad-answer', reason: 'attest-no-leaf' },
+  ERR_SEAL_ATTEST_TOO_LONG: { problem: 'bad-answer', reason: 'attest-too-long' },
+  ERR_SEAL_ATTEST_PARSE: { problem: 'bad-answer', reason: 'attest-parse' },
+  ERR_SEAL_ATTEST_BAD_CHALLENGE: { problem: 'failed', reason: 'attest-bad-challenge' },
+};
+
+/** A native fetch failure with its number: a `URLError` code or an HTTP status, at most 6 digits. */
+const NUMBERED_ATTESTATION_FAILURE = /^ERR_SEAL_ATTEST_(NETWORK|STATUS):(-?[0-9]{1,6})$/;
+
+/** The native attestation fetch's failure as a `SealRelayError` with its cause as the reason, or null for another code. */
+function attestationError(error: unknown): SealRelayError | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code !== 'string') {
+    return null;
+  }
+  const known = Object.prototype.hasOwnProperty.call(ATTESTATION_FAILURES, code) ? ATTESTATION_FAILURES[code] : null;
+  if (known) {
+    return new SealRelayError(known.problem, known.reason);
+  }
+  const numbered = NUMBERED_ATTESTATION_FAILURE.exec(code);
+  if (!numbered) {
+    return null;
+  }
+  const number = String(parseInt(numbered[2], 10));
+  return numbered[1] === 'NETWORK'
+    ? new SealRelayError('seal-unreachable', `attest-network(${number})`)
+    : new SealRelayError('seal-unreachable', `attest-status(${number})`);
 }
 
 /**
@@ -350,8 +393,10 @@ function pinNative(): GhostNfcSealPinNative | null {
  * Fetches the Seal's attestation for `challenge` (32 bytes) natively, with
  * the hash of the certificate its connection presented. Throws
  * `SealRelayError` when there is no fetch in this build, the address is not
- * https://, or anything fails; nothing it returns is trusted until the core
- * checks it.
+ * https://, or anything fails; a native fetch failure's cause is its `reason`
+ * (`attest-network(-1200)`, `attest-status(503)`, `attest-no-leaf`,
+ * `attest-too-long`, `attest-parse`). Nothing it returns is trusted until the
+ * core checks it.
  */
 export async function fetchSealAttestation(
   sealUrl: string,
@@ -368,8 +413,12 @@ export async function fetchSealAttestation(
   if (challenge.length !== 32) {
     throw new SealRelayError('failed');
   }
-  const native: GhostNfcSealPinNative = nfc;
-  const result = await relayed(() => native.fetchSealAttestation(address, hexOf(challenge).toLowerCase()));
+  let result: Awaited<ReturnType<GhostNfcSealPinNative['fetchSealAttestation']>>;
+  try {
+    result = await nfc.fetchSealAttestation(address, hexOf(challenge).toLowerCase());
+  } catch (error) {
+    throw attestationError(error) ?? relayError(error);
+  }
   const attestation = bytesOf(result?.attestation);
   const certSha256 = bytesOf(result?.certSha256, 32);
   if (!attestation || attestation.length === 0 || attestation.length > MAX_ATTESTATION_BYTES || !certSha256) {

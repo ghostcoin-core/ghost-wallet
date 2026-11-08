@@ -459,7 +459,8 @@ describe('every region', () => {
     clock += FAILED_SEAL_MS;
     const again = await refreshTrustedSeals(sealsDeps({ regions: THREE }));
     expect([...again.keys()]).toEqual(THREE.map((r) => r.id));
-    expect(native.fetches.map((f) => f.url)).toEqual([...THREE.map((r) => r.url), THREE[1].url]);
+    // The failing region was fetched once more right away, then again once its failure ran out.
+    expect(native.fetches.map((f) => f.url)).toEqual([...THREE.map((r) => r.url), THREE[1].url, THREE[1].url]);
     expect(again.get('us-east-1')).toBe(seals.get('us-east-1'));
   });
 
@@ -526,12 +527,14 @@ describe('the cache', () => {
     native.fail = new Error('offline');
     expect(await refreshOne()).toBeNull();
     native.fail = null;
+    // The failure was fetched twice: once, and once more right away.
+    expect(native.fetches).toHaveLength(2);
     clock += FAILED_SEAL_MS - 1;
     expect(await refreshOne()).toBeNull();
-    expect(native.fetches).toHaveLength(1);
+    expect(native.fetches).toHaveLength(2);
     clock += 1;
     expect(await refreshOne()).not.toBeNull();
-    expect(native.fetches).toHaveLength(2);
+    expect(native.fetches).toHaveLength(3);
   });
 
   it('is shared by card flows that ask at the same time', async () => {
