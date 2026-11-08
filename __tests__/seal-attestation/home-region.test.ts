@@ -127,10 +127,12 @@ const RELAY = /^(relayCheck|relayFill|relayFillConfirm|relayOpen|beginSession|tr
 
 describe('with the live regions but no attestation that checks', () => {
   it('every card flow gives "Can\'t verify this card" and relays nothing, opening no card sheet', async () => {
-    expect(await checkCard(sealDeps())).toEqual({ kind: 'cant-verify' });
-    expect(await fillCard(sealDeps(), 10n ** 18n, null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
-    expect(await confirmFill(sealDeps())).toEqual({ kind: 'cant-verify' });
-    expect(await openCard(sealDeps(), null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
+    // Each region's fetch failed (the fake native fetch refuses), and the status says so per region.
+    const cantVerify = { kind: 'cant-verify', reason: 'us-east-1: failed; eu-central-1: failed; ap-southeast-1: failed' };
+    expect(await checkCard(sealDeps())).toEqual(cantVerify);
+    expect(await fillCard(sealDeps(), 10n ** 18n, null)).toEqual({ ok: false, status: cantVerify });
+    expect(await confirmFill(sealDeps())).toEqual(cantVerify);
+    expect(await openCard(sealDeps(), null)).toEqual({ ok: false, status: cantVerify });
     // The flows asked each live region for its attestation, and nothing else.
     expect(mockCalls.native).toContain('fetchSealAttestation');
     expect(mockCalls.native.filter((name) => RELAY.test(name))).toEqual([]);
@@ -146,10 +148,11 @@ describe('with no region', () => {
   });
 
   it('every card flow gives "Can\'t verify this card", fetching nothing and opening no card sheet', async () => {
-    expect(await checkCard(sealDeps())).toEqual({ kind: 'cant-verify' });
-    expect(await fillCard(sealDeps(), 10n ** 18n, null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
-    expect(await confirmFill(sealDeps())).toEqual({ kind: 'cant-verify' });
-    expect(await openCard(sealDeps(), null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
+    const cantVerify = { kind: 'cant-verify', reason: 'no-regions' };
+    expect(await checkCard(sealDeps())).toEqual(cantVerify);
+    expect(await fillCard(sealDeps(), 10n ** 18n, null)).toEqual({ ok: false, status: cantVerify });
+    expect(await confirmFill(sealDeps())).toEqual(cantVerify);
+    expect(await openCard(sealDeps(), null)).toEqual({ ok: false, status: cantVerify });
     expect(mockCalls.native.filter((name) => RELAY_OR_FETCH.test(name))).toEqual([]);
     // No attestation was asked for or checked, no phone key made, no answer checked.
     expect(mockCalls.core).toEqual([]);

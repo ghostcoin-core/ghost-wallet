@@ -39,6 +39,7 @@ jest.mock(
   { virtual: true },
 );
 jest.mock('../../lib/seal/trusted-seal', () => ({
+  ...jest.requireActual('../../lib/seal/trusted-seal'),
   trustedSeal: (region: string) => require('./fake-seal').world.current.trustedSeal(region),
   refreshTrustedSeals: async () => require('./fake-seal').world.current.refreshed(),
 }));

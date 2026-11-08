@@ -106,51 +106,87 @@ export function pinnedBuilds(list: MeasurementList = PINNED_MEASUREMENTS): CoreP
   }));
 }
 
-/** The region's Seal from the core's verdict, or null for any refusal or anything malformed. */
+/**
+ * One region's attestation, checked: its Seal, or no Seal and the first
+ * check that failed, as a short code (never a key, hash or challenge).
+ */
+export type AttestedSeal = { seal: TrustedSeal; reason: '' } | { seal: null; reason: string };
+
+function failed(reason: string): AttestedSeal {
+  return { seal: null, reason };
+}
+
+/** The region's Seal from the core's verdict, or why there is none: the core's refusal, or anything malformed. */
 function sealOf(
   region: string,
   url: string,
   verdict: CoreSealAttestationVerdict | null | undefined,
   tlsCertSha256: Uint8Array,
-): TrustedSeal | null {
-  const seal = verdict?.seal;
-  if (!verdict || verdict.refusal !== '' || !seal) {
-    return null;
+): AttestedSeal {
+  if (!verdict) {
+    return failed('no-verdict');
+  }
+  if (verdict.refusal !== '') {
+    return failed(verdict.refusal);
+  }
+  const seal = verdict.seal;
+  if (!seal) {
+    return failed('no-seal-in-verdict');
   }
   const verifyingKey = view(seal.verifyingKey, 1952);
   const kemKey = view(seal.kemKey, 1184);
   const measurement = view(seal.measurement, 48);
   if (!verifyingKey || !kemKey || !measurement) {
-    return null;
+    return failed('malformed-seal');
   }
-  return { region, url, verifyingKey, measurement, kemKey, tlsCertSha256 };
+  return { seal: { region, url, verifyingKey, measurement, kemKey, tlsCertSha256 }, reason: '' };
+}
+
+/** The code of a fetch that failed. */
+function fetchFailure(error: unknown): string {
+  return error instanceof SealRelayError ? error.problem : 'fetch-failed';
 }
 
 /**
- * Fetches and checks one region's attestation once. Never throws: any
- * failure is null, with that region's pin dropped.
+ * Fetches and checks one region's attestation once, and keeps the first
+ * failure: the fetch's error code, the core's refusal, or `pin-failed`.
+ * Never throws: any failure is no Seal, with that region's pin dropped.
  */
-export async function loadTrustedSeal(deps: SealAttestationDeps): Promise<TrustedSeal | null> {
+export async function attestSeal(deps: SealAttestationDeps): Promise<AttestedSeal> {
   const url = deps.url;
   if (!url || !deps.region) {
-    return null;
+    return failed('no-address');
   }
   const pin = (hash: Uint8Array | null) => (deps.native === undefined ? setSealPin(url, hash) : setSealPin(url, hash, deps.native));
+  const drop = (reason: string): AttestedSeal => {
+    try {
+      pin(null);
+    } catch {
+      // Dropping a pin never fails the loader.
+    }
+    return failed(reason);
+  };
+  let step = 'no-core';
   try {
     const core = deps.core();
     if (!core) {
-      pin(null);
-      return null;
+      return drop('no-core');
     }
+    step = 'no-challenge';
     const challenge = deps.random ? deps.random() : new Uint8Array(core.sealAttestationChallenge());
     if (challenge.length !== 32) {
-      pin(null);
-      return null;
+      return drop('no-challenge');
     }
-    const fetched = await withDeadline(
-      deps.native === undefined ? fetchSealAttestation(url, challenge) : fetchSealAttestation(url, challenge, deps.native),
-      deps.deadlineMs ?? ATTESTATION_DEADLINE_MS,
-    );
+    let fetched: Awaited<ReturnType<typeof fetchSealAttestation>>;
+    try {
+      fetched = await withDeadline(
+        deps.native === undefined ? fetchSealAttestation(url, challenge) : fetchSealAttestation(url, challenge, deps.native),
+        deps.deadlineMs ?? ATTESTATION_DEADLINE_MS,
+      );
+    } catch (error) {
+      return drop(fetchFailure(error));
+    }
+    step = 'core-failed';
     const verdict = core.verifySealAttestation({
       attestation: buffer(fetched.attestation),
       challenge: buffer(challenge),
@@ -158,18 +194,24 @@ export async function loadTrustedSeal(deps: SealAttestationDeps): Promise<Truste
       pinnedBuilds: pinnedBuilds(deps.list),
       now: BigInt(Math.floor(deps.now() / 1000)),
     });
-    const seal = sealOf(deps.region, url, verdict, fetched.certSha256);
-    if (!seal || !pin(seal.tlsCertSha256)) {
-      pin(null);
-      return null;
+    const attested = sealOf(deps.region, url, verdict, fetched.certSha256);
+    if (!attested.seal) {
+      return drop(attested.reason);
     }
-    return seal;
+    step = 'pin-failed';
+    if (!pin(attested.seal.tlsCertSha256)) {
+      return drop('pin-failed');
+    }
+    return attested;
   } catch {
-    try {
-      pin(null);
-    } catch {
-      // Dropping a pin never fails the loader.
-    }
-    return null;
+    return drop(step);
   }
+}
+
+/**
+ * Fetches and checks one region's attestation once. Never throws: any
+ * failure is null, with that region's pin dropped (`attestSeal` says why).
+ */
+export async function loadTrustedSeal(deps: SealAttestationDeps): Promise<TrustedSeal | null> {
+  return (await attestSeal(deps)).seal;
 }

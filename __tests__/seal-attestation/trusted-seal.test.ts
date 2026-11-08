@@ -12,6 +12,7 @@ import {
   ATTESTATION_DEADLINE_MS,
   appAttestationParts,
   attestationDeps,
+  attestSeal,
   loadTrustedSeal,
   pinnedBuilds,
   type SealAttestationDeps,
@@ -353,6 +354,29 @@ describe('anything but a verified attestation', () => {
     core.challengeBytes = 0;
     expect(await loadTrustedSeal(deps())).toBeNull();
     expect(native.fetches).toHaveLength(0);
+  });
+
+  it('keeps the first check that failed, as a short code', async () => {
+    expect(await attestSeal(deps({ url: '' }))).toEqual({ seal: null, reason: 'no-address' });
+    expect(await attestSeal(deps({ core: () => null }))).toEqual({ seal: null, reason: 'no-core' });
+    core.challengeBytes = 0;
+    expect(await attestSeal(deps())).toEqual({ seal: null, reason: 'no-challenge' });
+    core.challengeBytes = 32;
+    native.fail = Object.assign(new Error('offline'), { code: 'ERR_SEAL_UNREACHABLE' });
+    expect(await attestSeal(deps())).toEqual({ seal: null, reason: 'seal-unreachable' });
+    native.fail = null;
+    core.verdict = { refusal: 'tls-mismatch' };
+    expect(await attestSeal(deps())).toEqual({ seal: null, reason: 'tls-mismatch' });
+    core.verdict = { refusal: '', seal: { ...GOOD.seal!, kemKey: buffer(new Uint8Array(32)) } };
+    expect(await attestSeal(deps())).toEqual({ seal: null, reason: 'malformed-seal' });
+    core.throws = true;
+    expect(await attestSeal(deps())).toEqual({ seal: null, reason: 'core-failed' });
+    core.throws = false;
+    core.verdict = GOOD;
+    native.pinThrows = true;
+    expect(await attestSeal(deps())).toEqual({ seal: null, reason: 'pin-failed' });
+    native.pinThrows = false;
+    expect(await attestSeal(deps())).toMatchObject({ seal: { region: REGION }, reason: '' });
   });
 
   it('never throws, whatever fails', async () => {

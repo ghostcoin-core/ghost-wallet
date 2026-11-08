@@ -28,6 +28,7 @@ jest.mock(
   { virtual: true },
 );
 jest.mock('../../lib/seal/trusted-seal', () => ({
+  ...jest.requireActual('../../lib/seal/trusted-seal'),
   trustedSeal: (region: string) => require('./fake-seal').world.current.trustedSeal(region),
   refreshTrustedSeals: async () => require('./fake-seal').world.current.refreshed(),
 }));
@@ -147,6 +148,9 @@ describe.each(DEVICE_NAMES)('Check NFC Chip on the %s', (device) => {
       expect(isRed('check-card-status-text')).toBe(true);
       expect(screen.queryByText(/[0-9] GHOST/)).toBeNull();
       expect(screen.queryByText(/^Secured/)).toBeNull();
+      // The check that failed is named on the detail's second line.
+      const reason = { 'bad-signature': 'bad-signature', replay: 'bad-answer', expired: 'expired' }[tamper];
+      expect(String(screen.getByTestId('check-card-status-detail').props.children).split('\n')[1]).toBe(`Reason: ${reason}`);
     },
   );
 

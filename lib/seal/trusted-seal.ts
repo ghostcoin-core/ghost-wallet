@@ -16,10 +16,12 @@
 // or in the background. Each region is cached on its own: a verified Seal 5
 // minutes, a failure 30 seconds, memory only. One region failing never
 // changes another. With no `SEAL_REGIONS` (today) there is no Seal, and every
-// screen shows "Can't verify this card".
+// screen shows "Can't verify this card". A region with no Seal keeps its first
+// failure, a short code (`noSealReason`), so that screen can say which check
+// failed; never a key, hash or challenge.
 import type { GhostNfcSealPinNative, GhostNfcSealRegionsNative } from '../../modules/ghost-nfc';
 import { setSealRegions } from '../../modules/ghost-nfc/relay';
-import { appAttestationParts, loadTrustedSeal, type AttestationParts } from './seal-attestation';
+import { appAttestationParts, attestSeal, type AttestationParts, type AttestedSeal } from './seal-attestation';
 import { SEAL_REGIONS, type SealRegion } from './seal-config';
 
 /** A Seal region whose keys and measurement came from a checked attestation. */
@@ -61,41 +63,66 @@ export function trustedSealsDeps(): TrustedSealsDeps {
   return { core, now, list, regions: SEAL_REGIONS };
 }
 
-type Entry = { url: string; seal: TrustedSeal | null; until: number };
+type Entry = { url: string; attested: AttestedSeal; until: number };
 
 const cached = new Map<string, Entry>();
-const loading = new Map<string, { url: string; run: Promise<TrustedSeal | null> }>();
+const loading = new Map<string, { url: string; run: Promise<AttestedSeal> }>();
+
+/** Why each refresh's missing Seals are missing, by the refresh's result: short codes and region ids only. */
+const failuresOf = new WeakMap<TrustedSeals, { all: string; byRegion: ReadonlyMap<string, string> }>();
+
+/** The reason of a refresh that gave no Seal, when nothing more is known. */
+const NO_SEAL = 'no-verified-seal';
+
+/**
+ * Why `seals` (a result of `refreshTrustedSeals`) holds no Seal: each listed
+ * region's first failure as `<region>: <reason>`, joined with `; `, or why no
+ * region was attested at all. Never a key, hash or challenge.
+ */
+export function noSealReason(seals: TrustedSeals | null): string {
+  return (seals && failuresOf.get(seals)?.all) || NO_SEAL;
+}
+
+/** Why `region` has no Seal in `seals` (a result of `refreshTrustedSeals`), or null when that is not known. */
+export function regionFailure(seals: TrustedSeals, region: string): string | null {
+  return failuresOf.get(seals)?.byRegion.get(region) ?? null;
+}
+
+function noteFailures(seals: TrustedSeals, all: string, byRegion: ReadonlyMap<string, string> = new Map()): void {
+  failuresOf.set(seals, { all, byRegion });
+}
 
 /** The Seal of `region` to check its cards with, or null when there is none this app can vouch for now. */
 export function trustedSeal(region: string, now: number = Date.now()): TrustedSeal | null {
   const entry = cached.get(region);
-  return entry && now < entry.until ? entry.seal : null;
+  return entry && now < entry.until ? entry.attested.seal : null;
 }
 
-/** One region's Seal, fetched and checked again when its cached result has run out. Never rejects. */
-function refreshRegion(region: SealRegion, deps: TrustedSealsDeps): Promise<TrustedSeal | null> {
+/** One region's Seal, or why it has none, fetched and checked again when its cached result has run out. Never rejects. */
+function refreshRegion(region: SealRegion, deps: TrustedSealsDeps): Promise<AttestedSeal> {
   const clock = deps.now;
   const entry = cached.get(region.id);
   if (entry && entry.url === region.url && clock() < entry.until) {
-    return Promise.resolve(entry.seal);
+    return Promise.resolve(entry.attested);
   }
   const pending = loading.get(region.id);
   if (pending && pending.url === region.url) {
     return pending.run;
   }
-  const run = (async () => {
-    let seal: TrustedSeal | null = null;
+  const run = (async (): Promise<AttestedSeal> => {
+    let attested: AttestedSeal;
     try {
-      seal = await loadTrustedSeal({ ...deps, region: region.id, url: region.url });
+      attested = await attestSeal({ ...deps, region: region.id, url: region.url });
     } catch {
-      seal = null;
+      attested = { seal: null, reason: 'load-failed' };
     }
     // Only the Seal of this very region and address is kept for it.
+    const seal = attested.seal;
     if (seal && (seal.region !== region.id || seal.url !== region.url)) {
-      seal = null;
+      attested = { seal: null, reason: 'other-region' };
     }
-    cached.set(region.id, { url: region.url, seal, until: clock() + (seal ? VERIFIED_SEAL_MS : FAILED_SEAL_MS) });
-    return seal;
+    cached.set(region.id, { url: region.url, attested, until: clock() + (attested.seal ? VERIFIED_SEAL_MS : FAILED_SEAL_MS) });
+    return attested;
   })();
   loading.set(region.id, { url: region.url, run });
   void run.finally(() => {
@@ -118,18 +145,30 @@ export async function refreshTrustedSeals(deps: TrustedSealsDeps = trustedSealsD
   try {
     const regions = deps.regions;
     const listed = deps.native === undefined ? setSealRegions(regions) : setSealRegions(regions, deps.native);
-    if (!listed || regions.length === 0) {
+    if (regions.length === 0) {
+      noteFailures(verified, 'no-regions');
       return verified;
     }
-    const seals = await Promise.all(regions.map((region) => refreshRegion(region, deps)));
+    if (!listed) {
+      noteFailures(verified, 'regions-not-listed');
+      return verified;
+    }
+    const attested = await Promise.all(regions.map((region) => refreshRegion(region, deps)));
+    const byRegion = new Map<string, string>();
     regions.forEach((region, i) => {
-      const seal = seals[i];
+      const { seal, reason } = attested[i];
       if (seal) {
         verified.set(region.id, seal);
+      } else {
+        byRegion.set(region.id, reason);
       }
     });
+    if (byRegion.size > 0) {
+      noteFailures(verified, Array.from(byRegion, ([region, reason]) => `${region}: ${reason}`).join('; '), byRegion);
+    }
   } catch {
     verified.clear();
+    noteFailures(verified, 'refresh-failed');
   }
   return verified;
 }

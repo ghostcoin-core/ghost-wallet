@@ -27,10 +27,17 @@ import {
   type RelayedAnswer,
   type RelayedFill,
 } from '../../modules/ghost-nfc/relay';
-import { statusOfAnswer, statusOfFailure, type CardStatus } from './card-status';
+import { cantVerify, statusOfAnswer, statusOfFailure, type CardStatus } from './card-status';
 import { clearFill, noteFill, pendingFill } from './fills';
 import { SEAL_REGIONS } from './seal-config';
-import { refreshTrustedSeals, trustedSeal, type TrustedSeal, type TrustedSeals } from './trusted-seal';
+import {
+  noSealReason,
+  refreshTrustedSeals,
+  regionFailure,
+  trustedSeal,
+  type TrustedSeal,
+  type TrustedSeals,
+} from './trusted-seal';
 import {
   answerCheck,
   readVerdict,
@@ -95,22 +102,28 @@ export function sealDeps(): SealDeps {
 type Ready = { seals: TrustedSeals; core: SealBindings };
 
 /**
- * The verified Seals and the core at the start of a card flow, or null when
- * no region verified or the core is missing: then no card can be verified,
- * and no card sheet opens. Every region's attestation is fetched and checked
- * again here (`refresh`) when its cached check has run out; this is the only
- * place the app waits on it.
+ * The verified Seals and the core at the start of a card flow, or why there
+ * are none: no region verified (each region's first failure) or the core is
+ * missing. Then no card can be verified, and no card sheet opens. Every
+ * region's attestation is fetched and checked again here (`refresh`) when its
+ * cached check has run out; this is the only place the app waits on it.
  */
-async function readyNow(deps: SealDeps): Promise<Ready | null> {
-  let seals: TrustedSeals | null = deps.seals;
+async function readyNow(deps: SealDeps): Promise<{ ok: true; parts: Ready } | { ok: false; status: CardStatus }> {
+  let seals: TrustedSeals = deps.seals;
   if (deps.refresh) {
     try {
       seals = await deps.refresh();
     } catch {
-      seals = null;
+      return { ok: false, status: cantVerify('refresh-failed') };
     }
   }
-  return seals && seals.size > 0 && deps.core ? { seals, core: deps.core } : null;
+  if (!seals || seals.size === 0) {
+    return { ok: false, status: cantVerify(noSealReason(seals ?? null)) };
+  }
+  if (!deps.core) {
+    return { ok: false, status: cantVerify('no-answer-core') };
+  }
+  return { ok: true, parts: { seals, core: deps.core } };
 }
 
 /**
@@ -123,15 +136,26 @@ function sealOfAnswer(parts: Ready, relayed: RelayedAnswer): TrustedSeal | null 
   return seal && seal.region === region ? seal : null;
 }
 
+/** Why the region that answered `relayed` has no Seal to check it with. */
+function noSealOfAnswer(parts: Ready, relayed: RelayedAnswer): CardStatus {
+  const region = relayed.region;
+  if (!region) {
+    return cantVerify('seal-of-answer (no region)');
+  }
+  const failure = regionFailure(parts.seals, region);
+  return cantVerify(failure ? `seal-of-answer (${region}: ${failure})` : `seal-of-answer (${region})`);
+}
+
 /**
  * Checks the next card tapped: a fresh challenge goes through the relay and
  * the Seal's signed answer is verified. Null when the card sheet was closed.
  */
 export async function checkCard(deps: SealDeps): Promise<CardStatus | null> {
-  const parts = await readyNow(deps);
-  if (!parts) {
-    return { kind: 'cant-verify' };
+  const ready = await readyNow(deps);
+  if (!ready.ok) {
+    return ready.status;
   }
+  const parts = ready.parts;
   let relayed: RelayedAnswer;
   try {
     relayed = await deps.check();
@@ -140,11 +164,11 @@ export async function checkCard(deps: SealDeps): Promise<CardStatus | null> {
   }
   const seal = sealOfAnswer(parts, relayed);
   if (!seal) {
-    return { kind: 'cant-verify' };
+    return noSealOfAnswer(parts, relayed);
   }
   const verdict = verifyCheckAnswer(parts.core, seal, relayed, deps);
   if (!verdict.ok) {
-    return { kind: 'cant-verify' };
+    return cantVerify(verdict.refusal);
   }
   return afterAnswer(verdict.answer.uid, statusOfAnswer(verdict.answer));
 }
@@ -173,10 +197,11 @@ export type FillResult =
  * `pin`, when set, becomes the card's Open PIN.
  */
 export async function fillCard(deps: SealDeps, amountWei: bigint, pin: string | null): Promise<FillResult> {
-  const parts = await readyNow(deps);
-  if (!parts) {
-    return { ok: false, status: { kind: 'cant-verify' } };
+  const ready = await readyNow(deps);
+  if (!ready.ok) {
+    return { ok: false, status: ready.status };
   }
+  const parts = ready.parts;
   let relayed: RelayedFill;
   try {
     relayed = await deps.fill(amountWei, pin);
@@ -185,11 +210,11 @@ export async function fillCard(deps: SealDeps, amountWei: bigint, pin: string | 
   }
   const seal = sealOfAnswer(parts, relayed);
   if (!seal) {
-    return { ok: false, status: { kind: 'cant-verify' } };
+    return { ok: false, status: noSealOfAnswer(parts, relayed) };
   }
   const verdict = verifyFillAnswer(parts.core, seal, relayed, { amountWei, pin: pin !== null }, deps);
   if (!verdict.ok) {
-    return { ok: false, status: { kind: 'cant-verify' } };
+    return { ok: false, status: cantVerify(verdict.refusal) };
   }
   // Only a hint for this phone's own Checks: a failed write changes nothing on the card.
   await noteFill(verdict.answer.uid, verdict.answer.amountWei).catch(() => {});
@@ -202,10 +227,11 @@ export async function fillCard(deps: SealDeps, amountWei: bigint, pin: string | 
  * then the card is Filling.
  */
 export async function confirmFill(deps: SealDeps): Promise<CardStatus | null> {
-  const parts = await readyNow(deps);
-  if (!parts) {
-    return { kind: 'cant-verify' };
+  const ready = await readyNow(deps);
+  if (!ready.ok) {
+    return ready.status;
   }
+  const parts = ready.parts;
   let relayed: RelayedAnswer;
   try {
     relayed = await deps.confirm();
@@ -214,11 +240,11 @@ export async function confirmFill(deps: SealDeps): Promise<CardStatus | null> {
   }
   const seal = sealOfAnswer(parts, relayed);
   if (!seal) {
-    return { kind: 'cant-verify' };
+    return noSealOfAnswer(parts, relayed);
   }
   const verdict = verifyConfirmAnswer(parts.core, seal, relayed, deps);
   if (!verdict.ok) {
-    return { kind: 'cant-verify' };
+    return cantVerify(verdict.refusal);
   }
   if (verdict.answer.state === 'empty') {
     return { kind: 'filling' };
@@ -257,10 +283,11 @@ export type OpenResult =
  * settles (`finishOpenClaim`).
  */
 export async function openCard(deps: SealDeps, pin: string | null): Promise<OpenResult> {
-  const parts = await readyNow(deps);
-  if (!parts) {
-    return { ok: false, status: { kind: 'cant-verify' } };
+  const ready = await readyNow(deps);
+  if (!ready.ok) {
+    return { ok: false, status: ready.status };
   }
+  const parts = ready.parts;
   let phoneKey: Uint8Array;
   try {
     deps.keeper?.restoreOpenKey();
@@ -284,7 +311,7 @@ export async function openCard(deps: SealDeps, pin: string | null): Promise<Open
   const seal = sealOfAnswer(parts, relayed);
   if (!seal) {
     // The release stays sealed in the core, unopened: only that region's checked answer opens it.
-    return { ok: false, status: { kind: 'cant-verify' } };
+    return { ok: false, status: noSealOfAnswer(parts, relayed) };
   }
   let verdict: AnswerVerdict;
   try {
@@ -292,8 +319,11 @@ export async function openCard(deps: SealDeps, pin: string | null): Promise<Open
   } catch {
     verdict = { ok: false, refusal: 'core-failed' };
   }
-  if (!verdict.ok || verdict.answer.state !== 'opened') {
-    return { ok: false, status: { kind: 'cant-verify' } };
+  if (!verdict.ok) {
+    return { ok: false, status: cantVerify(verdict.refusal) };
+  }
+  if (verdict.answer.state !== 'opened') {
+    return { ok: false, status: cantVerify('not-opened') };
   }
   return { ok: true, uid: verdict.answer.uid, amountWei: verdict.answer.amountWei };
 }
