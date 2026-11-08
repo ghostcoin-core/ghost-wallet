@@ -80,8 +80,9 @@ describe('the Seal a card flow checks with', () => {
   it('is the one the attestation gives at the start of the flow, not the one the screen opened with', async () => {
     world.sealedCard(5n * GHOST);
     const gone = jest.fn(async () => new Map());
-    expect(await checkCard({ ...depsOf(world), refresh: gone })).toEqual({ kind: 'cant-verify' });
-    expect(await fillCard({ ...depsOf(world), refresh: gone }, GHOST, null)).toEqual({ ok: false, status: { kind: 'cant-verify' } });
+    const none = { kind: 'cant-verify', reason: 'no-verified-seal' };
+    expect(await checkCard({ ...depsOf(world), refresh: gone })).toEqual(none);
+    expect(await fillCard({ ...depsOf(world), refresh: gone }, GHOST, null)).toEqual({ ok: false, status: none });
     expect(gone).toHaveBeenCalledTimes(2);
     expect(world.calls).toEqual([]);
 
@@ -96,7 +97,7 @@ describe('the Seal a card flow checks with', () => {
     const failing = jest.fn(async () => {
       throw new Error('no attestation');
     });
-    expect(await checkCard({ ...depsOf(world), refresh: failing })).toEqual({ kind: 'cant-verify' });
+    expect(await checkCard({ ...depsOf(world), refresh: failing })).toEqual({ kind: 'cant-verify', reason: 'refresh-failed' });
     expect(world.calls).toEqual([]);
   });
 });
@@ -265,7 +266,16 @@ describe('the card status of a Check', () => {
   });
 
   it('is "Can\'t verify this card", never an amount, for every answer that fails its check', async () => {
-    for (const tamper of ['bad-signature', 'other-key', 'replay', 'expired', 'other-measurement', 'other-card'] as const) {
+    // Each with the check that failed: the core's refusal, or the relay's own `bad-answer`.
+    const reasons = {
+      'bad-signature': 'bad-signature',
+      'other-key': 'bad-signature',
+      replay: 'bad-answer',
+      expired: 'expired',
+      'other-measurement': 'wrong-measurement',
+      'other-card': 'bad-answer',
+    } as const;
+    for (const tamper of Object.keys(reasons) as (keyof typeof reasons)[]) {
       world = resetWorld();
       world.sealedCard(5n * GHOST);
       // A first answer, so a replay has an old one to send.
@@ -273,20 +283,20 @@ describe('the card status of a Check', () => {
       await checkWithSeal('https://seal.example', world.native);
       world.seal.tamper = tamper;
       const status = await checkCard(depsOf(world));
-      expect([tamper, status]).toEqual([tamper, { kind: 'cant-verify' }]);
+      expect([tamper, status]).toEqual([tamper, { kind: 'cant-verify', reason: reasons[tamper] }]);
       expect(statusText(status!)).toBe("Can't verify this card");
     }
   });
 
   it('is "Can\'t verify this card" for a perfectly signed answer from a Seal the app\'s list does not pin', async () => {
-    expect(await checked((w) => void w.sealedCard(5n * GHOST), PINNED_MEASUREMENTS)).toEqual({ kind: 'cant-verify' });
+    expect(await checked((w) => void w.sealedCard(5n * GHOST), PINNED_MEASUREMENTS)).toEqual({ kind: 'cant-verify', reason: 'not-pinned' });
   });
 
   it('is "Can\'t verify this card" without tapping when there is no Seal or no core', async () => {
     world.noSeal = true;
-    expect(await checkCard(depsOf(world))).toEqual({ kind: 'cant-verify' });
+    expect(await checkCard(depsOf(world))).toEqual({ kind: 'cant-verify', reason: 'no-verified-seal' });
     world.noSeal = false;
-    expect(await checkCard({ ...depsOf(world), core: null })).toEqual({ kind: 'cant-verify' });
+    expect(await checkCard({ ...depsOf(world), core: null })).toEqual({ kind: 'cant-verify', reason: 'no-answer-core' });
     expect(world.calls).toEqual([]);
   });
 

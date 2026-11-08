@@ -20,7 +20,8 @@ export type CardStatus =
   | { kind: 'locked' }
   | { kind: 'not-ghost' }
   | { kind: 'no-connection' }
-  | { kind: 'cant-verify' }
+  /** Why: a short code of the check that failed, and region ids; never a key, card data, a PIN or a challenge. */
+  | { kind: 'cant-verify'; reason: string }
   /** Nothing was learned about the card: tap it again. */
   | { kind: 'retry'; message: string };
 
@@ -34,6 +35,29 @@ export const STATUS_TEXT = {
   'no-connection': "Can't check right now (no connection)",
   'cant-verify': "Can't verify this card",
 } as const;
+
+/** The longest reason shown. */
+const REASON_CHARS = 160;
+
+/**
+ * A failed check's reason as the screen may show it: only letters, digits,
+ * spaces and `-:;,()._`, no run of hex longer than 16 digits, at most 160
+ * characters. The reasons are short codes and region ids already; this keeps
+ * anything else out of the screen.
+ */
+export function reasonText(reason: string): string {
+  const text = reason
+    .replace(/[^A-Za-z0-9 :;,()._-]/g, '?')
+    .replace(/[0-9A-Fa-f]{17,}/g, '?')
+    .trim()
+    .slice(0, REASON_CHARS);
+  return text === '' ? 'unknown' : text;
+}
+
+/** "Can't verify this card", with why. */
+export function cantVerify(reason: string): CardStatus {
+  return { kind: 'cant-verify', reason: reasonText(reason) };
+}
 
 /** A wei amount in GHOST, with no trailing zeros: 5, 1.5, 0.001. */
 export function ghostText(wei: bigint): string {
@@ -64,7 +88,7 @@ export function statusDetail(status: CardStatus): string | null {
     case 'opened':
       return status.finishing ? 'An Open of this card is under way.' : null;
     case 'cant-verify':
-      return 'The Seal’s answer did not pass this iPhone’s checks. Do not accept this card.';
+      return `The Seal’s answer did not pass this iPhone’s checks. Do not accept this card.\nReason: ${reasonText(status.reason)}`;
     case 'no-connection':
       return 'The Seal or the chain could not be reached. Try again with a connection.';
     default:
@@ -108,7 +132,7 @@ const PROBLEM_STATUS: Partial<Record<RelayProblem, CardStatus>> = {
   'pin-locked': { kind: 'locked' },
   spent: { kind: 'spent' },
   // An answer that is not over this challenge about this card: an old one replayed.
-  'bad-answer': { kind: 'cant-verify' },
+  'bad-answer': { kind: 'cant-verify', reason: 'bad-answer' },
 };
 
 /** What a failed relay says about the card; null when the person closed the card sheet. */
