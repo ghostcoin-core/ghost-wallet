@@ -9,10 +9,12 @@
 // against the pinned list, and the binding of the Seal's keys, this
 // challenge and that certificate). Only a verified result gives a Seal, and
 // only then is the relay pinned to that certificate (that region's host).
-// Anything else (no address, no native module, a fetch error or one past its
-// 10 second deadline, any refusal) gives null and drops that region's pin, so
-// cards homed there show "Can't verify this card", never an amount; the
-// other regions are not touched. The checks are the same for every region.
+// A fetch that fails (an error, or past its 10 second deadline) is tried once
+// more right away with a fresh challenge. Anything else (no address, no
+// native module, a second fetch failure, any refusal) gives null and drops
+// that region's pin, so cards homed there show "Can't verify this card",
+// never an amount; the other regions are not touched. The checks are the
+// same for every region.
 // Nothing here is cryptography, and nothing here logs.
 import {
   sealAttestationCore,
@@ -142,14 +144,19 @@ function sealOf(
   return { seal: { region, url, verifyingKey, measurement, kemKey, tlsCertSha256 }, reason: '' };
 }
 
-/** The code of a fetch that failed. */
+/** How many times one region's attestation is fetched before it is dropped: once, and once more right away. */
+export const ATTESTATION_FETCH_TRIES = 2;
+
+/** The code of a fetch that failed: the native cause (`attest-network(-1200)`) or the relay problem. */
 function fetchFailure(error: unknown): string {
-  return error instanceof SealRelayError ? error.problem : 'fetch-failed';
+  return error instanceof SealRelayError ? error.reason : 'fetch-failed';
 }
 
 /**
- * Fetches and checks one region's attestation once, and keeps the first
- * failure: the fetch's error code, the core's refusal, or `pin-failed`.
+ * Fetches and checks one region's attestation, and keeps the first failure:
+ * the fetch's error code, the core's refusal, or `pin-failed`. A fetch that
+ * fails is tried once more right away, with a fresh challenge, and the
+ * second failure is the one kept; the checks of the answer are the same.
  * Never throws: any failure is no Seal, with that region's pin dropped.
  */
 export async function attestSeal(deps: SealAttestationDeps): Promise<AttestedSeal> {
@@ -172,19 +179,27 @@ export async function attestSeal(deps: SealAttestationDeps): Promise<AttestedSea
     if (!core) {
       return drop('no-core');
     }
-    step = 'no-challenge';
-    const challenge = deps.random ? deps.random() : new Uint8Array(core.sealAttestationChallenge());
-    if (challenge.length !== 32) {
-      return drop('no-challenge');
+    let challenge: Uint8Array = new Uint8Array(0);
+    let fetched: Awaited<ReturnType<typeof fetchSealAttestation>> | null = null;
+    let fetchFailed = 'fetch-failed';
+    for (let tries = 0; tries < ATTESTATION_FETCH_TRIES && !fetched; tries += 1) {
+      step = 'no-challenge';
+      // A fresh challenge for every fetch, the retry's included.
+      challenge = deps.random ? deps.random() : new Uint8Array(core.sealAttestationChallenge());
+      if (challenge.length !== 32) {
+        return drop('no-challenge');
+      }
+      try {
+        fetched = await withDeadline(
+          deps.native === undefined ? fetchSealAttestation(url, challenge) : fetchSealAttestation(url, challenge, deps.native),
+          deps.deadlineMs ?? ATTESTATION_DEADLINE_MS,
+        );
+      } catch (error) {
+        fetchFailed = fetchFailure(error);
+      }
     }
-    let fetched: Awaited<ReturnType<typeof fetchSealAttestation>>;
-    try {
-      fetched = await withDeadline(
-        deps.native === undefined ? fetchSealAttestation(url, challenge) : fetchSealAttestation(url, challenge, deps.native),
-        deps.deadlineMs ?? ATTESTATION_DEADLINE_MS,
-      );
-    } catch (error) {
-      return drop(fetchFailure(error));
+    if (!fetched) {
+      return drop(fetchFailed);
     }
     step = 'core-failed';
     const verdict = core.verifySealAttestation({
@@ -209,7 +224,7 @@ export async function attestSeal(deps: SealAttestationDeps): Promise<AttestedSea
 }
 
 /**
- * Fetches and checks one region's attestation once. Never throws: any
+ * Fetches and checks one region's attestation (`attestSeal`). Never throws: any
  * failure is null, with that region's pin dropped (`attestSeal` says why).
  */
 export async function loadTrustedSeal(deps: SealAttestationDeps): Promise<TrustedSeal | null> {

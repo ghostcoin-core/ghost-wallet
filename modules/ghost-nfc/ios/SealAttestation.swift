@@ -9,6 +9,13 @@
 // attestation bytes and that hash, as hex. The request has a 10 second
 // timeout and the answer is capped at 32 KiB. Nothing here logs.
 //
+// A failure rejects with one short code per cause (`SealAttestationFailure`):
+// a network error with its `URLError` code number, an HTTP status other than
+// 200 with that status, no leaf certificate captured, an answer too long, an
+// answer that does not parse, or a bad challenge (a bad address is
+// `SealAddressException`). The code holds nothing else: no byte of the
+// answer, the challenge or the certificate.
+//
 // The relay (SealRelay.swift) then connects to the Seal only when its leaf
 // certificate's hash equals the pin JavaScript set after the core's check
 // (`SealPins`).
@@ -17,8 +24,44 @@ import ExpoModulesCore
 import Foundation
 import Security
 
+/// Why the Seal's attestation could not be fetched: one cause, with at most a number.
+enum SealAttestationFailure {
+  /// The request failed: the `URLError` code number (for example -1200).
+  case network(Int)
+  /// The Seal answered with an HTTP status other than 200.
+  case status(Int)
+  /// The connection presented no leaf certificate to hash.
+  case noLeaf
+  /// The answer is longer than `SealAttestation.maxBytes`.
+  case tooLong
+  /// The answer holds no attestation.
+  case parse
+  /// The challenge is not 64 hex digits.
+  case badChallenge
+
+  /// The code JavaScript reads (modules/ghost-nfc/relay.ts).
+  var code: String {
+    switch self {
+    case .network(let number): return "ERR_SEAL_ATTEST_NETWORK:\(number)"
+    case .status(let number): return "ERR_SEAL_ATTEST_STATUS:\(number)"
+    case .noLeaf: return "ERR_SEAL_ATTEST_NO_LEAF"
+    case .tooLong: return "ERR_SEAL_ATTEST_TOO_LONG"
+    case .parse: return "ERR_SEAL_ATTEST_PARSE"
+    case .badChallenge: return "ERR_SEAL_ATTEST_BAD_CHALLENGE"
+    }
+  }
+}
+
 final class SealAttestationException: Exception {
-  override var reason: String { "The Seal's attestation could not be fetched." }
+  let failure: SealAttestationFailure
+
+  init(_ failure: SealAttestationFailure, file: String = #fileID, line: UInt = #line, function: String = #function) {
+    self.failure = failure
+    super.init(file: file, line: line, function: function)
+  }
+
+  override var code: String { failure.code }
+  override var reason: String { "The Seal's attestation could not be fetched (\(failure.code))." }
 }
 
 /// The SHA-256 of the DER of a connection's leaf certificate.
@@ -45,7 +88,7 @@ final class SealAttestation {
       return
     }
     guard challenge.count == 64, challenge.allSatisfy({ $0.isHexDigit }) else {
-      promise.reject(SealAttestationException())
+      promise.reject(SealAttestationException(.badChallenge))
       return
     }
     let config = URLSessionConfiguration.ephemeral
@@ -86,6 +129,10 @@ private final class LeafCapture: NSObject, URLSessionDataDelegate {
   private var body = Data()
   private var status = 0
   private var settled = false
+  /// The server's trust challenge gave no leaf certificate to hash.
+  private var leafMissing = false
+  /// The answer was, or said it would be, longer than the cap.
+  private var overLong = false
 
   init(promise: Promise) {
     self.promise = promise
@@ -118,6 +165,11 @@ private final class LeafCapture: NSObject, URLSessionDataDelegate {
           let trust = challenge.protectionSpace.serverTrust,
           let hash = SealCertificates.leafSha256(trust)
     else {
+      if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+        lock.lock()
+        leafMissing = true
+        lock.unlock()
+      }
       completionHandler(.cancelAuthenticationChallenge, nil)
       return
     }
@@ -134,10 +186,13 @@ private final class LeafCapture: NSObject, URLSessionDataDelegate {
     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
   ) {
     let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+    let tooLong = response.expectedContentLength > Int64(SealAttestation.maxBytes)
     lock.lock()
     status = code
+    if tooLong {
+      overLong = true
+    }
     lock.unlock()
-    let tooLong = response.expectedContentLength > Int64(SealAttestation.maxBytes)
     completionHandler(code == 200 && !tooLong ? .allow : .cancel)
   }
 
@@ -145,6 +200,9 @@ private final class LeafCapture: NSObject, URLSessionDataDelegate {
     lock.lock()
     body.append(data)
     let tooLong = body.count > SealAttestation.maxBytes
+    if tooLong {
+      overLong = true
+    }
     lock.unlock()
     if tooLong {
       dataTask.cancel()
@@ -158,16 +216,45 @@ private final class LeafCapture: NSObject, URLSessionDataDelegate {
     let captured = leafSha256
     let answer = body
     let code = status
+    let noLeaf = leafMissing
+    let tooLong = overLong || answer.count > SealAttestation.maxBytes
     body = Data()
     lock.unlock()
     guard first else { return }
-    guard error == nil, code == 200, answer.count <= SealAttestation.maxBytes, let hash = captured,
-          let attestation = Self.attestation(answer), !attestation.isEmpty
-    else {
-      promise.reject(SealAttestationException())
+    if let failure = Self.failure(error: error, status: code, noLeaf: noLeaf, tooLong: tooLong, leaf: captured != nil) {
+      promise.reject(SealAttestationException(failure))
+      return
+    }
+    guard let hash = captured, let attestation = Self.attestation(answer), !attestation.isEmpty else {
+      promise.reject(SealAttestationException(.parse))
       return
     }
     promise.resolve(["attestation": Self.hex(attestation), "certSha256": Self.hex(hash)])
+  }
+
+  /// Why the request gave no answer to parse, or nil. A cancel of this
+  /// delegate's own (no leaf, too long, a status other than 200) is named for
+  /// its cause, not as the network error it ends with.
+  private static func failure(error: Error?, status: Int, noLeaf: Bool, tooLong: Bool, leaf: Bool) -> SealAttestationFailure? {
+    if noLeaf {
+      return .noLeaf
+    }
+    if tooLong {
+      return .tooLong
+    }
+    if status != 0 && status != 200 {
+      return .status(status)
+    }
+    if let error = error {
+      return .network((error as NSError).code)
+    }
+    if status != 200 {
+      return .status(status)
+    }
+    if !leaf {
+      return .noLeaf
+    }
+    return nil
   }
 
   /// The answer's attestation: the raw `GPA2` bytes, or JSON `{ "attestation": "<hex>" }`.
