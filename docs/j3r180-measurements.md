@@ -38,6 +38,46 @@ and marker use Keccak-256 with the original 0x01 padding. A card's SHA3-256 API
 pads with 0x06 and cannot compute them, so even a card with native SHA3-256
 still runs at least 4 of the 14 permutations in bytecode.
 
+## Where the 5 s goes, and what is left to try
+
+This is the recommended design: live Make, a native SHA-256 commit-data
+digest, and the statement signed at Check.
+
+| Part | Time | Share |
+| --- | --- | --- |
+| 10 Keccak-f\[1600\] permutations: seed (1), s, r, b₀, note key, note tag (5), F (2), C (1), marker (1) | 10 × 0.428 = 4.28 s | 84% |
+| Note seal (ChaCha20 0.28 s, Poly1305 about 0.32 s) | 0.60 s | 12% |
+| Atomic write, SHA-256 digest, I/O (estimated) | about 0.2 s | 4% |
+| **Total** | **about 5.1 s** | |
+
+Fixed constraints:
+
+- The chain does not change: F, C and the marker use Keccak-256 with 0x01
+  padding.
+- The secrets and note key are derived as Ghost's client derives them.
+- No elliptic-curve keys anywhere.
+- About 3.3 KB of RAM for an applet, no RAM int arrays, and `int` is
+  supported.
+
+Ideas not yet tried:
+
+- **Keccak:**
+  - Fold the next round's theta column sums into chi's writes, which saves
+    100 array reads per round.
+  - Keep more of the state in local variables.
+  - Use the lane-complementing transform, so chi needs fewer NOTs.
+  - Look for a cheaper 64-bit rotation on 16-bit limbs.
+  - Every permutation saved is 0.43 s.
+- **Fewer permutations:** the seed hash is the card's own construction, so it
+  could be native SHA-256 (saves 0.43 s). The other nine are fixed by Ghost.
+- **Seal:** ChaCha20 is already in local variables. Poly1305 might go faster
+  with a different limb size, kept below 2³¹.
+
+The generated methods come from `tools/card-probe/gen/keccak.py` and
+`tools/card-probe/gen/poly1305.py` (`python3 keccak.py` prints `keccakFast`).
+Measure any change on the card with `java Host.java fast`, and check that
+SHA3-256 and the seal still match the host.
+
 ## The card
 
 | Item | Measured |
