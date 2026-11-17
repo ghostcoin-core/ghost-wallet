@@ -953,31 +953,43 @@ pub fn finish_java_card_open(expect: JavaCardOpenExpect) -> String {
 }
 
 /// Holds the Phantom Key of the held release with no statement to check it
-/// against: for a card with no seal checks left, whose card id and fill come
-/// from its unsigned Identify. The chain then decides: the Summon finds a
-/// coin only if this is its key. Returns "" or an [`OpenRefusal`] code.
+/// against: for a card with no seal checks left. The card must still carry a
+/// certificate that passes [`check_certificate`] for a build on `chain_id`,
+/// for the card the release came from, at the fill its Identify gave. The
+/// chain then decides: the Summon finds a coin only if this is its key.
+/// Returns "" or a refusal code.
 #[uniffi::export]
-pub fn finish_java_card_open_unchecked(card_id: Vec<u8>, fill: u32) -> String {
-    let result = (|| {
-        let pending = released().take().ok_or(OpenRefusal::NothingHeld)?;
-        if pending.card_id[..] != card_id[..] || pending.fill != fill {
-            return Err(OpenRefusal::OtherFill);
+pub fn finish_java_card_open_unchecked(certificate: Vec<u8>, chain_id: u64, fill: u32) -> String {
+    let card = match check_certificate(&certificate, &pinned_trust(chain_id)) {
+        Ok(card) => card,
+        Err(refusal) => {
+            forget_release();
+            return refusal.code().to_owned();
         }
-        let seed = Zeroizing::new(sha3(&[KEY_DOMAIN, &pending.release[..32], &pending.release[32..]]));
-        let mut key_bytes = Zeroizing::new(Vec::with_capacity(33));
-        key_bytes.push(KEY_FORMAT_CODE);
-        key_bytes.extend_from_slice(&seed[..]);
-        let phantom = phantom_key_from_bytes(&key_bytes).map_err(|_| OpenRefusal::NotAKey)?;
-        let words = phantom.format_words().ok_or(OpenRefusal::NotAKey)?.as_str().to_owned();
-        if !hold_card_words(words) {
-            return Err(OpenRefusal::NotAKey);
-        }
-        Ok(())
-    })();
+    };
+    let result = hold_unchecked(&card.card_id, fill);
     match result {
         Ok(()) => String::new(),
         Err(refusal) => refusal.code().to_owned(),
     }
+}
+
+/// [`finish_java_card_open_unchecked`] after its certificate passed.
+pub fn hold_unchecked(card_id: &[u8; CARD_ID_BYTES], fill: u32) -> Result<(), OpenRefusal> {
+    let pending = released().take().ok_or(OpenRefusal::NothingHeld)?;
+    if pending.card_id != *card_id || pending.fill != fill {
+        return Err(OpenRefusal::OtherFill);
+    }
+    let seed = Zeroizing::new(sha3(&[KEY_DOMAIN, &pending.release[..32], &pending.release[32..]]));
+    let mut key_bytes = Zeroizing::new(Vec::with_capacity(33));
+    key_bytes.push(KEY_FORMAT_CODE);
+    key_bytes.extend_from_slice(&seed[..]);
+    let phantom = phantom_key_from_bytes(&key_bytes).map_err(|_| OpenRefusal::NotAKey)?;
+    let words = phantom.format_words().ok_or(OpenRefusal::NotAKey)?.as_str().to_owned();
+    if !hold_card_words(words) {
+        return Err(OpenRefusal::NotAKey);
+    }
+    Ok(())
 }
 
 /// Whether a release is held, waiting for [`finish_java_card_open`].

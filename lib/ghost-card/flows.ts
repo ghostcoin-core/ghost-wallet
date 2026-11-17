@@ -129,6 +129,10 @@ export async function statusOfStatement(deps: GhostCardDeps, statement: CoreJava
   if (chain.spent === true) {
     return { kind: 'spent-while-sealed', cardNumber };
   }
+  if (chain.spent === null) {
+    // Unspent is never assumed: a card is Sealed only when the markers were read.
+    return { kind: 'no-connection' };
+  }
   if (chain.status === 'absent') {
     return { kind: 'not-on-chain', fill: statement.fill, amountWei, cardNumber };
   }
@@ -337,10 +341,11 @@ export async function openGhostCard(deps: GhostCardDeps, code: Uint8Array): Prom
 
   if (!card.statement) {
     // No seal checks left: nothing to check the release against but the chain.
-    if (card.opened !== true) {
+    if (card.opened !== true || !card.certificate) {
+      core.forgetJavaCardRelease();
       return { ok: false, status: { kind: 'not-genuine', reason: 'open-refused' } };
     }
-    const refusal = core.finishJavaCardOpenUnchecked(identity.cardId, identity.fill);
+    const refusal = core.finishJavaCardOpenUnchecked(buffer(card.certificate), deps.chainId, identity.fill);
     return refusal === ''
       ? { ok: true, amountWei: null, fill: identity.fill, cardNumber: identity.cardNumber, ms: card.ms }
       : { ok: false, status: { kind: 'not-genuine', reason: refusal } };
