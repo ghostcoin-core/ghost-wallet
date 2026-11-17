@@ -11,7 +11,7 @@ Pod::Spec.new do |s|
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
-  s.frameworks = 'CoreNFC', 'Security', 'CryptoKit'
+  s.frameworks = 'CoreNFC', 'Security', 'CryptoKit', 'CoreHaptics', 'AudioToolbox', 'UIKit'
 
   # GhostCardBridge.h declares the two C functions of core/src/card.rs. The
   # native core's XCFramework, linked by the GhostCore pod, defines them; the

@@ -6,13 +6,9 @@ import javacard.framework.ISO7816;
 import javacard.framework.ISOException;
 import javacard.framework.JCSystem;
 import javacard.framework.Util;
-import javacard.security.AESKey;
-import javacard.security.KeyBuilder;
 import javacard.security.MessageDigest;
 import javacard.security.RandomData;
-import javacard.security.Signature;
 import javacardx.apdu.ExtendedLength;
-import javacardx.crypto.Cipher;
 
 /**
  * The Ghost bearer card applet, as docs/bearer-card-spec.md describes it.
@@ -20,8 +16,10 @@ import javacardx.crypto.Cipher;
  * The card draws each fill's Phantom Key itself, computes the coin's F,
  * commitment, marker and sealed note exactly as Ghost's client does, signs
  * seal statements with an LMS key made on the card, and releases a fill's
- * seed material only to its open code. No command returns the key, the card
- * random, the LMS private seed or the applet's code.
+ * seed material to whoever holds the card and opens it: the card is a bearer
+ * object, and no code or PIN stands between the holder and the GHOST. Until
+ * Open, no command returns the key or the card random; none ever returns the
+ * LMS private seed or the applet's code.
  *
  * Commands (CLA 0x80) are listed in card-applet/README.md.
  */
@@ -45,8 +43,6 @@ public final class GhostCard extends Applet implements ExtendedLength {
 
     /** The command is not allowed in the card's current state. */
     static final short SW_WRONG_STATE = (short) 0x6985;
-    /** The open code does not open this fill. */
-    static final short SW_WRONG_CODE = (short) 0x6982;
     /** Too few seal checks left (Make) or none at all (Check). */
     static final short SW_NO_CHECKS = (short) 0x6984;
 
@@ -74,13 +70,12 @@ public final class GhostCard extends Applet implements ExtendedLength {
     private static final short CERT_PART = 512;
 
     private static final short ID_LEN = 16;
-    private static final short CODE_LEN = 20;
     private static final short CD_LEN = 430;
     private static final short NOTE_BODY = 352;
-    private static final short MAKE_IN = 84;
+    private static final short MAKE_IN = 52;
     private static final short MAKE_OUT = 466;
-    private static final short OPEN_OUT = 100;
-    private static final short STATEMENT_LEN = 194;
+    private static final short OPEN_OUT = 68;
+    private static final short STATEMENT_LEN = 193;
     private static final short SIG_LEN = 2508;
     private static final short PUB_LEN = 56;
     private static final short IDENTIFY_LEN = 29;
@@ -113,9 +108,8 @@ public final class GhostCard extends Applet implements ExtendedLength {
     private static final short F_C = 84;
     private static final short F_DIGEST = 116;
     private static final short F_MARKER = 148;
-    private static final short F_CODE_HASH = 180;
-    private static final short F_CD = 212;
-    private static final short FILL_LEN = 642;
+    private static final short F_CD = 180;
+    private static final short FILL_LEN = 610;
 
     // ---------------- RAM work layout ----------------
 
@@ -135,19 +129,9 @@ public final class GhostCard extends Applet implements ExtendedLength {
     private static final short W_AMT = 763;    // 12
     private static final short W_CHAIN = 775;  // 8
     private static final short W_SALT = 783;   // 16
-    private static final short W_CODEH = 799;
-    private static final short W_DIG = 831;
-    private static final short W_TMP = 863;    // 64
-    private static final short WORK_LEN = 927;
-
-    // Open
-    private static final short O_CODE = 0;
-    private static final short O_CHAL = 20;
-    private static final short O_EK = 52;
-    private static final short O_MK = 84;
-    private static final short O_OUT = 116;    // fill 4 || counter 16 || ciphertext 64 || tag 16
-    private static final short O_BLK = 216;    // 16
-    private static final short O_MAC = 232;    // MAC input, 150
+    private static final short W_DIG = 799;
+    private static final short W_TMP = 831;    // 64
+    private static final short WORK_LEN = 895;
 
     // Check: the statement
     private static final short S_ID = 18;
@@ -160,8 +144,7 @@ public final class GhostCard extends Applet implements ExtendedLength {
     private static final short S_M = 123;
     private static final short S_LEFT = 155;
     private static final short S_LEAF = 157;
-    private static final short S_CONF = 161;
-    private static final short S_CHAL = 162;
+    private static final short S_CHAL = 161;
     private static final short C_TMP = 200;    // 32
 
     // The signing context of the last Check: valid 1 || q 4 || C 32 || Q 32 || checksum 2.
@@ -194,11 +177,7 @@ public final class GhostCard extends Applet implements ExtendedLength {
     private static final byte[] T_COMMITMENT = {24, 'g', 'h', 'o', 's', 't', '/', 'c', 'o', 'i', 'n', '-', 'c', 'o', 'm', 'm', 'i', 't', 'm', 'e', 'n', 't', '/', 'v', '1'};
     private static final byte[] T_MARKER = {20, 'g', 'h', 'o', 's', 't', '/', 'c', 'o', 'i', 'n', '-', 'm', 'a', 'r', 'k', 'e', 'r', '/', 'v', '2'};
     private static final byte[] D_KEY = {'g', 'h', 'o', 's', 't', '-', 'c', 'a', 'r', 'd', '-', 'k', 'e', 'y'};
-    private static final byte[] D_CODE = {'g', 'h', 'o', 's', 't', '-', 'c', 'a', 'r', 'd', '-', 'c', 'o', 'd', 'e'};
-    private static final byte[] D_OPEN_ENC = {'g', 'h', 'o', 's', 't', '-', 'c', 'a', 'r', 'd', '-', 'o', 'p', 'e', 'n', '-', 'e', 'n', 'c'};
-    private static final byte[] D_OPEN_MAC = {'g', 'h', 'o', 's', 't', '-', 'c', 'a', 'r', 'd', '-', 'o', 'p', 'e', 'n', '-', 'm', 'a', 'c'};
-    private static final byte[] D_OPEN = {'g', 'h', 'o', 's', 't', '-', 'c', 'a', 'r', 'd', '-', 'o', 'p', 'e', 'n', '-', 'v', '1'};
-    private static final byte[] D_SEAL = {'g', 'h', 'o', 's', 't', '-', 'c', 'a', 'r', 'd', '-', 's', 'e', 'a', 'l', '-', 'v', '1'};
+    private static final byte[] D_SEAL = {'g', 'h', 'o', 's', 't', '-', 'c', 'a', 'r', 'd', '-', 's', 'e', 'a', 'l', '-', 'v', '2'};
 
     // ---------------- fields (set once, at install) ----------------
 
@@ -222,10 +201,6 @@ public final class GhostCard extends Applet implements ExtendedLength {
     private final MessageDigest sha;
     private final MessageDigest shaK;
     private RandomData rng;
-    private final Cipher aes;
-    private final Signature cmac;
-    private final AESKey encKey;
-    private final AESKey macKey;
 
     private GhostCard(byte[] params, short off, byte len) {
         short certCap = CERT_DEFAULT;
@@ -255,10 +230,6 @@ public final class GhostCard extends Applet implements ExtendedLength {
         sha = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
         shaK = MessageDigest.getInstance(MessageDigest.ALG_SHA_256, false);
         rng = RandomData.getInstance(RandomData.ALG_TRNG);
-        aes = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_ECB_NOPAD, false);
-        cmac = Signature.getInstance(Signature.ALG_AES_CMAC_128, false);
-        encKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES_TRANSIENT_DESELECT, KeyBuilder.LENGTH_AES_256, false);
-        macKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES_TRANSIENT_DESELECT, KeyBuilder.LENGTH_AES_256, false);
 
         // The card id (also the LMS identifier I) and the LMS private seed
         // come from the card's own random source.
@@ -494,7 +465,7 @@ public final class GhostCard extends Applet implements ExtendedLength {
     // ---------------- Make ----------------
 
     /**
-     * Make: amount 12 || chain id 8 || writer nonce 32 || SHA3-256(open code) 32.
+     * Make: amount 12 || chain id 8 || writer nonce 32.
      * Answers fill 4 || commitment 32 || commit data 430, unsigned.
      */
     private void make(APDU apdu) {
@@ -507,7 +478,6 @@ public final class GhostCard extends Applet implements ExtendedLength {
         Util.arrayCopyNonAtomic(buf, in, b, W_AMT, (short) 12);
         Util.arrayCopyNonAtomic(buf, (short) (in + 12), b, W_CHAIN, (short) 8);
         Util.arrayCopyNonAtomic(buf, (short) (in + 20), b, W_WN, (short) 32);
-        Util.arrayCopyNonAtomic(buf, (short) (in + 52), b, W_CODEH, (short) 32);
 
         rng.nextBytes(b, W_RAND, (short) 32);
         rng.nextBytes(b, W_SALT, (short) 16);
@@ -591,7 +561,6 @@ public final class GhostCard extends Applet implements ExtendedLength {
         Nvm.copy(b, W_C, f, F_C, (short) 32);
         Nvm.copy(b, W_DIG, f, F_DIGEST, (short) 32);
         Nvm.copy(b, W_M, f, F_MARKER, (short) 32);
-        Nvm.copy(b, W_CODEH, f, F_CODE_HASH, (short) 32);
         Nvm.copy(b, W_CD, f, F_CD, CD_LEN);
         Nvm.copy(b, W_TMP, meta, M_FILL, (short) 4);
         Nvm.setByte(meta, M_STATE, STATE_SEALED);
@@ -676,39 +645,19 @@ public final class GhostCard extends Applet implements ExtendedLength {
     // ---------------- Check and the LMS signature ----------------
 
     /**
-     * Check: challenge 32, optionally followed by
-     * SHA3-256("ghost-card-code" || SHA3-256(open code) || challenge) 32.
-     * Uses one LMS leaf and answers the 194-byte statement; its signature is
+     * Check: challenge 32.
+     * Uses one LMS leaf and answers the 193-byte statement; its signature is
      * read with READ SIGNATURE.
      */
     private void check(APDU apdu) {
         require(phase() == PHASE_READY, SW_WRONG_STATE);
         require(checksLeft() > 0, SW_NO_CHECKS);
         byte[] buf = apdu.getBuffer();
-        short got = apdu.setIncomingAndReceive();
-        short len = apdu.getIncomingLength();
-        require(got == len && (len == 32 || len == 64), ISO7816.SW_WRONG_LENGTH);
-        short in = apdu.getOffsetCdata();
+        short in = receive(apdu, (short) 32);
         byte[] s = w;
         Util.arrayFillNonAtomic(s, (short) 0, (short) (C_TMP + 32), (byte) 0);
 
         byte st = state();
-        // The code confirmation: 0 not asked, 1 right, 2 wrong.
-        byte conf = 0;
-        if (len == 64) {
-            conf = 2;
-            if (st != STATE_BLANK) {
-                spBegin();
-                spAbsorb(D_CODE, (short) 0, (short) D_CODE.length);
-                spAbsorb(fill, F_CODE_HASH, (short) 32);
-                spAbsorb(buf, in, (short) 32);
-                spFinish(PAD_SHA3, s, C_TMP);
-                if (same(s, C_TMP, buf, (short) (in + 32), (short) 32)) {
-                    conf = 1;
-                }
-            }
-        }
-
         // Use up the leaf before anything is signed with it.
         short q = Util.getShort(meta, M_NEXT_LEAF);
         Util.setShort(s, C_TMP, (short) (q + 1));
@@ -729,7 +678,6 @@ public final class GhostCard extends Applet implements ExtendedLength {
         }
         Util.setShort(s, S_LEFT, (short) (LEAVES - q - 1));
         Util.setShort(s, (short) (S_LEAF + 2), q);
-        s[S_CONF] = conf;
         Util.arrayCopyNonAtomic(buf, in, s, S_CHAL, (short) 32);
 
         // Q = H(I || u32(q) || D_MESG || C || statement), then its checksum.
@@ -995,110 +943,29 @@ public final class GhostCard extends Applet implements ExtendedLength {
 
     // ---------------- Open and Refill ----------------
 
-    /** Hashes the open code at o[O_CODE] and checks it against this fill's. */
-    private boolean codeRight() {
-        spBegin();
-        spAbsorb(w, O_CODE, CODE_LEN);
-        spFinish(PAD_SHA3, w, O_EK);
-        boolean ok = same(w, O_EK, fill, F_CODE_HASH, (short) 32);
-        Util.arrayFillNonAtomic(w, O_EK, (short) 32, (byte) 0);
-        return ok;
-    }
-
     /**
-     * Open: open code 20 || challenge 32. Marks the fill opened, then answers
-     * fill 4 || counter block 16 || AES-256-CTR(card random || writer nonce) 64
-     * || AES-CMAC tag 16.
+     * Open: no data. Marks the fill opened, then answers
+     * fill 4 || card random 32 || writer nonce 32: the bearer takes the
+     * fill's seed material, and the phone rebuilds the key and the coin from it.
      */
     private void open(APDU apdu) {
         byte st = state();
         require(phase() == PHASE_READY && (st == STATE_SEALED || st == STATE_OPENED), SW_WRONG_STATE);
-        byte[] buf = apdu.getBuffer();
-        short in = receive(apdu, (short) 52);
-        byte[] b = w;
-        Util.arrayFillNonAtomic(b, (short) 0, (short) (O_MAC + 150), (byte) 0);
-        Util.arrayCopyNonAtomic(buf, in, b, O_CODE, (short) 52);
-        if (!codeRight()) {
-            Util.arrayFillNonAtomic(b, O_CODE, CODE_LEN, (byte) 0);
-            ISOException.throwIt(SW_WRONG_CODE);
-        }
         if (st == STATE_SEALED) {
             Nvm.begin();
             Nvm.setByte(meta, M_STATE, STATE_OPENED);
             Nvm.commit();
         }
-        openKey(D_OPEN_ENC, O_EK);
-        openKey(D_OPEN_MAC, O_MK);
-        Util.arrayFillNonAtomic(b, O_CODE, CODE_LEN, (byte) 0);
-
-        short out = O_OUT;
-        Util.arrayCopyNonAtomic(meta, M_FILL, b, out, (short) 4);
-        short ctr = (short) (out + 4);
-        short ct = (short) (out + 20);
-        rng.nextBytes(b, ctr, (short) 16);
-
-        // AES-256-CTR: the key stream is AES(counter block + i), big-endian increments.
-        encKey.setKey(b, O_EK);
-        aes.init(encKey, Cipher.MODE_ENCRYPT);
-        Util.arrayCopyNonAtomic(b, ctr, b, O_BLK, (short) 16);
-        Util.arrayCopyNonAtomic(fill, F_RAND, b, ct, (short) 64);
-        for (short i = 0; i < 64; i += 16) {
-            aes.doFinal(b, O_BLK, (short) 16, lh, (short) 0);
-            for (short j = 0; j < 16; j++) {
-                b[(short) (ct + i + j)] ^= lh[j];
-            }
-            for (short j = 15; j >= 0; j--) {
-                b[(short) (O_BLK + j)]++;
-                if (b[(short) (O_BLK + j)] != 0) {
-                    break;
-                }
-            }
-        }
-        Util.arrayFillNonAtomic(lh, (short) 0, (short) 16, (byte) 0);
-        encKey.clearKey();
-
-        // Tag = AES-CMAC over the domain, card id, fill, challenge, counter block and ciphertext.
-        short m = O_MAC;
-        Util.arrayCopyNonAtomic(D_OPEN, (short) 0, b, m, (short) D_OPEN.length);
-        m += (short) D_OPEN.length;
-        Util.arrayCopyNonAtomic(cardId, (short) 0, b, m, ID_LEN);
-        m += ID_LEN;
-        Util.arrayCopyNonAtomic(meta, M_FILL, b, m, (short) 4);
-        m += 4;
-        Util.arrayCopyNonAtomic(b, O_CHAL, b, m, (short) 32);
-        m += 32;
-        Util.arrayCopyNonAtomic(b, ctr, b, m, (short) 80); // counter block and ciphertext
-        m += 80;
-        macKey.setKey(b, O_MK);
-        cmac.init(macKey, Signature.MODE_SIGN);
-        cmac.sign(b, O_MAC, (short) (m - O_MAC), b, (short) (out + 84));
-        macKey.clearKey();
-        Util.arrayFillNonAtomic(b, O_EK, (short) 64, (byte) 0);
-
-        send(apdu, b, out, OPEN_OUT);
-        Util.arrayFillNonAtomic(b, (short) 0, (short) (O_MAC + 150), (byte) 0);
+        byte[] b = w;
+        Util.arrayCopyNonAtomic(meta, M_FILL, b, (short) 0, (short) 4);
+        Util.arrayCopyNonAtomic(fill, F_RAND, b, (short) 4, (short) 64);
+        send(apdu, b, (short) 0, OPEN_OUT);
+        Util.arrayFillNonAtomic(b, (short) 0, OPEN_OUT, (byte) 0);
     }
 
-    /** w[out..out+32) = SHA3-256(domain || card id || fill || open code || challenge). */
-    private void openKey(byte[] domain, short out) {
-        spBegin();
-        spAbsorb(domain, (short) 0, (short) domain.length);
-        spAbsorb(cardId, (short) 0, ID_LEN);
-        spAbsorb(meta, M_FILL, (short) 4);
-        spAbsorb(w, O_CODE, (short) 52); // the code, then the challenge
-        spFinish(PAD_SHA3, w, out);
-    }
-
-    /** Refill: open code 20. On an opened fill with its right code, wipes the fill and returns to blank. */
+    /** Refill: no data. On an opened fill, wipes the fill and returns to blank. */
     private void refill(APDU apdu) {
         require(phase() == PHASE_READY && state() == STATE_OPENED, SW_WRONG_STATE);
-        byte[] buf = apdu.getBuffer();
-        short in = receive(apdu, CODE_LEN);
-        Util.arrayFillNonAtomic(w, (short) 0, (short) (O_EK + 32), (byte) 0);
-        Util.arrayCopyNonAtomic(buf, in, w, O_CODE, CODE_LEN);
-        boolean ok = codeRight();
-        Util.arrayFillNonAtomic(w, O_CODE, CODE_LEN, (byte) 0);
-        require(ok, SW_WRONG_CODE);
         // One atomic write: the fill wiped (copied over from zeroed RAM) and the state blank.
         Util.arrayFillNonAtomic(w, (short) 0, FILL_LEN, (byte) 0);
         Nvm.begin();

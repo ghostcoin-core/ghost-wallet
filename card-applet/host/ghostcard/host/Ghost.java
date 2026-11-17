@@ -9,9 +9,6 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.bouncycastle.crypto.digests.KeccakDigest;
-import org.bouncycastle.crypto.engines.AESEngine;
-import org.bouncycastle.crypto.macs.CMac;
-import org.bouncycastle.crypto.params.KeyParameter;
 import org.bouncycastle.crypto.params.LMSPublicKeyParameters;
 import org.bouncycastle.crypto.signers.LMSSigner;
 
@@ -19,7 +16,7 @@ import org.bouncycastle.crypto.signers.LMSSigner;
  * What a phone does with the card's answers, written independently of the
  * applet: Ghost's derivations for a card's coin (checked against vectors from
  * Ghost's own client), the seal statement and its LMS signature, and Open's
- * AES-256-CTR plus AES-CMAC release.
+ * release of the fill's seed material.
  */
 public final class Ghost {
 
@@ -124,17 +121,6 @@ public final class Ghost {
         return c;
     }
 
-    // ---------------- open codes ----------------
-
-    public static byte[] codeHash(byte[] code) {
-        return sha3(code);
-    }
-
-    /** The value a Check sends to confirm an open code for one challenge. */
-    public static byte[] confirmation(byte[] codeHash, byte[] challenge) {
-        return sha3(ascii("ghost-card-code"), codeHash, challenge);
-    }
-
     // ---------------- the seal statement ----------------
 
     /** A parsed seal statement. */
@@ -150,14 +136,13 @@ public final class Ghost {
         public final byte[] marker;
         public final int checksLeft;
         public final long leaf;
-        public final int confirmation;
         public final byte[] challenge;
 
         public Statement(byte[] s) {
             if (s.length != CardClient.STATEMENT_LEN) {
                 throw new IllegalArgumentException("statement length " + s.length);
             }
-            if (!Arrays.equals(Arrays.copyOf(s, 18), ascii("ghost-card-seal-v1"))) {
+            if (!Arrays.equals(Arrays.copyOf(s, 18), ascii("ghost-card-seal-v2"))) {
                 throw new IllegalArgumentException("not a seal statement");
             }
             raw = s;
@@ -171,8 +156,7 @@ public final class Ghost {
             marker = Arrays.copyOfRange(s, 123, 155);
             checksLeft = ((s[155] & 0xFF) << 8) | (s[156] & 0xFF);
             leaf = u32(s, 157);
-            confirmation = s[161];
-            challenge = Arrays.copyOfRange(s, 162, 194);
+            challenge = Arrays.copyOfRange(s, 161, 193);
         }
     }
 
@@ -198,37 +182,16 @@ public final class Ghost {
     // ---------------- Open ----------------
 
     /**
-     * Checks an Open answer's tag and decrypts it: returns the card random
-     * and the writer nonce (64 bytes), or throws when the tag is wrong.
+     * Reads an Open answer: returns the card random and the writer nonce
+     * (64 bytes), or throws when it is for another fill.
      */
-    public static byte[] openRelease(byte[] cardId, byte[] code, byte[] challenge, long expectFill, byte[] answer) {
-        if (answer.length != 100) {
+    public static byte[] openRelease(long expectFill, byte[] answer) {
+        if (answer.length != 68) {
             throw new IllegalArgumentException("Open answer length " + answer.length);
         }
-        byte[] fill = Arrays.copyOfRange(answer, 0, 4);
-        if (u32(fill, 0) != expectFill) {
+        if (u32(answer, 0) != expectFill) {
             throw new SecurityException("Open answer for another fill");
         }
-        byte[] ctr = Arrays.copyOfRange(answer, 4, 20);
-        byte[] ct = Arrays.copyOfRange(answer, 20, 84);
-        byte[] tagGot = Arrays.copyOfRange(answer, 84, 100);
-        byte[] encKey = sha3(ascii("ghost-card-open-enc"), cardId, fill, code, challenge);
-        byte[] macKey = sha3(ascii("ghost-card-open-mac"), cardId, fill, code, challenge);
-        CMac mac = new CMac(AESEngine.newInstance());
-        mac.init(new KeyParameter(macKey));
-        byte[] in = CardClient.concat(ascii("ghost-card-open-v1"), cardId, fill, challenge, ctr, ct);
-        mac.update(in, 0, in.length);
-        byte[] tag = new byte[16];
-        mac.doFinal(tag, 0);
-        if (!MessageDigest.isEqual(tag, tagGot)) {
-            throw new SecurityException("Open answer's tag is wrong");
-        }
-        try {
-            Cipher c = Cipher.getInstance("AES/CTR/NoPadding");
-            c.init(Cipher.DECRYPT_MODE, new SecretKeySpec(encKey, "AES"), new IvParameterSpec(ctr));
-            return c.doFinal(ct);
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
+        return Arrays.copyOfRange(answer, 4, 68);
     }
 }

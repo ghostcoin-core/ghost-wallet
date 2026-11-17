@@ -2,8 +2,7 @@
 // Card applet) is checked on this iPhone alone: its certificate against the
 // issuer keys this app pins, its seal statement's signature over this tap's
 // own challenge, the card number, and its coin on chain, buried and unspent.
-// No Seal or Ghost server takes part. An open code, if given, is confirmed
-// by the card without opening it. A card is shown Sealed only when every
+// No Seal or Ghost server takes part. A card is shown Sealed only when every
 // check passes; anything else is "not safe to accept".
 //
 // An NTAG 424 card is told apart in the same tap: it is "Carry to Claim",
@@ -12,14 +11,14 @@ import { useRouter } from 'expo-router';
 import { useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
-import { GhostCardStatusPanel, OpenCodeInput } from '../components/ghost-card-ui';
+import { GhostCardStatusPanel } from '../components/ghost-card-ui';
 import { CardBusy, CardStatusPanel } from '../components/seal-ui';
 import { colors } from '../components/theme';
 import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
 import { PaymentExit, PaymentProgress } from '../components/vanish-ui';
 import { accountZeroAddress } from '../lib/account';
 import { ghostCardDeps } from '../lib/ghost-card/deps';
-import { checkGhostCard, readOpenCode, refillGhostCard, type CheckResult } from '../lib/ghost-card/flows';
+import { checkGhostCard, refillGhostCard, type CheckResult } from '../lib/ghost-card/flows';
 import type { CardStatus } from '../lib/seal/card-status';
 import { checkCard, confirmFill, sealDeps } from '../lib/seal/flows';
 import { failureReason } from '../lib/node/failure-reason';
@@ -41,15 +40,12 @@ export default function CheckCardScreen() {
   const [cards] = useState(cardsSupported);
   const ghostCards = deps.nfc !== null && deps.core !== null;
   const [busy, setBusy] = useState<'check' | 'seal' | 'refill' | 'pay' | null>(null);
-  const [codeText, setCodeText] = useState('');
   const [result, setResult] = useState<CheckResult | null>(null);
   const [sealStatus, setSealStatus] = useState<CardStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sequence, setSequence] = useState<CorePaymentSequence | null>(null);
   const run = useRef(0);
 
-  const code = deps.core && codeText !== '' ? readOpenCode(deps.core, codeText) : null;
-  const codeBad = codeText !== '' && code === null;
   const status = result?.status ?? null;
 
   const rebuild = useMemo(() => (kit && sequence ? signVanishAgain(kit, sequence) : null), [kit, sequence]);
@@ -61,7 +57,7 @@ export default function CheckCardScreen() {
    * one more tap. A build without the Ghost card flows checks with the Seal.
    */
   async function check() {
-    if (busy !== null || codeBad) {
+    if (busy !== null) {
       return;
     }
     if (!ghostCards) {
@@ -75,7 +71,7 @@ export default function CheckCardScreen() {
     setError(null);
     let checked: CheckResult | null = null;
     try {
-      checked = await checkGhostCard(deps, code);
+      checked = await checkGhostCard(deps);
       if (mine === run.current && checked) {
         setResult(checked);
       }
@@ -109,22 +105,21 @@ export default function CheckCardScreen() {
     }
   }
 
-  /** An opened card whose coin is spent: Refill with its code, then fill it again. */
+  /** An opened card whose coin is spent: Refill, then fill it again. */
   async function reuse() {
-    if (!code || busy !== null) {
+    if (busy !== null) {
       return;
     }
     setBusy('refill');
     setError(null);
     try {
-      const refilled = await refillGhostCard(deps, code);
+      const refilled = await refillGhostCard(deps);
       if (!refilled.ok) {
         if (refilled.status) {
           setResult({ status: refilled.status, statement: null, ms: null, commitData: null });
         }
         return;
       }
-      setCodeText('');
       router.replace('/fill-ghost-card');
     } finally {
       setBusy(null);
@@ -169,19 +164,10 @@ export default function CheckCardScreen() {
           Tap a Ghost card to see what it holds. This iPhone checks the card&apos;s own signature over a fresh challenge,
           and its coin on the chain.
         </Text>
-        <Panel style={styles.form}>
-          <Text style={textStyles.quiet}>Open code (optional): the card confirms it without opening</Text>
-          <OpenCodeInput value={codeText} onChange={setCodeText} testID="check-card-code" />
-          {codeBad ? (
-            <Text style={textStyles.quiet} testID="check-card-code-error">
-              An open code is 32 letters (A to Z) and digits (2 to 7).
-            </Text>
-          ) : null}
-        </Panel>
         <Button
           label={busy === 'check' ? 'Hold the card near the iPhone' : 'Check NFC Chip'}
           icon="check"
-          disabled={busy !== null || !cards || codeBad}
+          disabled={busy !== null || !cards}
           onPress={() => void check()}
           testID="check-card-run"
         />
@@ -251,14 +237,13 @@ export default function CheckCardScreen() {
           <Panel style={styles.form} testID="check-card-reuse">
             <Text style={textStyles.quiet}>Reuse this card</Text>
             <Text style={textStyles.body}>
-              Its coin was taken off. With its open code above, the card can be emptied and filled again with a new key
-              and a new open code.
+              Its coin was taken off, so the card can be emptied and filled again with a new key.
             </Text>
             <Button
               label={busy === 'refill' ? 'Hold the card near the iPhone' : 'Reuse this card'}
               icon="key"
               secondary
-              disabled={busy !== null || !code}
+              disabled={busy !== null}
               onPress={() => void reuse()}
               testID="check-card-refill"
             />

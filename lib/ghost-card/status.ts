@@ -13,8 +13,6 @@ export type GhostCardStatus =
       amountWei: bigint;
       checksLeft: number;
       cardNumber: string;
-      /** Whether an open code was confirmed with this Check. */
-      codeConfirmed: boolean;
     }
   /** Sealed, and its Vanish is in the coin tree but not yet buried under enough blocks. */
   | { kind: 'settling'; fill: number; amountWei: bigint; cardNumber: string }
@@ -25,8 +23,6 @@ export type GhostCardStatus =
   /** The key was released; `spent` says whether the chain shows its coin taken off. */
   | { kind: 'opened'; fill: number; cardNumber: string; spent: boolean | null }
   | { kind: 'blank'; fill: number; checksLeft: number; cardNumber: string }
-  /** The open code handed over does not open this fill. */
-  | { kind: 'code-wrong'; cardNumber: string }
   /** Sealed, with no seal checks left: it can still be opened, never checked. */
   | { kind: 'no-checks'; cardNumber: string }
   /** A signature failed, or the issuer is unknown or revoked. `reason` is a short code. */
@@ -54,8 +50,6 @@ export function ghostStatusText(status: GhostCardStatus): string {
       return `Opened: ${NOT_SAFE}`;
     case 'blank':
       return `Blank (fill ${status.fill}): holds nothing`;
-    case 'code-wrong':
-      return `Open code wrong: ${NOT_SAFE}`;
     case 'no-checks':
       return `No seal checks left: ${NOT_SAFE}`;
     case 'not-genuine':
@@ -75,9 +69,7 @@ export function ghostStatusDetail(status: GhostCardStatus): string | null {
     case 'sealed':
       return [
         `Card ${status.cardNumber}. Check it matches the number printed on the card.`,
-        status.codeConfirmed
-          ? 'The open code you were given opens this card.'
-          : 'Ask for the open code and check it before you accept the card.',
+        'Whoever holds this card can open it, like cash.',
         `${status.checksLeft} seal ${status.checksLeft === 1 ? 'check' : 'checks'} left.`,
       ].join('\n');
     case 'settling':
@@ -88,14 +80,12 @@ export function ghostStatusDetail(status: GhostCardStatus): string | null {
       return 'Its coin was spent while the card says sealed. The card is broken: please report it.';
     case 'opened':
       return status.spent
-        ? 'Its coins were taken off. Whoever has its open code can reuse the card.'
+        ? 'Its coins were taken off. Whoever holds the card can fill it again.'
         : 'Its key was released to whoever opened it.';
     case 'blank':
       return `Card ${status.cardNumber}. ${status.checksLeft} seal checks left. Ready to fill.`;
-    case 'code-wrong':
-      return 'The open code you were given does not open this card.';
     case 'no-checks':
-      return 'The card can no longer prove what it holds. Whoever has its open code can still open it.';
+      return 'The card can no longer prove what it holds. Whoever holds it can still open it.';
     case 'not-genuine':
       return `Reason: ${status.reason}`;
     case 'carry-to-claim':
@@ -109,7 +99,7 @@ export function ghostStatusDetail(status: GhostCardStatus): string | null {
 
 /** Whether the status is shown in red. */
 export function ghostStatusIsAlarm(status: GhostCardStatus): boolean {
-  return status.kind === 'not-genuine' || status.kind === 'spent-while-sealed' || status.kind === 'code-wrong';
+  return status.kind === 'not-genuine' || status.kind === 'spent-while-sealed';
 }
 
 /** Whether a receiver may accept the card. */

@@ -43,8 +43,8 @@ pub use header_sync::{
 };
 pub use java_card::{
     JavaCardCheckInput, JavaCardError, JavaCardIdentity, JavaCardOpenExpect, JavaCardStatement, JavaCardVerdict,
-    finish_java_card_open, finish_java_card_open_unchecked, forget_java_card_release, has_java_card_release, java_card_code_confirmation,
-    java_card_code_hash, java_card_identity, java_card_new_open_code, java_card_number, java_card_open_code, java_card_random,
+    finish_java_card_open, finish_java_card_open_unchecked, forget_java_card_release, has_java_card_release,
+    java_card_identity, java_card_number, java_card_random,
     verify_java_card_check,
 };
 pub use restore_scan::{

@@ -4,10 +4,8 @@
 // the native core verifies what the card said (core/src/java_card.rs) and
 // this phone reads the coin's state from Ghost nodes (./chain.ts).
 //
-// The open code: Fill makes a new one before the card is tapped, shows it
-// once and asks the writer to keep it; only then is the card tapped. It is
-// never kept by the app. Open and Refill take it typed or scanned. A Check
-// may take it too, to confirm it without opening.
+// The card is a bearer object, like cash: whoever holds it can open it. No
+// flow asks for a code, PIN or anything else but the card.
 import { CardCancelled } from '../../modules/ghost-nfc';
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import type { CoreJavaCardStatement, JavaCardBindings } from '../../modules/ghost-core';
@@ -108,9 +106,6 @@ function verify(core: JavaCardBindings, deps: GhostCardDeps, card: CardTap, chal
 /** What a verified statement and the chain say about the card. */
 export async function statusOfStatement(deps: GhostCardDeps, statement: CoreJavaCardStatement): Promise<GhostCardStatus> {
   const cardNumber = statement.cardNumber;
-  if (statement.openCode === 'wrong') {
-    return { kind: 'code-wrong', cardNumber };
-  }
   if (statement.state === 'blank') {
     return { kind: 'blank', fill: statement.fill, checksLeft: statement.checksLeft, cardNumber };
   }
@@ -150,7 +145,6 @@ export async function statusOfStatement(deps: GhostCardDeps, statement: CoreJava
     amountWei,
     checksLeft: statement.checksLeft,
     cardNumber,
-    codeConfirmed: statement.openCode === 'right',
   };
 }
 
@@ -173,21 +167,19 @@ export type CheckResult = {
 };
 
 /**
- * Checks the next card tapped: a fresh challenge, optionally confirming
- * `code` (the open code's 20 bytes), the card's signed statement verified by
- * the native core, and its coin read from the chain. Null when the sheet was
- * closed. An NTAG 424 card is "Carry to Claim".
+ * Checks the next card tapped: a fresh challenge, the card's signed
+ * statement verified by the native core, and its coin read from the chain.
+ * Null when the sheet was closed. An NTAG 424 card is "Carry to Claim".
  */
-export async function checkGhostCard(deps: GhostCardDeps, code: Uint8Array | null = null): Promise<CheckResult | null> {
+export async function checkGhostCard(deps: GhostCardDeps): Promise<CheckResult | null> {
   const { core, nfc } = deps;
   if (!core || !nfc) {
     return { status: { kind: 'retry', message: 'This iPhone cannot read Ghost cards in this build.' }, statement: null, ms: null, commitData: null };
   }
   const challenge = bytes(core.javaCardRandom());
-  const confirmation = code ? bytes(core.javaCardCodeConfirmation(buffer(code), buffer(challenge))) : null;
   let card: CardTap;
   try {
-    card = await tap(() => nfc.javaCardCheck(ALERT.check, challenge, confirmation, true));
+    card = await tap(() => nfc.javaCardCheck(ALERT.check, challenge, true));
   } catch (error) {
     const status = statusOfTapFailure(error);
     return status ? { status, statement: null, ms: null, commitData: null } : null;
@@ -207,29 +199,6 @@ export async function checkGhostCard(deps: GhostCardDeps, code: Uint8Array | nul
   };
 }
 
-/** An open code made for a Fill: shown once, then given back to `fillGhostCard`. */
-export type NewOpenCode = { text: string; code: Uint8Array };
-
-/** A new open code from the native core's random source. */
-export function newOpenCode(core: JavaCardBindings): NewOpenCode {
-  const text = core.javaCardNewOpenCode();
-  return { text, code: bytes(core.javaCardOpenCode(text)) };
-}
-
-/** The open code typed or scanned, or null when it is not one. */
-export function readOpenCode(core: JavaCardBindings, text: string): Uint8Array | null {
-  try {
-    return bytes(core.javaCardOpenCode(text));
-  } catch {
-    return null;
-  }
-}
-
-/** Groups an open code's 32 characters in eights for reading aloud or writing down. */
-export function openCodeGroups(text: string): string {
-  return (text.replace(/[\s-]/g, '').toUpperCase().match(/.{1,8}/g) ?? []).join(' ');
-}
-
 export type FillResult =
   | {
       ok: true;
@@ -245,26 +214,24 @@ export type FillResult =
 
 /**
  * Fills the next card tapped (it must be blank) with `amountWei`: Make with
- * the open code's hash and a fresh writer nonce, then in the same tap the
- * writer's own Check confirming the code. Only a statement that says Sealed
+ * a fresh writer nonce, then in the same tap the writer's own Check. Only a
+ * statement that says Sealed
  * at Make's fill, with Make's commitment, the amount, this chain and a digest
  * of exactly the commit data Make returned, gives commit data to pay.
  */
-export async function fillGhostCard(deps: GhostCardDeps, amountWei: bigint, code: Uint8Array): Promise<FillResult> {
+export async function fillGhostCard(deps: GhostCardDeps, amountWei: bigint): Promise<FillResult> {
   const { core, nfc } = deps;
   if (!core || !nfc) {
     return { ok: false, status: { kind: 'retry', message: 'This iPhone cannot read Ghost cards in this build.' } };
   }
   const challenge = bytes(core.javaCardRandom());
-  const make = new Uint8Array(84);
+  const make = new Uint8Array(52);
   make.set(beBytes(amountWei, 12), 0);
   make.set(beBytes(deps.chainId, 8), 12);
   make.set(bytes(core.javaCardRandom()), 20);
-  make.set(bytes(core.javaCardCodeHash(buffer(code))), 52);
-  const confirmation = bytes(core.javaCardCodeConfirmation(buffer(code), buffer(challenge)));
   let card: CardTap;
   try {
-    card = await tap(() => nfc.javaCardFill(ALERT.fill, make, challenge, confirmation));
+    card = await tap(() => nfc.javaCardFill(ALERT.fill, make, challenge));
   } catch (error) {
     return { ok: false, status: statusOfTapFailure(error) };
   }
@@ -294,9 +261,7 @@ export async function fillGhostCard(deps: GhostCardDeps, amountWei: bigint, code
             ? 'fill-other-amount'
             : s.chainId !== deps.chainId
               ? 'fill-other-chain'
-              : s.openCode !== 'right'
-                ? 'fill-code-not-confirmed'
-                : null;
+              : null;
   if (reason) {
     return { ok: false, status: { kind: 'not-genuine', reason } };
   }
@@ -309,29 +274,24 @@ export type OpenResult =
   | { ok: false; status: GhostCardStatus | null };
 
 /**
- * Opens the next card tapped with `code`: the card's Check confirming the
- * code (and its commit data while sealed), then Open, whose answer goes to
- * the native core. The core recomputes the coin from what the card released
+ * Opens the next card tapped: the card's Check (and its commit data while
+ * sealed), then Open, which needs nothing but the card and whose answer goes
+ * to the native core. The core recomputes the coin from what the card released
  * and holds the key only when it is the coin the verified statement names.
  * For an opened card whose commit data is gone, the coin's salt and note come
  * from its leaf on chain.
  */
-export async function openGhostCard(deps: GhostCardDeps, code: Uint8Array): Promise<OpenResult> {
+export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
   const { core, nfc } = deps;
   if (!core || !nfc) {
     return { ok: false, status: { kind: 'retry', message: 'This iPhone cannot read Ghost cards in this build.' } };
   }
   const checkChallenge = bytes(core.javaCardRandom());
-  const openChallenge = bytes(core.javaCardRandom());
-  const confirmation = bytes(core.javaCardCodeConfirmation(buffer(code), buffer(checkChallenge)));
   core.forgetJavaCardRelease();
   let card: CardTap;
   try {
-    card = await tap(() => nfc.javaCardOpen(ALERT.open, code, checkChallenge, confirmation, openChallenge));
+    card = await tap(() => nfc.javaCardOpen(ALERT.open, checkChallenge));
   } catch (error) {
-    if (error instanceof GhostCardError && error.problem === 'wrong-code') {
-      return { ok: false, status: { kind: 'code-wrong', cardNumber: '' } };
-    }
     return { ok: false, status: statusOfTapFailure(error) };
   }
   if (card.kind === 'ntag') {
@@ -357,10 +317,6 @@ export async function openGhostCard(deps: GhostCardDeps, code: Uint8Array): Prom
     return { ok: false, status: verified.status };
   }
   const s = verified.statement;
-  if (s.openCode === 'wrong') {
-    core.forgetJavaCardRelease();
-    return { ok: false, status: { kind: 'code-wrong', cardNumber: s.cardNumber } };
-  }
   if (card.opened !== true) {
     return { ok: false, status: { kind: 'not-genuine', reason: 'open-refused' } };
   }
@@ -395,22 +351,19 @@ export async function openGhostCard(deps: GhostCardDeps, code: Uint8Array): Prom
 export type RefillResult = { ok: true; fill: number; ms: number } | { ok: false; status: GhostCardStatus | null };
 
 /**
- * Refills the next card tapped: an opened card, with its fill's `code`, goes
- * back to blank, ready for the next Fill. The screens offer it only once the
+ * Refills the next card tapped: an opened card goes back to blank, ready for
+ * the next Fill. The screens offer it only once the
  * chain shows the opened coin's marker spent.
  */
-export async function refillGhostCard(deps: GhostCardDeps, code: Uint8Array): Promise<RefillResult> {
+export async function refillGhostCard(deps: GhostCardDeps): Promise<RefillResult> {
   const { core, nfc } = deps;
   if (!core || !nfc) {
     return { ok: false, status: { kind: 'retry', message: 'This iPhone cannot read Ghost cards in this build.' } };
   }
   let card: CardTap;
   try {
-    card = await tap(() => nfc.javaCardRefill(ALERT.refill, code));
+    card = await tap(() => nfc.javaCardRefill(ALERT.refill));
   } catch (error) {
-    if (error instanceof GhostCardError && error.problem === 'wrong-code') {
-      return { ok: false, status: { kind: 'code-wrong', cardNumber: '' } };
-    }
     return { ok: false, status: statusOfTapFailure(error) };
   }
   if (card.kind === 'ntag') {

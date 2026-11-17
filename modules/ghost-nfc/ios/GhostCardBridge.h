@@ -47,9 +47,7 @@ intptr_t ghost_wallet_seal_home_region(const uint8_t *uid, uintptr_t uid_len, co
 // answer goes from the card module to the core here; JavaScript never sees
 // it, nor what it releases.
 
-/// Checks the Open answer's tag for card `card_id` (16 bytes), opened with
-/// `code` (20 bytes) over `challenge` (32 bytes), decrypts it and holds the
-/// release for finish_java_card_open. Returns 0, -1 when it is refused, -2
-/// for a wrong length, -3 for a null pointer.
-intptr_t ghost_wallet_java_card_take_open(const uint8_t *card_id, const uint8_t *code, const uint8_t *challenge,
-                                          const uint8_t *answer, uintptr_t answer_len);
+/// Holds the Open answer of card `card_id` (16 bytes) for
+/// finish_java_card_open, which checks the coin it makes. Returns 0, -1 when
+/// it is refused, -2 for a wrong length, -3 for a null pointer.
+intptr_t ghost_wallet_java_card_take_open(const uint8_t *card_id, const uint8_t *answer, uintptr_t answer_len);

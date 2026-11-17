@@ -1,24 +1,24 @@
-// Open a Ghost card into my wallet: type the card's open code, then tap the
-// card. In one tap the card signs a seal statement confirming the code, then
-// releases its seed material encrypted to this tap. The native core checks
-// the card's signature and the release's tag, recomputes the Phantom Key, F,
-// the commitment and the marker, and holds the key only when it makes
-// exactly the card's coin. The app then at once Summons the coin into this
-// account with the usual restart-safe payment. Once that settles and the
-// chain shows the coin spent, the card can be reused: Refill with the same
-// code empties it, and Fill gives it a new key and a new open code.
+// Open a Ghost card into my wallet: tap the card. It is a bearer object, so
+// nothing else is needed. In one tap the card signs a seal statement over
+// this iPhone's challenge, then releases its seed material. The native core
+// checks the card's signature, recomputes the Phantom Key, F, the commitment
+// and the marker, and holds the key only when it makes exactly the card's
+// coin. The app then at once Summons the coin into this account with the
+// usual restart-safe payment. Once that settles and the chain shows the coin
+// spent, the card can be reused: Refill empties it, and Fill gives it a new
+// key.
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
-import { GhostCardStatusPanel, OpenCodeInput } from '../components/ghost-card-ui';
+import { GhostCardStatusPanel } from '../components/ghost-card-ui';
 import { CardBusy } from '../components/seal-ui';
 import { colors } from '../components/theme';
 import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
 import { CoinsBack, PaymentExit, PaymentProgress } from '../components/vanish-ui';
 import { accountZeroAddress } from '../lib/account';
 import { ghostCardDeps } from '../lib/ghost-card/deps';
-import { openGhostCard, readOpenCode, refillGhostCard } from '../lib/ghost-card/flows';
+import { openGhostCard, refillGhostCard } from '../lib/ghost-card/flows';
 import type { GhostCardStatus } from '../lib/ghost-card/status';
 import { ghostText } from '../lib/seal/card-status';
 import { useSettings } from '../lib/settings/settings';
@@ -44,8 +44,6 @@ export default function OpenGhostCardScreen() {
   const deps = useMemo(() => ghostCardDeps(kit), [kit]);
   const cards = deps.nfc !== null && deps.core !== null;
 
-  // Kept only while this screen is open, for the Refill after the Summon.
-  const [codeText, setCodeText] = useState('');
   const [busy, setBusy] = useState<'open' | 'summon' | 'refill' | null>(null);
   const [status, setStatus] = useState<GhostCardStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,8 +51,6 @@ export default function OpenGhostCardScreen() {
   const [sequence, setSequence] = useState<CorePaymentSequence | null>(null);
   const [refilled, setRefilled] = useState<{ fill: number; ms: number } | null>(null);
   const settled = useRef(false);
-
-  const code = deps.core ? readOpenCode(deps.core, codeText) : null;
 
   const rebuild = useMemo(
     () => (kit && sequence && address ? proveRevealAgain(kit, sequence, CARD_KEY, address) : null),
@@ -79,7 +75,7 @@ export default function OpenGhostCardScreen() {
   }, [payment?.status, kit]);
 
   async function open() {
-    if (!code || busy !== null || !kit || !address) {
+    if (busy !== null || !kit || !address) {
       return;
     }
     setBusy('open');
@@ -87,7 +83,7 @@ export default function OpenGhostCardScreen() {
     setStatus(null);
     let result;
     try {
-      result = await openGhostCard(deps, code);
+      result = await openGhostCard(deps);
     } finally {
       setBusy(null);
     }
@@ -117,22 +113,21 @@ export default function OpenGhostCardScreen() {
     }
   }
 
-  /** Refills the card with the same code, then goes on to fill it again. */
+  /** Empties the card, then goes on to fill it again. */
   async function refill() {
-    if (!code || busy !== null) {
+    if (busy !== null) {
       return;
     }
     setBusy('refill');
     setError(null);
     try {
-      const result = await refillGhostCard(deps, code);
+      const result = await refillGhostCard(deps);
       if (!result.ok) {
         if (result.status) {
           setStatus(result.status);
         }
         return;
       }
-      setCodeText('');
       setRefilled({ fill: result.fill, ms: result.ms });
     } finally {
       setBusy(null);
@@ -162,21 +157,12 @@ export default function OpenGhostCardScreen() {
           <>
             <Text style={textStyles.body}>
               Opening releases the card&apos;s key to this iPhone and brings its GHOST into this wallet at once. After that
-              the card says Opened to everyone who checks it.
+              the card says Opened to everyone who checks it. Nothing but the card is needed.
             </Text>
-            <Panel style={styles.form}>
-              <Text style={textStyles.quiet}>The card&apos;s open code</Text>
-              <OpenCodeInput value={codeText} onChange={setCodeText} testID="ghost-open-code" />
-              {codeText !== '' && !code ? (
-                <Text style={textStyles.quiet} testID="ghost-open-code-error">
-                  An open code is 32 letters (A to Z) and digits (2 to 7).
-                </Text>
-              ) : null}
-            </Panel>
             <Button
               label={busy === 'open' ? 'Hold the card near the iPhone' : 'Tap the card to open it'}
               icon="receive"
-              disabled={!code || busy !== null || !cards}
+              disabled={busy !== null || !cards}
               onPress={() => void open()}
               testID="ghost-open-run"
             />
@@ -206,13 +192,13 @@ export default function OpenGhostCardScreen() {
           <Panel style={styles.form} testID="ghost-open-reuse">
             <Text style={textStyles.quiet}>Reuse this card</Text>
             <Text style={textStyles.body}>
-              Its coin is spent, so the card can be emptied and filled again with a new key and a new open code.
+              Its coin is spent, so the card can be emptied and filled again with a new key.
             </Text>
             <Button
               label={busy === 'refill' ? 'Hold the card near the iPhone' : 'Reuse this card'}
               icon="key"
               secondary
-              disabled={busy !== null || !code}
+              disabled={busy !== null}
               onPress={() => void refill()}
               testID="ghost-open-refill"
             />

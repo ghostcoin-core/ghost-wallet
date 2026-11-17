@@ -52,13 +52,12 @@ public final class CardTests {
         tests.put("blank: refusals", CardTests::blankRefusals);
         tests.put("sealed: refusals", CardTests::sealedRefusals);
         tests.put("opened: refusals, and Open again gives the same seed material", CardTests::openedRefusals);
-        tests.put("open codes: confirmation right, wrong, not asked", CardTests::codeConfirmation);
-        tests.put("an earlier fill's code opens nothing", CardTests::oldCodeOpensNothing);
+        tests.put("a blank card opens nothing; each fill opens to its own seed material", CardTests::fillsOpenToTheirOwn);
         tests.put("seal checks count down; Make needs 16; Check stops at 0; Open still works", CardTests::checksCountDown);
         tests.put("Make refuses with 15 checks left", CardTests::makeNeedsSixteen);
         tests.put("malformed commands are refused", CardTests::malformed);
         tests.put("short answers: a 256-byte reader gets the same Make", CardTests::shortAnswers);
-        tests.put("no answer ever carries the key, the card random or the LMS seed", CardTests::secretsNeverLeave);
+        tests.put("no answer carries the key or the LMS seed, nor the card random before Open", CardTests::secretsNeverLeave);
         tests.put("power cut at every write of Make", CardTests::tearMake);
         tests.put("power cut at every write of Check", CardTests::tearCheck);
         tests.put("power cut at every write of Open", CardTests::tearOpen);
@@ -151,7 +150,6 @@ public final class CardTests {
 
     /** What the writer's app keeps for a fill. */
     static final class Fill {
-        byte[] code = rand(20);
         byte[] nonce = rand(32);
         byte[] amount = be(RNG.nextLong() & 0x7FFFFFFFFFFFL, 12);
         byte[] chain = rand(8);
@@ -163,7 +161,7 @@ public final class CardTests {
 
     static Fill make(SimCard c) {
         Fill f = new Fill();
-        f.answer = c.client.make(f.amount, f.chain, f.nonce, Ghost.codeHash(f.code));
+        f.answer = c.client.make(f.amount, f.chain, f.nonce);
         check(f.answer.length == 466, "Make answers 466 bytes");
         f.number = Ghost.u32pub(f.answer, 0);
         f.commitment = Arrays.copyOfRange(f.answer, 4, 36);
@@ -172,8 +170,8 @@ public final class CardTests {
     }
 
     /** A Check, verified as a receiver's app does; returns the statement. */
-    static Statement verifiedCheck(SimCard c, byte[] pub, byte[] confirmation, byte[] challenge) {
-        byte[][] r = c.client.check(challenge, confirmation);
+    static Statement verifiedCheck(SimCard c, byte[] pub, byte[] challenge) {
+        byte[][] r = c.client.check(challenge);
         check(Ghost.lmsVerify(pub, r[0], r[1]), "the seal statement's LMS signature verifies");
         Statement s = new Statement(r[0]);
         same(s.challenge, challenge, "the statement signs this tap's challenge");
@@ -182,14 +180,12 @@ public final class CardTests {
     }
 
     static Statement verifiedCheck(SimCard c, byte[] pub) {
-        return verifiedCheck(c, pub, null, rand(32));
+        return verifiedCheck(c, pub, rand(32));
     }
 
-    /** Opens and checks the release against the fill: tag, decryption, and Ghost's coin recomputed. */
+    /** Opens and checks the release against the fill: its fill number and Ghost's coin recomputed. */
     static byte[] openAndVerify(SimCard c, Fill f) {
-        byte[] challenge = rand(32);
-        byte[] ans = c.client.open(f.code, challenge);
-        byte[] release = Ghost.openRelease(c.client.identify().cardId, f.code, challenge, f.number, ans);
+        byte[] release = Ghost.openRelease(f.number, c.client.open());
         byte[] cardRandom = Arrays.copyOf(release, 32);
         same(Arrays.copyOfRange(release, 32, 64), f.nonce, "Open releases the writer's nonce");
         Ghost.Coin coin = Ghost.coin(cardRandom, f.nonce, Arrays.copyOfRange(f.commitData, 34, 50),
@@ -235,12 +231,11 @@ public final class CardTests {
         byte[] pub = c.client.publicKey();
         long fill = 0;
         for (Map<String, byte[]> v : readVectors()) {
-            byte[] code = rand(20);
             // Make draws the card random, the salt, then the note nonce's 9 random bytes.
             c.random.push(v.get("card_random"));
             c.random.push(v.get("salt"));
             c.random.push(v.get("note_random"));
-            byte[] ans = c.client.make(v.get("amount"), v.get("chain_id"), v.get("writer_nonce"), Ghost.codeHash(code));
+            byte[] ans = c.client.make(v.get("amount"), v.get("chain_id"), v.get("writer_nonce"));
             fill++;
             check(Ghost.u32pub(ans, 0) == fill, "fill number");
             same(Arrays.copyOfRange(ans, 4, 36), v.get("commitment"), "Make's commitment");
@@ -257,12 +252,10 @@ public final class CardTests {
             same(s.amount, v.get("amount"), "statement amount");
             same(s.chainId, v.get("chain_id"), "statement chain id");
 
-            byte[] challenge = rand(32);
-            byte[] release = Ghost.openRelease(c.client.identify().cardId, code, challenge, fill,
-                    c.client.open(code, challenge));
+            byte[] release = Ghost.openRelease(fill, c.client.open());
             same(Arrays.copyOf(release, 32), v.get("card_random"), "Open releases the card random");
             same(Arrays.copyOfRange(release, 32, 64), v.get("writer_nonce"), "and the writer nonce");
-            c.client.refill(code);
+            c.client.refill();
         }
         check(c.random.queue.isEmpty(), "Make drew exactly the scripted bytes");
     }
@@ -296,7 +289,7 @@ public final class CardTests {
             Statement o = verifiedCheck(c, pub);
             check(o.state == GhostCard.STATE_OPENED && o.fill == n, "opened (fill " + n + ")");
             same(o.commitment, f.commitment, "an opened card still says which coin");
-            c.client.refill(f.code);
+            c.client.refill();
             Statement b = verifiedCheck(c, pub);
             check(b.state == GhostCard.STATE_BLANK && b.fill == n, "blank (fill " + n + ") after Refill");
         }
@@ -311,7 +304,7 @@ public final class CardTests {
         long lastLeaf = -1;
         for (int i = 0; i < 40; i++) {
             byte[] challenge = rand(32);
-            byte[][] r = c.client.check(challenge, null);
+            byte[][] r = c.client.check(challenge);
             check(Ghost.lmsVerify(pub, r[0], r[1]), "signature " + i + " verifies");
             Statement s = new Statement(r[0]);
             check(s.leaf == lastLeaf + 1, "leaves are used in order, each once");
@@ -331,7 +324,7 @@ public final class CardTests {
         while (other.client.generate(16) < 1024) {
             // keep generating
         }
-        byte[][] r = c.client.check(rand(32), null);
+        byte[][] r = c.client.check(rand(32));
         check(!Ghost.lmsVerify(other.client.publicKey(), r[0], r[1]), "another card's public key fails");
         check(Ghost.lmsVerify(pub, r[0], r[1]), "its own still verifies");
         check(f.number == 1, "fill");
@@ -374,10 +367,10 @@ public final class CardTests {
         check(id.phase == GhostCard.PHASE_LOADING && id.leavesMade == 0 && id.certLen == 0, "a new card is loading");
         Fill f = new Fill();
         int s = CardClient.SW_WRONG_STATE;
-        refused(s, () -> c.client.make(f.amount, f.chain, f.nonce, Ghost.codeHash(f.code)), "Make while loading");
+        refused(s, () -> c.client.make(f.amount, f.chain, f.nonce), "Make while loading");
         refused(s, () -> c.client.checkStatementOnly(rand(32)), "Check while loading");
-        refused(s, () -> c.client.open(f.code, rand(32)), "Open while loading");
-        refused(s, () -> c.client.refill(f.code), "Refill while loading");
+        refused(s, () -> c.client.open(), "Open while loading");
+        refused(s, () -> c.client.refill(), "Refill while loading");
         refused(s, () -> c.client.send(0x22, 0, null, 10), "Commit data while loading");
         refused(s, () -> c.client.send(0x12, 0, null, 10), "Read certificate while loading");
         refused(s, () -> c.client.publicKey(), "Public key before the tree is made");
@@ -404,8 +397,8 @@ public final class CardTests {
         Fill f = new Fill();
         int s = CardClient.SW_WRONG_STATE;
         refused(s, () -> c.client.send(0x22, 0, null, 10), "Commit data on a blank card");
-        refused(s, () -> c.client.open(f.code, rand(32)), "Open on a blank card");
-        refused(s, () -> c.client.refill(f.code), "Refill on a blank card");
+        refused(s, () -> c.client.open(), "Open on a blank card");
+        refused(s, () -> c.client.refill(), "Refill on a blank card");
         refused(s, () -> c.client.generate(1), "Generate");
         check(c.client.identify().state == GhostCard.STATE_BLANK, "still blank");
     }
@@ -415,12 +408,8 @@ public final class CardTests {
         Fill f = make(c);
         Fill g = new Fill();
         int s = CardClient.SW_WRONG_STATE;
-        refused(s, () -> c.client.make(g.amount, g.chain, g.nonce, Ghost.codeHash(g.code)), "a second Make");
-        refused(s, () -> c.client.refill(f.code), "Refill on a sealed card, even with its code");
-        refused(CardClient.SW_WRONG_CODE, () -> c.client.open(g.code, rand(32)), "Open with a wrong code");
-        byte[] near = f.code.clone();
-        near[19] ^= 1;
-        refused(CardClient.SW_WRONG_CODE, () -> c.client.open(near, rand(32)), "Open with a code one bit off");
+        refused(s, () -> c.client.make(g.amount, g.chain, g.nonce), "a second Make");
+        refused(s, () -> c.client.refill(), "Refill on a sealed card");
         Identity id = c.client.identify();
         check(id.state == GhostCard.STATE_SEALED && id.fill == 1, "still sealed (fill 1)");
         same(c.client.commitData(), f.commitData, "Commit data again");
@@ -432,51 +421,31 @@ public final class CardTests {
         byte[] first = openAndVerify(c, f);
         Fill g = new Fill();
         int s = CardClient.SW_WRONG_STATE;
-        refused(s, () -> c.client.make(g.amount, g.chain, g.nonce, Ghost.codeHash(g.code)), "Make on an opened card");
+        refused(s, () -> c.client.make(g.amount, g.chain, g.nonce), "Make on an opened card");
         refused(s, () -> c.client.send(0x22, 0, null, 10), "Commit data on an opened card");
-        refused(CardClient.SW_WRONG_CODE, () -> c.client.refill(g.code), "Refill with a wrong code");
-        refused(CardClient.SW_WRONG_CODE, () -> c.client.open(g.code, rand(32)), "Open again with a wrong code");
         same(openAndVerify(c, f), first, "Open again gives the same seed material");
         check(c.client.identify().state == GhostCard.STATE_OPENED, "still opened");
     }
 
-    static void codeConfirmation() {
-        SimCard c = loadedCard(1024);
-        byte[] pub = c.client.publicKey();
-        byte[] ch = rand(32);
-        check(verifiedCheck(c, pub, Ghost.confirmation(Ghost.codeHash(rand(20)), ch), ch).confirmation == 2,
-                "a blank card confirms no code");
-        Fill f = make(c);
-        ch = rand(32);
-        check(verifiedCheck(c, pub, Ghost.confirmation(Ghost.codeHash(f.code), ch), ch).confirmation == 1, "right code");
-        ch = rand(32);
-        check(verifiedCheck(c, pub, Ghost.confirmation(Ghost.codeHash(rand(20)), ch), ch).confirmation == 2, "wrong code");
-        byte[] old = rand(32);
-        byte[] replay = Ghost.confirmation(Ghost.codeHash(f.code), old);
-        ch = rand(32);
-        check(verifiedCheck(c, pub, replay, ch).confirmation == 2, "a confirmation made for another challenge");
-        check(verifiedCheck(c, pub).confirmation == 0, "not asked");
-        c.client.open(f.code, rand(32));
-        ch = rand(32);
-        check(verifiedCheck(c, pub, Ghost.confirmation(Ghost.codeHash(f.code), ch), ch).confirmation == 1,
-                "an opened card still confirms its fill's code");
-    }
-
-    static void oldCodeOpensNothing() {
+    static void fillsOpenToTheirOwn() {
         SimCard c = loadedCard(1024);
         byte[] pub = c.client.publicKey();
         Fill f1 = make(c);
-        openAndVerify(c, f1);
-        c.client.refill(f1.code);
-        refused(CardClient.SW_WRONG_STATE, () -> c.client.open(f1.code, rand(32)), "a blank card opens for no code");
-        refused(CardClient.SW_WRONG_STATE, () -> c.client.refill(f1.code), "nor refills");
+        byte[] r1 = openAndVerify(c, f1);
+        c.client.refill();
+        refused(CardClient.SW_WRONG_STATE, () -> c.client.open(), "a blank card opens nothing");
+        refused(CardClient.SW_WRONG_STATE, () -> c.client.refill(), "nor refills");
         Fill f2 = make(c);
         check(f2.number == 2, "fill 2");
-        refused(CardClient.SW_WRONG_CODE, () -> c.client.open(f1.code, rand(32)), "fill 1's code on fill 2");
-        byte[] ch = rand(32);
-        check(verifiedCheck(c, pub, Ghost.confirmation(Ghost.codeHash(f1.code), ch), ch).confirmation == 2,
-                "fill 1's code is not confirmed on fill 2");
-        openAndVerify(c, f2);
+        check(verifiedCheck(c, pub).state == GhostCard.STATE_SEALED, "fill 2 sealed");
+        byte[] r2 = openAndVerify(c, f2);
+        check(!Arrays.equals(r1, r2), "fill 2 releases its own seed material, not fill 1's");
+        try {
+            Ghost.openRelease(1, c.client.open());
+            check(false, "fill 2's answer read as fill 1's");
+        } catch (SecurityException e) {
+            // fill 2's answer is not fill 1's
+        }
     }
 
     static void checksCountDown() {
@@ -488,7 +457,7 @@ public final class CardTests {
         }
         Fill f = make(c);
         openAndVerify(c, f);
-        c.client.refill(f.code);
+        c.client.refill();
         check(verifiedCheck(c, pub).checksLeft == 16, "16 left");
         Fill g = make(c);
         check(g.number == 2, "Make works with 16 checks left");
@@ -499,9 +468,9 @@ public final class CardTests {
         }
         refused(CardClient.SW_NO_CHECKS, () -> c.client.checkStatementOnly(rand(32)), "Check with none left");
         openAndVerify(c, g);
-        c.client.refill(g.code);
+        c.client.refill();
         Fill h = new Fill();
-        refused(CardClient.SW_NO_CHECKS, () -> c.client.make(h.amount, h.chain, h.nonce, Ghost.codeHash(h.code)),
+        refused(CardClient.SW_NO_CHECKS, () -> c.client.make(h.amount, h.chain, h.nonce),
                 "Make with no checks left");
         Identity id = c.client.identify();
         check(id.state == GhostCard.STATE_BLANK && id.checksLeft == 0 && id.fill == 2, "a retired card: blank, 0 left");
@@ -513,7 +482,7 @@ public final class CardTests {
             c.client.checkStatementOnly(rand(32));
         }
         Fill f = new Fill();
-        refused(CardClient.SW_NO_CHECKS, () -> c.client.make(f.amount, f.chain, f.nonce, Ghost.codeHash(f.code)),
+        refused(CardClient.SW_NO_CHECKS, () -> c.client.make(f.amount, f.chain, f.nonce),
                 "Make with 15 checks left");
         check(c.client.identify().state == GhostCard.STATE_BLANK, "still blank");
     }
@@ -523,27 +492,24 @@ public final class CardTests {
         byte[] r = c.transmit(new byte[] {0x00, 0x10, 0, 0, 0});
         check(r[0] == 0x6E && r[1] == 0, "wrong CLA");
         refused(0x6D00, () -> c.client.send(0x7F, 0, null, 0), "unknown INS");
-        refused(0x6700, () -> c.client.send(0x20, 0, new byte[83], 0), "Make with 83 bytes");
-        refused(0x6700, () -> c.client.send(0x20, 0, new byte[85], 0), "Make with 85 bytes");
+        refused(0x6700, () -> c.client.send(0x20, 0, new byte[51], 0), "Make with 51 bytes");
+        refused(0x6700, () -> c.client.send(0x20, 0, new byte[84], 0), "Make with the old 84 bytes");
         refused(0x6700, () -> c.client.send(0x30, 0, new byte[31], 0), "Check with 31 bytes");
-        refused(0x6700, () -> c.client.send(0x30, 0, new byte[48], 0), "Check with 48 bytes");
+        refused(0x6700, () -> c.client.send(0x30, 0, new byte[64], 0), "Check with the old 64 bytes");
         Fill f = make(c);
-        refused(0x6700, () -> c.client.send(0x40, 0, new byte[51], 0), "Open with 51 bytes");
         refused(0x6A86, () -> c.client.send(0x22, 431, null, 1), "Commit data past the end");
         check(c.client.identify().state == GhostCard.STATE_SEALED, "still sealed");
         openAndVerify(c, f);
-        refused(0x6700, () -> c.client.send(0x50, 0, new byte[21], 0), "Refill with 21 bytes");
     }
 
     static void shortAnswers() throws Exception {
         SimCard c = loadedCard(256);
         byte[] pub = c.client.publicKey();
         Map<String, byte[]> v = readVectors().get(0);
-        byte[] code = rand(20);
         c.random.push(v.get("card_random"));
         c.random.push(v.get("salt"));
         c.random.push(v.get("note_random"));
-        byte[] ans = c.client.make(v.get("amount"), v.get("chain_id"), v.get("writer_nonce"), Ghost.codeHash(code));
+        byte[] ans = c.client.make(v.get("amount"), v.get("chain_id"), v.get("writer_nonce"));
         same(Arrays.copyOfRange(ans, 36, 466), v.get("commit_data"), "Make read in 256-byte answers");
         Statement s = verifiedCheck(c, pub);
         same(s.digest, Ghost.sha256(v.get("commit_data")), "digest");
@@ -569,12 +535,11 @@ public final class CardTests {
         SimCard c = loadedCard(1024);
         byte[] pub = c.client.publicKey();
         Map<String, byte[]> v = readVectors().get(1);
-        byte[] code = rand(20);
         c.random.push(v.get("card_random"));
         c.random.push(v.get("salt"));
         c.random.push(v.get("note_random"));
         c.answers.reset();
-        c.client.make(v.get("amount"), v.get("chain_id"), v.get("writer_nonce"), Ghost.codeHash(code));
+        c.client.make(v.get("amount"), v.get("chain_id"), v.get("writer_nonce"));
         for (int i = 0; i < 3; i++) {
             verifiedCheck(c, pub);
         }
@@ -582,28 +547,32 @@ public final class CardTests {
         c.client.commitData();
         c.client.certificate();
         c.client.publicKey();
-        byte[] ch = rand(32);
-        c.client.open(code, ch);
+        byte[] beforeOpen = c.answers.toByteArray();
+        c.client.open();
         verifiedCheck(c, pub);
         byte[] all = c.answers.toByteArray();
         byte[] seed = v.get("seed");
         byte[] key = CardClient.concat(new byte[] {0x20}, seed);
         Map<String, byte[]> secrets = new LinkedHashMap<>();
-        secrets.put("card random", v.get("card_random"));
         secrets.put("seed bytes", seed);
         secrets.put("s", Ghost.sha3(tag("ghost/secret/v1"), key));
         secrets.put("r", Ghost.sha3(tag("ghost/reveal-secret/v1"), key));
         secrets.put("note key", Ghost.sha3(tag("ghost/note-key/v1"), key));
         secrets.put("LMS seed", c.field("lmsSeed"));
-        secrets.put("open code", code);
         for (Map.Entry<String, byte[]> e : secrets.entrySet()) {
-            for (int at = 0; at + 8 <= e.getValue().length; at += 8) {
-                check(!contains(all, Arrays.copyOfRange(e.getValue(), at, at + 8)),
-                        "no answer carries any 8 bytes of the " + e.getKey());
-            }
+            noPartOf(all, e.getValue(), e.getKey());
         }
-        // The writer nonce is the writer's own; it appears only inside Open's ciphertext, never in the clear.
-        check(!contains(all, v.get("writer_nonce")), "the writer nonce is never sent back in the clear");
+        // Until Open, nothing the card says gives away the seed material it
+        // releases there: the card random, or the writer nonce sent with Make.
+        noPartOf(beforeOpen, v.get("card_random"), "card random before Open");
+        check(!contains(beforeOpen, v.get("writer_nonce")), "the writer nonce is never sent back before Open");
+    }
+
+    static void noPartOf(byte[] answers, byte[] secret, String name) {
+        for (int at = 0; at + 8 <= secret.length; at += 8) {
+            check(!contains(answers, Arrays.copyOfRange(secret, at, at + 8)),
+                    "no answer carries any 8 bytes of the " + name);
+        }
     }
 
     static byte[] tag(String t) {
@@ -650,7 +619,7 @@ public final class CardTests {
         int points = everyCut(c, () -> {
             Fill f = new Fill();
             last[0] = f;
-            f.answer = c.client.make(f.amount, f.chain, f.nonce, Ghost.codeHash(f.code));
+            f.answer = c.client.make(f.amount, f.chain, f.nonce);
         }, () -> {
             Identity id = c.client.identify();
             Fill f = last[0];
@@ -667,7 +636,7 @@ public final class CardTests {
                 same(s.digest, Ghost.sha256(f.commitData), "digest of the stored commit data");
                 f.commitment = s.commitment;
                 openAndVerify(c, f);
-                c.client.refill(f.code);
+                c.client.refill();
             }
         });
         check(points >= 8, "Make has its writes (" + points + ")");
@@ -682,7 +651,7 @@ public final class CardTests {
         make(c);
         long[] lastLeaf = {verifiedCheck(c, pub).leaf};
         int points = everyCut(c, () -> {
-            c.client.check(rand(32), null);
+            c.client.check(rand(32));
         }, () -> {
             // The leaf is either still unused or used up; the next Check takes a fresh one and verifies.
             Statement s = verifiedCheck(c, pub);
@@ -699,7 +668,7 @@ public final class CardTests {
         SimCard c = loadedCard(1024);
         byte[] pub = c.client.publicKey();
         Fill f = make(c);
-        int points = everyCut(c, () -> c.client.open(f.code, rand(32)), () -> {
+        int points = everyCut(c, () -> c.client.open(), () -> {
             Identity id = c.client.identify();
             check(id.state == GhostCard.STATE_SEALED || id.state == GhostCard.STATE_OPENED, "sealed or opened");
             check(verifiedCheck(c, pub).state == id.state, "the statement agrees");
@@ -714,7 +683,7 @@ public final class CardTests {
         SimCard c = loadedCard(1024);
         Fill f = make(c);
         openAndVerify(c, f);
-        int points = everyCut(c, () -> c.client.refill(f.code), () -> {
+        int points = everyCut(c, () -> c.client.refill(), () -> {
             Identity id = c.client.identify();
             check(id.fill == 1, "the fill number never goes back");
             if (id.state == GhostCard.STATE_OPENED) {
@@ -727,8 +696,12 @@ public final class CardTests {
                 // Make the card opened again at a new fill, so the next cut has something to refill.
                 Fill g = make(c);
                 openAndVerify(c, g);
-                f.code = g.code;
+                f.nonce = g.nonce;
+                f.amount = g.amount;
+                f.chain = g.chain;
                 f.number = g.number;
+                f.commitment = g.commitment;
+                f.commitData = g.commitData;
             }
         });
         check(points >= 2, "Refill writes the state and wipes the fill");

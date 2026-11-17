@@ -11,7 +11,6 @@ import {
   beBytes,
   checkGhostCard,
   fillGhostCard,
-  openCodeGroups,
   openGhostCard,
   refillGhostCard,
   type GhostCardDeps,
@@ -38,7 +37,6 @@ function statement(over: Partial<CoreJavaCardStatement> = {}): CoreJavaCardState
     digest: buf(32, 0xd0),
     marker: buf(32, 0xe0),
     checksLeft: 1000,
-    openCode: 'not-asked',
     batch: 1,
     devIssuer: true,
     leaf: { commitment: buf(32, 0xc0), note: buf(380, 0x40), salt: buf(16, 0x50) },
@@ -52,15 +50,6 @@ function fakeCore(verdict: () => CoreJavaCardVerdict, calls: Calls, finish = '')
   let n = 0;
   return {
     javaCardRandom: () => buf(32, ++n),
-    javaCardNewOpenCode: () => 'A'.repeat(32),
-    javaCardOpenCode: (text: string) => {
-      if (text.replace(/\s/g, '').length !== 32) {
-        throw new Error('not-an-open-code');
-      }
-      return buf(20, 0x77);
-    },
-    javaCardCodeHash: () => buf(32, 0x99),
-    javaCardCodeConfirmation: () => buf(32, 0x98),
     javaCardNumber: () => 'CEIR CEIR',
     javaCardIdentity: (answer: ArrayBuffer) => {
       const b = new Uint8Array(answer);
@@ -98,7 +87,7 @@ function ghostTap(over: NativeTap = {}): NativeTap {
     kind: 'ghost',
     identify: identify(1),
     certificate: hex(7990),
-    statement: hex(194),
+    statement: hex(193),
     signature: hex(2508),
     ms: 2100,
     checkMs: 1900,
@@ -154,12 +143,11 @@ describe('Check', () => {
       amountWei: 5n * 10n ** 18n,
       checksLeft: 1000,
       cardNumber: 'CEIR CEIR',
-      codeConfirmed: false,
     });
     expect(ghostStatusText(result!.status)).toBe('Sealed (fill 1): holds 5 GHOST');
     expect(safeToAccept(result!.status)).toBe(true);
-    // The tap asked for the commit data, with no code confirmation.
-    expect(d.calls[0]).toMatchObject({ name: 'check', args: [expect.any(String), expect.any(Uint8Array), null, true] });
+    // The tap asked for the commit data, and for nothing but the card.
+    expect(d.calls[0]).toMatchObject({ name: 'check', args: [expect.any(String), expect.any(Uint8Array), true] });
     // And the core was given what the card said, with this tap's challenge and chain.
     const input = d.calls[1].args[0] as { challenge: ArrayBuffer; chainId: bigint; commitData?: ArrayBuffer };
     expect(new Uint8Array(input.challenge)).toEqual(d.calls[0].args[1]);
@@ -168,15 +156,7 @@ describe('Check', () => {
     expect(result?.commitData?.length).toBe(430);
   });
 
-  it('sends an open-code confirmation when a code is given, and says when the card confirmed it', async () => {
-    const d = deps(() => ghostTap(), ok({ openCode: 'right' }));
-    const result = await checkGhostCard(d, new Uint8Array(20));
-    expect(d.calls[0].args[2]).toEqual(new Uint8Array(32).fill(0x98));
-    expect(result?.status).toMatchObject({ kind: 'sealed', codeConfirmed: true });
-  });
-
   it.each([
-    ['a wrong open code', ok({ openCode: 'wrong' }), undefined, 'Open code wrong: not safe to accept'],
     ['a blank card', ok({ state: 'blank', fill: 3 }), undefined, 'Blank (fill 3): holds nothing'],
     ['an opened card', ok({ state: 'opened' }), undefined, 'Opened: not safe to accept'],
     ['a coin not on chain', ok(), { status: 'absent', spent: false, leaf: null }, 'Not on the chain yet: not safe to accept'],
@@ -213,7 +193,7 @@ describe('Check', () => {
   });
 
   it('refuses parts of the wrong size before the core sees them', async () => {
-    const d = deps(() => ghostTap({ statement: hex(193) }), ok());
+    const d = deps(() => ghostTap({ statement: hex(192) }), ok());
     expect((await checkGhostCard(d))?.status).toEqual({ kind: 'not-genuine', reason: 'bad-answer' });
     expect(d.calls.map((c) => c.name)).toEqual(['check']);
   });
@@ -221,18 +201,18 @@ describe('Check', () => {
 
 describe('Fill', () => {
   const make = (fill = 2, commitment = 0xc0) => fill.toString(16).padStart(8, '0') + hex(32, commitment) + hex(430, 0x33);
-  const sealed2 = ok({ fill: 2, commitment: buf(32, 0xc0), openCode: 'right' });
+  const sealed2 = ok({ fill: 2, commitment: buf(32, 0xc0) });
 
-  it('sends Make the amount, chain, a fresh nonce and the code’s hash, and pays only checked commit data', async () => {
+  it('sends Make the amount, chain and a fresh nonce, nothing else, and pays only checked commit data', async () => {
     const d = deps(() => ghostTap({ identify: identify(1, 2), make: make() }), sealed2);
-    const result = await fillGhostCard(d, 5n * 10n ** 18n, new Uint8Array(20).fill(0x77));
+    const result = await fillGhostCard(d, 5n * 10n ** 18n);
     expect(result).toMatchObject({ ok: true, fill: 2, amountWei: 5n * 10n ** 18n, cardNumber: 'CEIR CEIR' });
-    const [, input, challenge, confirmation] = d.calls[0].args as [string, Uint8Array, Uint8Array, Uint8Array];
+    const [, input, challenge] = d.calls[0].args as [string, Uint8Array, Uint8Array];
+    expect(d.calls[0].args.length).toBe(3);
+    expect(input.length).toBe(52);
     expect(input.slice(0, 12)).toEqual(beBytes(5n * 10n ** 18n, 12));
     expect(input.slice(12, 20)).toEqual(beBytes(CHAIN, 8));
-    expect(input.slice(52, 84)).toEqual(new Uint8Array(32).fill(0x99));
     expect(input.slice(20, 52)).not.toEqual(challenge);
-    expect(confirmation).toEqual(new Uint8Array(32).fill(0x98));
     // The commit data verified is exactly what Make returned.
     const verified = d.calls[1].args[0] as { commitData: ArrayBuffer };
     expect(new Uint8Array(verified.commitData)).toEqual(new Uint8Array(430).fill(0x33));
@@ -242,16 +222,15 @@ describe('Fill', () => {
   });
 
   it.each([
-    ['not sealed', ok({ state: 'blank', fill: 2, openCode: 'right' }), 'fill-not-sealed'],
-    ['another fill', ok({ fill: 3, openCode: 'right' }), 'fill-other-fill'],
-    ['another commitment', ok({ fill: 2, commitment: buf(32, 0xc1), openCode: 'right' }), 'fill-other-commitment'],
-    ['another amount', ok({ fill: 2, amountWei: '1', openCode: 'right' }), 'fill-other-amount'],
-    ['another chain', ok({ fill: 2, chainId: 1n, openCode: 'right' }), 'fill-other-chain'],
-    ['the code not confirmed', ok({ fill: 2, openCode: 'not-asked' }), 'fill-code-not-confirmed'],
+    ['not sealed', ok({ state: 'blank', fill: 2 }), 'fill-not-sealed'],
+    ['another fill', ok({ fill: 3 }), 'fill-other-fill'],
+    ['another commitment', ok({ fill: 2, commitment: buf(32, 0xc1) }), 'fill-other-commitment'],
+    ['another amount', ok({ fill: 2, amountWei: '1' }), 'fill-other-amount'],
+    ['another chain', ok({ fill: 2, chainId: 1n }), 'fill-other-chain'],
     ['a refused statement', () => ({ refusal: 'commit-data-digest' }), 'commit-data-digest'],
   ] as const)('pays nothing for a statement with %s', async (_name, verdict, reason) => {
     const d = deps(() => ghostTap({ identify: identify(1, 2), make: make() }), verdict);
-    expect(await fillGhostCard(d, 5n * 10n ** 18n, new Uint8Array(20))).toEqual({
+    expect(await fillGhostCard(d, 5n * 10n ** 18n)).toEqual({
       ok: false,
       status: { kind: 'not-genuine', reason },
     });
@@ -259,25 +238,25 @@ describe('Fill', () => {
 
   it('takes the commitment from the statement when the Make answer was lost and read back', async () => {
     const d = deps(() => ghostTap({ identify: identify(1, 2), make: make(2, 0) }), sealed2);
-    expect((await fillGhostCard(d, 5n * 10n ** 18n, new Uint8Array(20))).ok).toBe(true);
+    expect((await fillGhostCard(d, 5n * 10n ** 18n)).ok).toBe(true);
   });
 
   it('says a card that is not blank is not in the state for it', async () => {
     const d = deps(() => Promise.reject({ code: 'ERR_GHOST_CARD_STATE', message: 'The card is sealed, so this cannot be done with it.' }), ok());
-    const result = await fillGhostCard(d, 1n, new Uint8Array(20));
+    const result = await fillGhostCard(d, 1n);
     expect(result).toEqual({ ok: false, status: { kind: 'retry', message: 'The card is not in the state this needs.' } });
   });
 });
 
 describe('Open', () => {
   it('checks the statement, then has the core recompute the coin from the card’s commit data', async () => {
-    const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), ok({ openCode: 'right' }));
-    const result = await openGhostCard(d, new Uint8Array(20).fill(0x77));
+    const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), ok());
+    const result = await openGhostCard(d);
     expect(result).toMatchObject({ ok: true, amountWei: 5n * 10n ** 18n, fill: 1 });
-    const [, code, checkChallenge, confirmation, openChallenge] = d.calls[1].args as Uint8Array[];
-    expect(code).toEqual(new Uint8Array(20).fill(0x77));
-    expect(checkChallenge).not.toEqual(openChallenge);
-    expect(confirmation).toEqual(new Uint8Array(32).fill(0x98));
+    // The tap is sent this tap's challenge and nothing else: the card is all it takes.
+    const open = d.calls.find((c) => c.name === 'open')!;
+    expect(open.args.length).toBe(2);
+    expect((open.args[1] as Uint8Array).length).toBe(32);
     const finish = d.calls.find((c) => c.name === 'finish')!.args[0] as { salt: ArrayBuffer; note: ArrayBuffer; fill: number };
     expect(finish.fill).toBe(1);
     expect(new Uint8Array(finish.salt)).toEqual(new Uint8Array(16).fill(0x50));
@@ -288,25 +267,19 @@ describe('Open', () => {
 
   it('takes the salt and note from the chain for a card already opened', async () => {
     const leaf = { commitment: buf(32, 0xc0), note: buf(380, 0x42), salt: buf(16, 0x52) };
-    const d = deps(() => ghostTap({ identify: identify(2), opened: true }), ok({ state: 'opened', openCode: 'right', leaf: undefined }), {
+    const d = deps(() => ghostTap({ identify: identify(2), opened: true }), ok({ state: 'opened', leaf: undefined }), {
       status: 'buried',
       spent: false,
       leaf,
     });
-    expect((await openGhostCard(d, new Uint8Array(20))).ok).toBe(true);
+    expect((await openGhostCard(d)).ok).toBe(true);
     const finish = d.calls.find((c) => c.name === 'finish')!.args[0] as { note: ArrayBuffer };
     expect(new Uint8Array(finish.note)).toEqual(new Uint8Array(380).fill(0x42));
   });
 
-  it('says Open code wrong, and opens nothing, when the card says the code is wrong', async () => {
-    const d = deps(() => ghostTap({ opened: false }), ok({ openCode: 'wrong' }));
-    expect(await openGhostCard(d, new Uint8Array(20))).toEqual({ ok: false, status: { kind: 'code-wrong', cardNumber: 'CEIR CEIR' } });
-    expect(d.calls.some((c) => c.name === 'finish')).toBe(false);
-  });
-
   it('holds nothing when the core finds the release is not the card’s coin', async () => {
-    const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), ok({ openCode: 'right' }), undefined, 'open-not-the-coin');
-    expect(await openGhostCard(d, new Uint8Array(20))).toEqual({
+    const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), ok(), undefined, 'open-not-the-coin');
+    expect(await openGhostCard(d)).toEqual({
       ok: false,
       status: { kind: 'not-genuine', reason: 'open-not-the-coin' },
     });
@@ -314,14 +287,14 @@ describe('Open', () => {
 
   it('wipes the release when the statement fails', async () => {
     const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), () => ({ refusal: 'statement-signature' }));
-    expect((await openGhostCard(d, new Uint8Array(20))).ok).toBe(false);
+    expect((await openGhostCard(d)).ok).toBe(false);
     expect(d.calls.filter((c) => c.name === 'forget-release').length).toBe(2);
     expect(d.calls.some((c) => c.name === 'finish')).toBe(false);
   });
 
   it('opens a card with no seal checks left with the chain as its only check', async () => {
     const d = deps(() => ghostTap({ statement: undefined, signature: undefined, opened: true }), ok());
-    const result = await openGhostCard(d, new Uint8Array(20));
+    const result = await openGhostCard(d);
     expect(result).toMatchObject({ ok: true, amountWei: null, fill: 1 });
     const unchecked = d.calls.find((c) => c.name === 'finish-unchecked')!.args;
     expect((unchecked[0] as ArrayBuffer).byteLength).toBe(7990);
@@ -332,12 +305,8 @@ describe('Open', () => {
 describe('Refill', () => {
   it('gives the card’s new blank fill', async () => {
     const d = deps(() => ghostTap({ identify: identify(0, 4) }), ok());
-    expect(await refillGhostCard(d, new Uint8Array(20))).toEqual({ ok: true, fill: 4, ms: 2100 });
-  });
-
-  it('says Open code wrong for a wrong code', async () => {
-    const d = deps(() => Promise.reject({ code: 'ERR_GHOST_CARD_WRONG_CODE' }), ok());
-    expect(await refillGhostCard(d, new Uint8Array(20))).toEqual({ ok: false, status: { kind: 'code-wrong', cardNumber: '' } });
+    expect(await refillGhostCard(d)).toEqual({ ok: true, fill: 4, ms: 2100 });
+    expect(d.calls[0]).toEqual({ name: 'refill', args: [expect.any(String)] });
   });
 });
 
@@ -353,9 +322,5 @@ describe('the card module', () => {
     expect(() => readTap({ kind: 'ghost', identify: hex(28) })).toThrow();
     expect(() => readTap({ kind: 'ghost', identify: identify(0), make: hex(465) })).toThrow();
     expect(() => readTap({ kind: 'other' })).toThrow();
-  });
-
-  it('groups an open code in eights', () => {
-    expect(openCodeGroups('abcdefgh ijklmnop-qrstuvwx yz234567')).toBe('ABCDEFGH IJKLMNOP QRSTUVWX YZ234567');
   });
 });

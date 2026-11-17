@@ -1,23 +1,22 @@
-// Fill a Ghost card: pick an amount, keep the new open code this iPhone
-// makes (shown once, as a QR code and text), then tap a blank Ghost card.
+// Fill a Ghost card: pick an amount, then tap a blank Ghost card.
 // The card makes the Phantom Key itself and hands back only the coin's
 // public commit data; in the same tap it signs a seal statement over this
 // iPhone's challenge, and the native core checks it says Sealed with exactly
 // that commit data before anything is paid. Then the usual Vanish pays the
 // amount into it. No words and no key are ever on this phone, and no Seal or
-// Ghost server takes part.
+// Ghost server takes part. The card is a bearer object: no code goes with it.
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { GhostCardStatusPanel, OpenCodeShown } from '../components/ghost-card-ui';
+import { GhostCardStatusPanel } from '../components/ghost-card-ui';
 import { CardBusy } from '../components/seal-ui';
 import { colors, monoFont } from '../components/theme';
 import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
 import { PaymentExit, PaymentProgress } from '../components/vanish-ui';
 import { accountZeroAddress } from '../lib/account';
 import { ghostCardDeps } from '../lib/ghost-card/deps';
-import { fillGhostCard, newOpenCode, type NewOpenCode } from '../lib/ghost-card/flows';
+import { fillGhostCard } from '../lib/ghost-card/flows';
 import type { GhostCardStatus } from '../lib/ghost-card/status';
 import { failureReason } from '../lib/node/failure-reason';
 import { ghostText } from '../lib/seal/card-status';
@@ -42,9 +41,6 @@ export default function FillGhostCardScreen() {
 
   const [amountText, setAmountText] = useState('');
   const [minimum, setMinimum] = useState<bigint | null>(null);
-  // The open code, from when it is made until the card holds its hash. Never saved.
-  const [code, setCode] = useState<NewOpenCode | null>(null);
-  const [kept, setKept] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<GhostCardStatus | null>(null);
@@ -72,34 +68,19 @@ export default function FillGhostCardScreen() {
   const tooSmall = amount !== null && minimum !== null && amount < minimum;
   const amountOk = !!kit && !!address && cards && amount !== null && amount > 0n && !tooSmall;
 
-  function makeCode() {
-    if (!deps.core || !amountOk) {
-      return;
-    }
-    setError(null);
-    try {
-      setCode(newOpenCode(deps.core));
-      setKept(false);
-    } catch {
-      setError('This iPhone could not make an open code. Try again.');
-    }
-  }
-
   async function fill() {
-    if (!kit || !address || amount === null || !amountOk || !code || !kept || busy) {
+    if (!kit || !address || amount === null || !amountOk || busy) {
       return;
     }
     setBusy(true);
     setError(null);
     setStatus(null);
     try {
-      const result = await fillGhostCard(deps, amount, code.code);
+      const result = await fillGhostCard(deps, amount);
       if (!result.ok) {
         setStatus(result.status);
         return;
       }
-      // The card holds the code's hash now: the screen lets go of the code.
-      setCode(null);
       const made = {
         cardNumber: result.cardNumber,
         fill: result.fill,
@@ -148,15 +129,15 @@ export default function FillGhostCardScreen() {
         {!filled ? (
           <>
             <Text style={textStyles.body}>
-              The card makes its own key: no words are shown, and whoever holds the card and its open code holds the
-              GHOST. A lost or broken card is lost GHOST, like cash.
+              The card makes its own key: no words are shown, and whoever holds the card holds the GHOST. A lost or
+              broken card is lost GHOST, like cash.
             </Text>
             <Panel style={styles.form}>
               <Text style={textStyles.quiet}>Amount</Text>
               <View style={styles.amountRow}>
                 <TextInput
                   accessibilityLabel="Amount in GHOST"
-                  editable={!code}
+                  editable={!busy}
                   keyboardType="decimal-pad"
                   onChangeText={setAmountText}
                   placeholder="0.0"
@@ -173,24 +154,13 @@ export default function FillGhostCardScreen() {
                 </Text>
               ) : null}
             </Panel>
-            {!code ? (
-              <Button label="Make the open code" icon="key" disabled={!amountOk} onPress={makeCode} testID="ghost-fill-make-code" />
-            ) : (
-              <>
-                <OpenCodeShown text={code.text} testID="ghost-fill-code" />
-                {!kept ? (
-                  <Button label="I have kept the open code" icon="check" onPress={() => setKept(true)} testID="ghost-fill-kept" />
-                ) : (
-                  <Button
-                    label={busy ? 'Hold the card near the iPhone' : `Tap a blank card to put ${ghostText(amount ?? 0n)} GHOST on it`}
-                    icon="key"
-                    disabled={busy || !amountOk}
-                    onPress={() => void fill()}
-                    testID="ghost-fill-tap"
-                  />
-                )}
-              </>
-            )}
+            <Button
+              label={busy ? 'Hold the card near the iPhone' : `Tap a blank card to put ${ghostText(amount ?? 0n)} GHOST on it`}
+              icon="key"
+              disabled={busy || !amountOk}
+              onPress={() => void fill()}
+              testID="ghost-fill-tap"
+            />
           </>
         ) : null}
         {busy ? <CardBusy text="Making the key on the card and checking its seal…" testID="ghost-fill-spinner" /> : null}
