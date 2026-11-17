@@ -1,7 +1,7 @@
 // The news cards under Home: a tinted block and a headline each.
 import { StyleSheet, Text, View } from 'react-native';
 
-import { useLayout } from '../lib/layout';
+import { FOLD_GAP, useLayout } from '../lib/layout';
 import { newsColumns, newsRows, type NewsStory, type NewsTint } from '../lib/home/news';
 import { colors } from './theme';
 
@@ -10,28 +10,47 @@ const TINTS: Record<NewsTint, string> = {
   mist: colors.line,
 };
 
-export function NewsCards({ stories }: { stories: readonly NewsStory[] }) {
+function NewsCard({ story }: { story: NewsStory }) {
+  return (
+    <View accessible accessibilityLabel={story.title} style={styles.card} testID={`news-${story.id}`}>
+      <View style={[styles.picture, { backgroundColor: TINTS[story.tint] }]} />
+      <Text style={styles.headline}>{story.title}</Text>
+    </View>
+  );
+}
+
+/**
+ * `leftWidth` is the width left of the fold on the open Duo. Four across, two
+ * stories sit each side of it with the fold between them.
+ */
+export function NewsCards({ stories, leftWidth }: { stories: readonly NewsStory[]; leftWidth?: number }) {
   const { width, height, twoColumns } = useLayout();
   const columns = newsColumns(width, height, twoColumns);
+  const acrossFold = columns === 4 && leftWidth !== undefined;
   return (
     <View style={styles.rows} testID="news">
-      {newsRows(stories, columns).map((row) => (
-        <View key={row[0].id} style={styles.row}>
-          {row.map((story, index) => (
-            <View
-              key={story.id}
-              accessible
-              accessibilityLabel={story.title}
-              // Four across: the middle gap is wider, where the open Duo folds.
-              style={[styles.card, columns === 4 && index === 2 && styles.afterFold]}
-              testID={`news-${story.id}`}
-            >
-              <View style={[styles.picture, { backgroundColor: TINTS[story.tint] }]} />
-              <Text style={styles.headline}>{story.title}</Text>
+      {newsRows(stories, columns).map((row) =>
+        acrossFold ? (
+          <View key={row[0].id} style={styles.foldRow}>
+            <View style={[styles.row, { width: leftWidth }]}>
+              {row.slice(0, 2).map((story) => (
+                <NewsCard key={story.id} story={story} />
+              ))}
             </View>
-          ))}
-        </View>
-      ))}
+            <View style={[styles.row, styles.rest]}>
+              {row.slice(2).map((story) => (
+                <NewsCard key={story.id} story={story} />
+              ))}
+            </View>
+          </View>
+        ) : (
+          <View key={row[0].id} style={styles.row}>
+            {row.map((story) => (
+              <NewsCard key={story.id} story={story} />
+            ))}
+          </View>
+        ),
+      )}
     </View>
   );
 }
@@ -47,6 +66,15 @@ const styles = StyleSheet.create({
     alignItems: 'stretch',
     gap: GAP,
   },
+  foldRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: FOLD_GAP,
+  },
+  rest: {
+    flex: 1,
+    minWidth: 0,
+  },
   card: {
     flex: 1,
     minWidth: 0,
@@ -55,9 +83,6 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: colors.paper,
     overflow: 'hidden',
-  },
-  afterFold: {
-    marginLeft: 32 - GAP,
   },
   picture: {
     height: 56,

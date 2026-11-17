@@ -27,3 +27,27 @@ export type ScreenLayout = 'one-column' | 'two-column';
 export function screenLayout(width: number): ScreenLayout {
   return width >= TWO_COLUMN_MIN_WIDTH ? 'two-column' : 'one-column';
 }
+
+/** The space kept clear between the two columns, where the open Duo folds. */
+export const FOLD_GAP = 32;
+
+/**
+ * How wide the left of two columns is, so the gap after it sits on the fold.
+ * Held sideways the open Duo folds down the middle of the screen, which is
+ * not the middle of the content: the side rail takes room on one edge. Held
+ * upright the fold runs across the screen, so the columns are equal halves.
+ */
+export function leftColumnWidth(window: {
+  width: number;
+  height: number;
+  insetLeft: number;
+  insetRight: number;
+  padding: number;
+}): number {
+  const { width, height, insetLeft, insetRight, padding } = window;
+  const left =
+    width > height
+      ? width / 2 - insetLeft - padding - FOLD_GAP / 2
+      : (width - insetLeft - insetRight - 2 * padding - FOLD_GAP) / 2;
+  return Math.max(0, left);
+}
