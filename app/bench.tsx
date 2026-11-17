@@ -1,6 +1,7 @@
 // Feasibility harness: pick a native benchmark, run it, read the last result.
 // A bare test screen at /bench, not product UI.
 import { useState } from 'react';
+import { useRouter } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { listBenchmarks, runBenchmark, type BenchRecord } from '../modules/ghost-bench';
@@ -43,6 +44,7 @@ function availableBenchmarks(): string[] | null {
 }
 
 export default function BenchScreen() {
+  const router = useRouter();
   const [names] = useState(availableBenchmarks);
   const [selected, setSelected] = useState<string | null>(() => names?.[0] ?? null);
   const [running, setRunning] = useState(false);
@@ -100,6 +102,16 @@ export default function BenchScreen() {
       <Text selectable style={styles.result} testID="bench-result">
         {result ?? 'No result yet'}
       </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ disabled: running }}
+        disabled={running}
+        onPress={() => router.push('/card-probe')}
+        style={styles.run}
+        testID="bench-card-probe"
+      >
+        <Text style={styles.text}>Card probe (Java Card over NFC)</Text>
+      </Pressable>
     </ScrollView>
   );
 }

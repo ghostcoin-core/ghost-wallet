@@ -262,3 +262,25 @@ extended APDU, 1,000 bytes in: 9000, hash matches. Response of 257+ bytes: SCARD
 
 Only use a sacrificial card with known card manager keys, and never run
 `--lock`.
+
+### Over iPhone NFC
+
+The app has a test screen for the probe. To use it:
+
+1. Install the probe on the card.
+2. In the app, open Settings, tap the version seven times to open the bench,
+   then tap **Card probe**.
+3. Tap Run and hold the card flat on the top of the iPhone for about 20
+   seconds.
+
+The screen shows:
+
+- each step's time over NFC;
+- whether the SHA3-256 and seal answers are right;
+- whether a 1,000-byte command and answers of 256, 257 and 1,000 bytes get
+  through;
+- Make, Check and Open worked out the same way as above, each marked pass or
+  over budget.
+
+The text can be selected and copied. The probe's AID is in the app's ISO 7816
+select identifiers. The run is in `modules/ghost-nfc/card-probe.ts`.

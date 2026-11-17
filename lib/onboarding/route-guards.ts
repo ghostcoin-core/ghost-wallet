@@ -42,6 +42,10 @@ export const ROUTE_GROUPS = {
   // through the Seal relay against a development test Seal and holds no
   // account secret.
   'seal-speed': 'developer',
+  // The Java Card probe speed test: a bare test screen like the bench. It
+  // talks only to the throwaway probe applet, with fixed test inputs, and
+  // holds no account secret.
+  'card-probe': 'developer',
 } as const satisfies Record<string, RouteGroup>;
 
 export type RouteName = keyof typeof ROUTE_GROUPS;
