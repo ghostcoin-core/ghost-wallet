@@ -29,7 +29,10 @@ type FeeState = { name: 'asking' } | { name: 'known'; quote: FeeQuote } | { name
 
 export default function SendScreen() {
   const router = useRouter();
-  const open = useFold().mode !== 'one';
+  const fold = useFold();
+  const open = fold.mode !== 'one';
+  // Held upright there is room for the address and the amount side by side, above the fold.
+  const sideBySide = fold.mode === 'upright';
   const biometric = useBiometric();
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
@@ -109,77 +112,85 @@ export default function SendScreen() {
 
   const form = (
     <>
-        <View style={styles.field}>
-          <Text style={styles.label}>To</Text>
-          <View style={styles.toRow}>
-            <TextInput
-              accessibilityLabel="To"
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect={false}
-              onChangeText={(text) => {
-                setToText(text);
-                setError(null);
-              }}
-              placeholder="0x…"
-              placeholderTextColor={colors.quiet}
-              spellCheck={false}
-              style={[styles.input, styles.addressInput, styles.toInput]}
-              testID="send-to"
-              value={toText}
-            />
-            <TextButton label="Paste" onPress={() => void paste()} testID="send-paste" />
+        <View style={sideBySide ? styles.fieldsRow : styles.fields} testID="send-fields">
+          <View style={[styles.field, sideBySide && styles.half]}>
+            <Text style={styles.label}>To</Text>
+            <View style={styles.toRow}>
+              <TextInput
+                accessibilityLabel="To"
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect={false}
+                onChangeText={(text) => {
+                  setToText(text);
+                  setError(null);
+                }}
+                placeholder="0x…"
+                placeholderTextColor={colors.quiet}
+                spellCheck={false}
+                style={[styles.input, styles.addressInput, styles.toInput]}
+                testID="send-to"
+                value={toText}
+              />
+              <TextButton label="Paste" onPress={() => void paste()} testID="send-paste" />
+            </View>
+            {toProblem ? (
+              <Text accessibilityLiveRegion="polite" style={[textStyles.quiet, styles.problem]} testID="send-to-problem">
+                {toProblem}
+              </Text>
+            ) : null}
           </View>
-          {toProblem ? (
-            <Text accessibilityLiveRegion="polite" style={[textStyles.quiet, styles.problem]} testID="send-to-problem">
-              {toProblem}
+          <View style={[styles.field, sideBySide && styles.half]}>
+            <Text style={styles.label}>Amount</Text>
+            <View style={styles.amountRow}>
+              <TextInput
+                accessibilityLabel="Amount in GHOST"
+                keyboardType="decimal-pad"
+                onChangeText={(text) => {
+                  setAmountText(text);
+                  setError(null);
+                }}
+                placeholder="0.00"
+                placeholderTextColor={colors.quiet}
+                style={[styles.input, styles.amountInput]}
+                testID="send-amount"
+                value={amountText}
+              />
+              <Text style={styles.unit}>GHOST</Text>
+            </View>
+            <Text style={textStyles.quiet} testID="send-balance">
+              {balanceWei !== null ? `You have ${formatGhost(balanceWei)} GHOST` : 'Balance not known yet'}
             </Text>
-          ) : null}
-        </View>
-        <View style={styles.field}>
-          <Text style={styles.label}>Amount</Text>
-          <View style={styles.amountRow}>
-            <TextInput
-              accessibilityLabel="Amount in GHOST"
-              keyboardType="decimal-pad"
-              onChangeText={(text) => {
-                setAmountText(text);
-                setError(null);
-              }}
-              placeholder="0.00"
-              placeholderTextColor={colors.quiet}
-              style={[styles.input, styles.amountInput]}
-              testID="send-amount"
-              value={amountText}
-            />
-            <Text style={styles.unit}>GHOST</Text>
+            {amountProblem ? (
+              <Text accessibilityLiveRegion="polite" style={[textStyles.quiet, styles.problem]} testID="send-amount-problem">
+                {amountProblem}
+              </Text>
+            ) : null}
           </View>
-          <Text style={textStyles.quiet} testID="send-balance">
-            {balanceWei !== null ? `You have ${formatGhost(balanceWei)} GHOST` : 'Balance not known yet'}
-          </Text>
-          {amountProblem ? (
-            <Text accessibilityLiveRegion="polite" style={[textStyles.quiet, styles.problem]} testID="send-amount-problem">
-              {amountProblem}
-            </Text>
-          ) : null}
         </View>
-        {open && recent.length > 0 ? (
+        {open ? (
           <>
             <SectionTitle>Recent</SectionTitle>
-            <Panel testID="send-recent">
-              {recent.map((item, index) => (
-                <Row
-                  key={item.address}
-                  icon="send"
-                  title={shortAddress(item.address)}
-                  detail={`Sent ${formatGhost(item.amountWei)} ${formatWhen(item.at, now)}`}
-                  first={index === 0}
-                  onPress={() => setToText(item.address)}
-                  accessibilityLabel={`Send to ${shortAddress(item.address)} again`}
-                  testID={`send-recent-${index}`}
-                />
-              ))}
-            </Panel>
+            {recent.length > 0 ? (
+              <Panel testID="send-recent">
+                {recent.map((item, index) => (
+                  <Row
+                    key={item.address}
+                    icon="send"
+                    title={shortAddress(item.address)}
+                    detail={`Sent ${formatGhost(item.amountWei)} ${formatWhen(item.at, now)}`}
+                    first={index === 0}
+                    onPress={() => setToText(item.address)}
+                    accessibilityLabel={`Send to ${shortAddress(item.address)} again`}
+                    testID={`send-recent-${index}`}
+                  />
+                ))}
+              </Panel>
+            ) : (
+              <Panel testID="send-recent-empty">
+                <Text style={[textStyles.quiet, styles.recentEmpty]}>Addresses you send to show here, to send again.</Text>
+              </Panel>
+            )}
           </>
         ) : null}
     </>
@@ -254,6 +265,21 @@ function SummaryRow({ label, first, testID, children }: { label: string; first?:
 }
 
 const styles = StyleSheet.create({
+  fields: {
+    gap: 16,
+  },
+  recentEmpty: {
+    padding: 16,
+  },
+  fieldsRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 16,
+  },
+  half: {
+    flex: 1,
+    minWidth: 0,
+  },
   field: {
     gap: 6,
   },

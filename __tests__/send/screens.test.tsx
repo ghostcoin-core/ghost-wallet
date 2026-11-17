@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import type { ComponentType } from 'react';
+import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import PaymentScreen from '../../app/payment';
@@ -146,6 +147,17 @@ describe('the Send screen', () => {
     } finally {
       mockBiometric = { kind: 'touch', enrolled: true };
     }
+  });
+
+  it('puts the address and the amount side by side only on the open Duo held upright', async () => {
+    const direction = () => StyleSheet.flatten(screen.getByTestId('send-fields').props.style).flexDirection;
+
+    await renderOn('iPhone Duo open', SendScreen);
+    expect(direction()).toBe('row');
+    screen.unmount();
+
+    await renderOn('iPhone Duo folded', SendScreen);
+    expect(direction()).toBeUndefined();
   });
 
   it('pastes the address, reviews the total and sends only after the phone has checked it is you', async () => {

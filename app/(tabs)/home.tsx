@@ -9,6 +9,7 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActivityList } from '../../components/activity-list';
+import { useFold } from '../../components/fold-page';
 import { NewsCards } from '../../components/news-cards';
 import { colors, monoFont } from '../../components/theme';
 import { Button, ButtonRow, IconButton, NetworkBadge, SectionTitle, Spacer, textStyles, Title } from '../../components/ui';
@@ -25,6 +26,9 @@ import { useSettings } from '../../lib/settings/settings';
 
 const NO_INSETS = { left: 0, right: 0 };
 
+/** The space between the page's sections. */
+const CONTENT_GAP = 12;
+
 /** The page's side padding on the open Duo. */
 const WIDE_PADDING = 28;
 
@@ -33,6 +37,7 @@ export default function HomeScreen() {
   const { twoColumns, width, height } = useLayout();
   // No insets are known outside a safe-area provider; none are needed on one column.
   const insets = useContext(SafeAreaInsetsContext) ?? NO_INSETS;
+  const fold = useFold();
   // On the open Duo, the width of the left column: the gap after it is the fold.
   const leftWidth = twoColumns
     ? leftColumnWidth({ width, height, insetLeft: insets.left, insetRight: insets.right, padding: WIDE_PADDING })
@@ -65,7 +70,15 @@ export default function HomeScreen() {
           />
         </View>
 
-        <View style={twoColumns ? styles.columns : styles.stack}>
+        <View
+          style={[
+            twoColumns ? styles.columns : styles.stack,
+            // Held upright the fold runs across the screen: the card and the
+            // activity stay above it and the news starts below it.
+            fold.mode === 'upright' && { minHeight: fold.topHeight, marginBottom: FOLD_GAP - CONTENT_GAP },
+          ]}
+          testID="home-top"
+        >
           <View style={[styles.column, leftWidth !== undefined && { width: leftWidth }]}>
             <View style={styles.card} testID="balance">
               <Text style={styles.cardName}>Specter</Text>
@@ -165,7 +178,7 @@ const styles = StyleSheet.create({
   },
   content: {
     flexGrow: 1,
-    gap: 12,
+    gap: CONTENT_GAP,
     paddingHorizontal: 20,
     paddingTop: 4,
     paddingBottom: 32,
