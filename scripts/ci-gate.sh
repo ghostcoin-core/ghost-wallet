@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Merge gate: clean install, typecheck, lint, unit tests, the Rust core tests and the Seal tests.
+# Merge gate: clean install, typecheck, lint, unit tests, the Rust core tests,
+# the Seal tests and the card applet's tests.
 # Exits non-zero as soon as any step fails.
 set -euo pipefail
 
@@ -22,5 +23,9 @@ cargo test --manifest-path core/Cargo.toml --locked
 
 echo "==> seal tests"
 cargo test --manifest-path seal/Cargo.toml --locked
+
+echo "==> card applet (needs JDK 17 and Ant)"
+card-applet/build.sh
+card-applet/test.sh
 
 echo "==> gate passed"

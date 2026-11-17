@@ -1,0 +1,16 @@
+<!-- Builds the applet's CAP file. Run through ./build.sh, which fetches the
+     pinned tools into the cache directory and passes it as -Dtools=... The
+     3.1 converter targets Java Card 3.0.5; its off-card verifier cannot read
+     the 3.0.5 kit's export files, so it is off, as for the measured probe. -->
+<project name="ghost-card" default="cap">
+  <property name="tools" value="${user.home}/.cache/card-applet"/>
+  <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${tools}/ant-javacard.jar"/>
+  <target name="cap">
+    <mkdir dir="build"/>
+    <javacard jckit="${tools}/sdks/jc310r20210706_kit">
+      <cap targetsdk="${tools}/sdks/jc305u4_kit" aid="A0000008474743415244" output="build/ghostcard.cap" sources="src" version="1.0" ints="true" verify="false">
+        <applet class="ghostcard.GhostCard" aid="A000000847474341524401"/>
+      </cap>
+    </javacard>
+  </target>
+</project>
