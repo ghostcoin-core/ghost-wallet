@@ -4,9 +4,9 @@
 // iPhone Duo the card and the activity sit side by side with the fold between
 // them, and the news runs underneath.
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActivityList } from '../../components/activity-list';
 import { NewsCards } from '../../components/news-cards';
@@ -18,14 +18,25 @@ import { balanceStatus } from '../../lib/home/cache-refresh';
 import { SAMPLE_NEWS } from '../../lib/home/news';
 import { useFaucet } from '../../lib/home/use-faucet';
 import { useHome, useNow } from '../../lib/home/use-home';
-import { useLayout } from '../../lib/layout';
+import { FOLD_GAP, leftColumnWidth, useLayout } from '../../lib/layout';
 import { buildNetwork, offersTestGhost } from '../../lib/network/build-network';
 import { useTestNetwork } from '../../lib/node/test-network';
 import { useSettings } from '../../lib/settings/settings';
 
+const NO_INSETS = { left: 0, right: 0 };
+
+/** The page's side padding on the open Duo. */
+const WIDE_PADDING = 28;
+
 export default function HomeScreen() {
   const router = useRouter();
-  const { twoColumns } = useLayout();
+  const { twoColumns, width, height } = useLayout();
+  // No insets are known outside a safe-area provider; none are needed on one column.
+  const insets = useContext(SafeAreaInsetsContext) ?? NO_INSETS;
+  // On the open Duo, the width of the left column: the gap after it is the fold.
+  const leftWidth = twoColumns
+    ? leftColumnWidth({ width, height, insetLeft: insets.left, insetRight: insets.right, padding: WIDE_PADDING })
+    : undefined;
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
   const { view, refresh } = useHome(nodeUrl, address);
@@ -55,7 +66,7 @@ export default function HomeScreen() {
         </View>
 
         <View style={twoColumns ? styles.columns : styles.stack}>
-          <View style={[styles.column, twoColumns && styles.columnWide]}>
+          <View style={[styles.column, leftWidth !== undefined && { width: leftWidth }]}>
             <View style={styles.card} testID="balance">
               <Text style={styles.cardName}>Specter</Text>
               {address === null ? (
@@ -131,14 +142,14 @@ export default function HomeScreen() {
             ) : null}
           </View>
 
-          <View style={[styles.column, twoColumns && styles.columnWide]}>
+          <View style={[styles.column, twoColumns && styles.rest]}>
             {twoColumns ? null : <SectionTitle>Activity</SectionTitle>}
             <ActivityList nodeUrl={nodeUrl} kept={snapshot?.activity} />
           </View>
         </View>
 
         <SectionTitle>News</SectionTitle>
-        <NewsCards stories={SAMPLE_NEWS} />
+        <NewsCards stories={SAMPLE_NEWS} leftWidth={leftWidth} />
       </ScrollView>
     </SafeAreaView>
   );
@@ -160,7 +171,7 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
   },
   contentWide: {
-    paddingHorizontal: 28,
+    paddingHorizontal: WIDE_PADDING,
   },
   header: {
     flexDirection: 'row',
@@ -175,12 +186,12 @@ const styles = StyleSheet.create({
   columns: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: 32,
+    gap: FOLD_GAP,
   },
   column: {
     gap: 12,
   },
-  columnWide: {
+  rest: {
     flex: 1,
     minWidth: 0,
   },
