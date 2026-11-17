@@ -1,0 +1,11 @@
+<project name="card-probe" default="cap">
+  <property name="tools" value="${user.home}/jc-probe/tools"/>
+  <taskdef name="javacard" classname="pro.javacard.ant.JavaCard" classpath="${tools}/ant-javacard.jar"/>
+  <target name="cap">
+    <javacard jckit="${tools}/oracle_javacard_sdks/jc310r20210706_kit">
+      <cap targetsdk="${tools}/oracle_javacard_sdks/jc305u4_kit" aid="A00000084750524F42" output="probe.cap" sources="src" version="1.0" ints="true" verify="false">
+        <applet class="ghostprobe.Probe" aid="A00000084750524F4201"/>
+      </cap>
+    </javacard>
+  </target>
+</project>
