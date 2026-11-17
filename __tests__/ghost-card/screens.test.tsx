@@ -154,6 +154,21 @@ describe.each(DEVICE_NAMES)('on the %s', (device) => {
     expect(mockRouter.replace).toHaveBeenCalledWith('/fill-ghost-card');
   });
 
+  it('Open: a card whose coin was already summoned is offered for reuse, not summoned again', async () => {
+    renderOn(device, OpenGhostCardScreen);
+    fake.open.mockResolvedValue({
+      ok: false,
+      status: { kind: 'opened', fill: 1, cardNumber: 'AAAA', spent: true },
+      reuse: { cardId: new Uint8Array(16).fill(7), fill: 1 },
+    });
+    await press('ghost-open-run');
+    expect(fake.calls).toEqual([]);
+    fake.refill.mockResolvedValue({ ok: true, fill: 1, ms: 300 });
+    await press('ghost-open-refill');
+    expect(fake.refill.mock.calls[0][1]).toEqual({ cardId: new Uint8Array(16).fill(7), fill: 1 });
+    expect(screen.getByTestId('ghost-open-refilled')).toBeTruthy();
+  });
+
   it('Open: a card that does not check out summons nothing', async () => {
     renderOn(device, OpenGhostCardScreen);
     fake.open.mockResolvedValue({ ok: false, status: { kind: 'not-genuine', reason: 'open-not-the-coin' } });

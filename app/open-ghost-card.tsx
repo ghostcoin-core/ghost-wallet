@@ -18,7 +18,7 @@ import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, 
 import { CoinsBack, PaymentExit, PaymentProgress } from '../components/vanish-ui';
 import { accountZeroAddress } from '../lib/account';
 import { ghostCardDeps } from '../lib/ghost-card/deps';
-import { openGhostCard, refillGhostCard } from '../lib/ghost-card/flows';
+import { openGhostCard, refillGhostCard, type RefillTarget } from '../lib/ghost-card/flows';
 import type { GhostCardStatus } from '../lib/ghost-card/status';
 import { ghostText } from '../lib/seal/card-status';
 import { useSettings } from '../lib/settings/settings';
@@ -55,6 +55,8 @@ export default function OpenGhostCardScreen() {
     ms: number;
   } | null>(null);
   const [sequence, setSequence] = useState<CorePaymentSequence | null>(null);
+  // A card opened before whose coin is already taken off: it can only be reused.
+  const [spentCard, setSpentCard] = useState<RefillTarget | null>(null);
   const [refilled, setRefilled] = useState<{ fill: number; ms: number } | null>(null);
   const settled = useRef(false);
 
@@ -87,6 +89,7 @@ export default function OpenGhostCardScreen() {
     setBusy('open');
     setError(null);
     setStatus(null);
+    setSpentCard(null);
     let result;
     try {
       result = await openGhostCard(deps);
@@ -95,6 +98,7 @@ export default function OpenGhostCardScreen() {
     }
     if (!result.ok) {
       setStatus(result.status);
+      setSpentCard(result.reuse ?? null);
       return;
     }
     setOpened({
@@ -125,15 +129,16 @@ export default function OpenGhostCardScreen() {
     }
   }
 
-  /** Empties the card just opened (no other card), then goes on to fill it again. */
+  /** Empties the card just opened, or the spent one just tapped (no other card), then goes on to fill it again. */
   async function refill() {
-    if (busy !== null || !opened) {
+    const target = opened ? { cardId: opened.cardId, fill: opened.fill } : spentCard;
+    if (busy !== null || !target) {
       return;
     }
     setBusy('refill');
     setError(null);
     try {
-      const result = await refillGhostCard(deps, { cardId: opened.cardId, fill: opened.fill });
+      const result = await refillGhostCard(deps, target);
       if (!result.ok) {
         if (result.status) {
           setStatus(result.status);
@@ -200,7 +205,7 @@ export default function OpenGhostCardScreen() {
         {opened && !sequence && busy === null ? (
           <Button label="Summon it now" onPress={() => void summon()} testID="ghost-open-summon-again" />
         ) : null}
-        {done && !refilled ? (
+        {(done || spentCard) && !refilled ? (
           <Panel style={styles.form} testID="ghost-open-reuse">
             <Text style={textStyles.quiet}>Reuse this card</Text>
             <Text style={textStyles.body}>
