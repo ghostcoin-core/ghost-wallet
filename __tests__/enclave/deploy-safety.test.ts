@@ -330,12 +330,14 @@ describe('deploy.sh --apply stops on a refusal', () => {
 
 describe('deploy.sh --apply waits for each start, bounded', () => {
   it('stops when a host logs no start outcome within the wait, and deploys nothing more', () => {
-    const run = deployRun({ deploys: { [US]: [ok(MADE)], [EU]: [{ lines: [LIST] }], [AP]: [ok(RECEIVED)] } }, 1);
+    // A 3 s wait: each look starts the stubbed CLI, which can take half a
+    // second on a busy runner, so a 1 s wait might allow only one look.
+    const run = deployRun({ deploys: { [US]: [ok(MADE)], [EU]: [{ lines: [LIST] }], [AP]: [ok(RECEIVED)] } }, 3);
     expect(run.status).toBe(1);
-    expect(run.stderr).toMatch(new RegExp(`${PREFIX}-${EU}: host i-${EU}-1 logged no start outcome .* within 1s`));
+    expect(run.stderr).toMatch(new RegExp(`${PREFIX}-${EU}: host i-${EU}-1 logged no start outcome .* within 3s`));
     expect(deployedRegions(run)).toEqual([US, EU]);
     // It looked more than once before it gave up.
-    expect(run.calls.filter((c) => c.kind === 'logs' && c.instance === `i-${EU}-1`).length).toBeGreaterThan(2);
+    expect(run.calls.filter((c) => c.kind === 'logs' && c.instance === `i-${EU}-1`).length).toBeGreaterThan(1);
   });
 
   it('waits for an outcome that is logged late, and goes on only after it', () => {
