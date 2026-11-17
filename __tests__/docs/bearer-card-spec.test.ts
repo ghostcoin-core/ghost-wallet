@@ -172,6 +172,41 @@ describe('docs/bearer-card-spec.md', () => {
     expect(section(text, 2, 'Card type')).toMatch(/Java Card/);
   });
 
+  it('settles the J3R180: bytecode Keccak, SHA-256 digest, unsigned Make, CTR plus CMAC, H10', () => {
+    const card = flat(section(text, 2, 'Card type'));
+    expect(card).toMatch(/\*\*The J3R180 qualifies\.\*\*/);
+    expect(card).toMatch(/146 ms per permutation over iPhone NFC/);
+
+    const design = section(text, 2, 'Design');
+    const made = flat(section(design, 3, 'Made on the card'));
+    expect(made).toMatch(/native SHA-256 into the commit-data digest/);
+    expect(made).toMatch(/\*\*unsigned\*\*/);
+    expect(made).toMatch(/with a \*\*Check\*\* in the same tap/);
+    expect(made).toMatch(/SHA3-256\("ghost-card-key" \|\| card random \|\| writer nonce\)/);
+
+    const open = flat(section(design, 3, 'Opening is one-way'));
+    expect(open).toMatch(/AES-256-CTR and authenticated with AES-CMAC/);
+
+    const lms = flat(section(text, 3, 'A quantum-safe attestation signature'));
+    expect(lms).toMatch(/\*\*height 10\*\*/);
+    expect(lms).toMatch(/\*\*Why height 10, and not 9 or 8:\*\*/);
+    expect(lms).toMatch(/\*\*How the checks count down:\*\*/);
+  });
+
+  it('makes cards reusable by fill and needs no Seal for Java Cards', () => {
+    const design = section(text, 2, 'Design');
+    const states = flat(section(design, 3, 'Card states'));
+    expect(states).toMatch(/\*\*Sealed \(fill N\)\*\*/);
+    expect(states).toMatch(/What carries over between fills/);
+    expect(section(design, 3, 'Refill: filling the card again').length).toBeGreaterThan(200);
+    expect(section(design, 3, 'The open code').length).toBeGreaterThan(200);
+    const noSeal = flat(section(design, 3, 'Java Cards need no Seal'));
+    expect(noSeal).toMatch(/No Ghost server takes part/);
+    expect(noSeal).toMatch(/What the receiver still checks/);
+    expect(flat(section(text, 4, 'The one exception: a Ghost Sealed card'))).toMatch(/closed to new fills/);
+    expect(flat(section(text, 2, 'Red-team'))).toMatch(/refill a card whose fill was just opened/);
+  });
+
   it('names no ticket, link or build tool', () => {
     // A tracker id (two or more capitals, a dash, digits); SHA-256 and AES-256 are algorithms.
     expect(text).not.toMatch(/\b(?!(?:SHA|AES)-)[A-Z]{2,}-\d+\b/);
