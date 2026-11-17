@@ -6,6 +6,7 @@ import { useContext } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context';
 
+import { useFold } from '../../components/fold-page';
 import { Icon } from '../../components/icons';
 import { colors } from '../../components/theme';
 import { NetworkBadge, Panel, Row, Title } from '../../components/ui';
@@ -45,6 +46,7 @@ export default function CardsScreen() {
     : undefined;
   // Held sideways there is room for all four notes in a row, two each side of the fold.
   const notesAcrossFold = leftWidth !== undefined && width > height;
+  const fold = useFold();
 
   const check = (
     <View style={styles.check}>
@@ -105,7 +107,9 @@ export default function CardsScreen() {
         </View>
 
         {leftWidth !== undefined ? (
-          <View style={styles.foldRow}>
+          // Held upright the fold runs across the screen: the actions stay
+          // above it and the notes start below it.
+          <View style={[styles.foldRow, fold.mode === 'upright' && { minHeight: fold.topHeight }]} testID="cards-top">
             <View style={{ width: leftWidth }}>{check}</View>
             <View style={styles.rest}>{actions}</View>
           </View>
