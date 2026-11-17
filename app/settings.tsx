@@ -172,25 +172,30 @@ export default function SettingsScreen() {
           onPress={() => router.push('/open-ghost-card')}
           testID="settings-open-ghost-card"
         />
+      </Panel>
+
+      <SectionTitle>NTAG 424 cards (older)</SectionTitle>
+      <Panel>
         <Row
+          first
           icon="key"
-          title="Fill a Sealed card"
-          detail="An NTAG 424 Ghost Sealed card, with the Seal"
+          title="Fill an NTAG 424 card"
+          detail="Older sticker cards, through the Seal servers"
           opens
           onPress={() => router.push('/fill-card')}
           testID="settings-fill-card"
         />
         <Row
           icon="receive"
-          title="Open a Sealed card into my wallet"
-          detail="An NTAG 424 Ghost Sealed card, with the Seal"
+          title="Open an NTAG 424 card into my wallet"
+          detail="Older sticker cards, through the Seal servers"
           opens
           onPress={() => router.push('/open-card')}
           testID="settings-open-card"
         />
         <Row
           icon="cross"
-          title="Wipe a card"
+          title="Wipe an NTAG 424 card"
           detail="Phantom Key cards this iPhone wrote"
           opens
           onPress={() => router.push('/wipe-card')}
