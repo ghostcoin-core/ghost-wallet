@@ -51,6 +51,9 @@ sha2 = { version = "=0.11.1", default-features = false }
 
 [dev-dependencies]
 rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }
+# SHA3-256 for the card applet's seed bytes in its test vectors
+# (tests/card_applet_vectors.rs).
+tiny-keccak = { version = "2.0.2", features = ["sha3"] }
 # The tests' attestation authority (tests/support/nitro_authority.rs) signs
 # test documents with fixed test keys. Test code only.
 p384 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }

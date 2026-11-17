@@ -4,9 +4,10 @@ Status: specification. The card type is chosen and measured: the NXP J3R180
 (a JCOP 4 P71 class Java Card), over a contact reader and over iPhone NFC, in
 `docs/j3r180-measurements.md`. Every time below comes from that document.
 Cards are reusable: after one fill is opened, the card can be filled again.
-Java Cards need no Ghost server. This document changes no applet, app, chain
-or node code. Building the applet and trying it on real cards and phones is a
-separate, later step (see "Left for the hardware step" at the end).
+Java Cards need no Ghost server. The applet is built to this document in
+`card-applet/`, whose README gives each command's bytes. The app's side, and
+trying it on phones, is a separate step (see "Left for the hardware step" at
+the end).
 
 ## Goal
 
@@ -350,8 +351,9 @@ Within a fill, opening is one-way. To Summon or Claim, the opener's app sends
     "ghost-card-open-mac";
   - the CTR counter block starts from 16 fresh bytes from the card's random
     source, sent with the answer;
-  - the tag is the full 16-byte AES-CMAC over the domain, card id, fill number,
-    challenge, counter block and ciphertext (encrypt, then MAC).
+  - the tag is the full 16-byte AES-CMAC over the domain
+    ("ghost-card-open-v1"), card id, fill number, challenge, counter block and
+    ciphertext (encrypt, then MAC).
 
   The opener's app checks the tag before it decrypts anything and refuses on a
   mismatch. Because each key is bound to the card, the fill and the challenge,

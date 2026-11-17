@@ -44,6 +44,41 @@ jobs:
       - name: Unit tests
         run: pnpm exec jest --ci --passWithNoTests=false
 
+  # The Java Card applet for Ghost bearer cards (card-applet/): its generated
+  # code is current, its CAP file builds to the same code hash twice, and its
+  # tests pass on jcardsim. Its vectors are checked against Ghost's client by
+  # the Rust tests (core/tests/card_applet_vectors.rs).
+  card-applet:
+    name: card-applet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/card-applet
+          key: card-applet-${{ hashFiles('card-applet/build.sh') }}
+
+      - name: Ant
+        run: command -v ant || (sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ant)
+
+      - name: Build the CAP file
+        run: card-applet/build.sh | tee build-1.txt
+
+      - name: Same source, same code hash
+        run: |
+          card-applet/build.sh | tee build-2.txt
+          test "$(tail -1 build-1.txt)" = "$(tail -1 build-2.txt)"
+
+      - name: Tests on jcardsim
+        run: card-applet/test.sh
+
   rust:
     name: rust
     needs: rust-shard
