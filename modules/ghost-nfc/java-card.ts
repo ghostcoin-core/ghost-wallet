@@ -24,7 +24,8 @@ export type GhostCardNative = {
   /** `make`: the amount (12 bytes), chain id (8) and writer nonce (32). */
   javaCardFill(alert: string, make: Uint8Array, challenge: Uint8Array): Promise<NativeTap>;
   javaCardOpen(alert: string, checkChallenge: Uint8Array): Promise<NativeTap>;
-  javaCardRefill(alert: string): Promise<NativeTap>;
+  /** Refills only the opened card `cardId` (16 bytes) at `fill`; any other card is refused untouched. */
+  javaCardRefill(alert: string, cardId: Uint8Array, fill: number): Promise<NativeTap>;
 };
 
 /** What a native flow resolves with: hex strings, numbers and flags. */
@@ -57,6 +58,7 @@ export type CardProblem =
   | 'not-ready'
   | 'wrong-state'
   | 'no-checks'
+  | 'other-card'
   | 'refused'
   | 'bad-tap'
   | 'failed';
@@ -68,6 +70,7 @@ export const CARD_PROBLEMS: Record<CardProblem, string> = {
   'not-ready': 'This card was never finished at its loading station.',
   'wrong-state': 'The card is not in the state this needs.',
   'no-checks': 'This card has no seal checks left.',
+  'other-card': 'This is not the card that was checked. Tap the same card again.',
   refused: 'The card refused a command.',
   'bad-tap': 'The card gave an answer of the wrong size.',
   failed: 'The card could not be read. Hold it still and try again.',
@@ -91,6 +94,7 @@ const NATIVE_PROBLEMS: Record<string, CardProblem> = {
   ERR_GHOST_CARD_NOT_READY: 'not-ready',
   ERR_GHOST_CARD_STATE: 'wrong-state',
   ERR_GHOST_CARD_NO_CHECKS: 'no-checks',
+  ERR_GHOST_CARD_OTHER_CARD: 'other-card',
   ERR_GHOST_CARD_FAILED: 'refused',
   ERR_GHOST_CARD_BAD_INPUT: 'failed',
 };
