@@ -1,9 +1,11 @@
-// Face ID (or the passcode) before anything sensitive.
+// Touch ID or Face ID (or the passcode) before anything sensitive.
 //
 // It goes through Expo's local authentication native module when the build
 // has it. A build without it can never authenticate, so whatever sits behind
 // this stays shut: it fails closed.
 import { requireOptionalNativeModule } from 'expo';
+
+import { biometricName, type Biometric } from './biometric';
 
 export type AuthResult = { ok: true } | { ok: false; reason: 'unavailable' | 'cancelled' | 'failed' };
 
@@ -25,7 +27,7 @@ function localAuthentication(): LocalAuthentication | null {
   }
 }
 
-/** Whether this phone and build can ask for Face ID or the passcode. */
+/** Whether this phone and build can ask for Touch ID, Face ID or the passcode. */
 export async function canAuthenticate(): Promise<boolean> {
   const native = localAuthentication();
   if (!native) {
@@ -38,7 +40,7 @@ export async function canAuthenticate(): Promise<boolean> {
   }
 }
 
-/** Asks for Face ID, falling back to the passcode. */
+/** Asks for Touch ID or Face ID, falling back to the passcode. */
 export async function authenticate(promptMessage: string): Promise<AuthResult> {
   const native = localAuthentication();
   if (!native) {
@@ -56,14 +58,21 @@ export async function authenticate(promptMessage: string): Promise<AuthResult> {
   }
 }
 
-/** What to tell someone when authentication did not go through. */
-export function authFailureMessage(reason: Exclude<AuthResult, { ok: true }>['reason']): string {
+/**
+ * What to tell someone when authentication did not go through. `biometric`
+ * names the phone's own check; without it the words name neither.
+ */
+export function authFailureMessage(
+  reason: Exclude<AuthResult, { ok: true }>['reason'],
+  biometric: Biometric | null = null,
+): string {
+  const name = biometricName(biometric);
   switch (reason) {
     case 'unavailable':
-      return 'Face ID is not available in this build.';
+      return `${name ?? 'Checking it is you'} is not available in this build.`;
     case 'cancelled':
       return 'Cancelled.';
     case 'failed':
-      return 'Face ID did not match. Try again.';
+      return name ? `${name} did not match. Try again.` : 'That did not match. Try again.';
   }
 }

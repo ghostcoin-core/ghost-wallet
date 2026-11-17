@@ -1,5 +1,5 @@
 // Check my words now: for an account saved with the word check skipped.
-// Three of the 24 recovery words are typed from paper and, after Face ID (or
+// Three of the 24 recovery words are typed from paper and, after Touch ID or Face ID (or
 // the passcode), the native core says whether all three match the saved
 // account, never which one is wrong. Once they match, Settings no longer says
 // the backup is not checked.
@@ -10,6 +10,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { colors, monoFont } from '../components/theme';
 import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
 import { WordField } from '../components/word-field';
+import { useBiometric, withBiometric } from '../lib/biometric';
 import { authenticate, authFailureMessage } from '../lib/device-auth';
 import { backupStatusStore } from '../lib/onboarding/backup-status';
 import { allTyped, normaliseWord, pickCheckPositions } from '../lib/onboarding/word-check';
@@ -17,6 +18,7 @@ import { checkSavedAccountWords } from '../modules/ghost-core';
 
 export default function CheckWordsScreen() {
   const router = useRouter();
+  const biometric = useBiometric();
   const [positions] = useState(() => pickCheckPositions());
   const [typed, setTyped] = useState<Record<number, string>>({});
   const [message, setMessage] = useState<string | null>(null);
@@ -29,7 +31,7 @@ export default function CheckWordsScreen() {
     try {
       const result = await authenticate('Check your recovery words');
       if (!result.ok) {
-        setMessage(authFailureMessage(result.reason));
+        setMessage(authFailureMessage(result.reason, biometric));
         return;
       }
       let matches: boolean;
@@ -108,7 +110,7 @@ export default function CheckWordsScreen() {
               </Text>
             ) : null}
             <Button
-              label="Check with Face ID"
+              label={withBiometric('Check', biometric)}
               icon="lock"
               disabled={busy || !allTyped(positions, typed)}
               onPress={() => void check()}

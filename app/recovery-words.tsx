@@ -1,4 +1,4 @@
-// The account's recovery words, shown only after Face ID (or the passcode),
+// The account's recovery words, shown only after Touch ID or Face ID (or the passcode),
 // and hidden again as soon as the app leaves the screen.
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
@@ -7,10 +7,12 @@ import { savedAccountWords } from 'ghost-core';
 
 import { colors, monoFont } from '../components/theme';
 import { Button, ButtonRow, IconButton, Logo, NetworkBadge, Screen, Spacer, textStyles, Title } from '../components/ui';
+import { useBiometric, withBiometric } from '../lib/biometric';
 import { authenticate, authFailureMessage } from '../lib/device-auth';
 
 export default function RecoveryWordsScreen() {
   const router = useRouter();
+  const biometric = useBiometric();
   const [words, setWords] = useState<string[] | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -27,7 +29,7 @@ export default function RecoveryWordsScreen() {
     setMessage(null);
     const result = await authenticate('Show your recovery words');
     if (!result.ok) {
-      setMessage(authFailureMessage(result.reason));
+      setMessage(authFailureMessage(result.reason, biometric));
       return;
     }
     try {
@@ -65,7 +67,7 @@ export default function RecoveryWordsScreen() {
       ) : (
         <>
           <ButtonRow>
-            <Button label="Show with Face ID" icon="lock" onPress={show} testID="show-recovery-words" />
+            <Button label={withBiometric('Show', biometric)} icon="lock" onPress={show} testID="show-recovery-words" />
           </ButtonRow>
           {message ? (
             <Text style={textStyles.quiet} testID="recovery-words-message">

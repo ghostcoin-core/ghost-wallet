@@ -55,6 +55,12 @@ jest.mock('../../lib/device-auth', () => ({
   authenticate: (prompt: string) => mockAuth(prompt),
 }));
 
+let mockBiometric: { kind: 'touch' | 'face' | 'none'; enrolled: boolean } | null = { kind: 'touch', enrolled: true };
+jest.mock('../../lib/biometric', () => ({
+  ...jest.requireActual('../../lib/biometric'),
+  useBiometric: () => mockBiometric,
+}));
+
 jest.mock('expo-clipboard', () => ({ getStringAsync: async () => `  ${RECIPIENT}\n` }));
 jest.mock('../../lib/storage', () => ({
   jsonFile: () => ({
@@ -111,21 +117,38 @@ beforeEach(() => {
 });
 
 describe('the Send screen', () => {
-  it.each(Object.keys(DEVICES) as Device[])('shows the form, the review and Face ID on the %s', async (device) => {
+  it.each(Object.keys(DEVICES) as Device[])('shows the form, the review and the send button on the %s', async (device) => {
     await renderOn(device, SendScreen);
     expect(screen.getByTestId('send-to')).toBeOnTheScreen();
     expect(screen.getByTestId('send-amount')).toBeOnTheScreen();
     expect(screen.getByText('You have 100.00 GHOST')).toBeOnTheScreen();
     expect(screen.getByTestId('send-fee')).toHaveTextContent('0.002 GHOST at most');
     expect(screen.getByTestId('send-arrives')).toHaveTextContent('In under a minute');
-    expect(screen.getByText('Send with Face ID')).toBeOnTheScreen();
+    expect(screen.getByText('Send with Touch ID')).toBeOnTheScreen();
     // The content scrolls, so the folded Duo reaches the button.
     expect(screen.getByTestId('send-screen-content').type).toBe('RCTScrollView');
     // Recent addresses sit under the form only on the open Duo, as in the mockup.
     expect(screen.queryByTestId('send-recent') !== null).toBe(device === 'iPhone Duo open');
   });
 
-  it('pastes the address, reviews the total and sends only after Face ID', async () => {
+  it.each([
+    [{ kind: 'touch', enrolled: true }, 'Send with Touch ID'],
+    [{ kind: 'face', enrolled: true }, 'Send with Face ID'],
+    [{ kind: 'touch', enrolled: false }, 'Send with passcode'],
+    [{ kind: 'none', enrolled: false }, 'Send with passcode'],
+    [null, 'Send'],
+  ] as const)('names the check this phone has: %j says "%s"', async (biometric, label) => {
+    mockBiometric = biometric;
+    try {
+      await renderOn('iPhone Duo folded', SendScreen);
+
+      expect(screen.getByTestId('send-confirm')).toHaveTextContent(label);
+    } finally {
+      mockBiometric = { kind: 'touch', enrolled: true };
+    }
+  });
+
+  it('pastes the address, reviews the total and sends only after the phone has checked it is you', async () => {
     await renderOn('iPhone Duo open', SendScreen);
     expect(screen.getByTestId('send-confirm')).toBeDisabled();
     await act(async () => fireEvent.press(screen.getByTestId('send-paste')));
@@ -145,7 +168,7 @@ describe('the Send screen', () => {
     expect(mockReplace).toHaveBeenCalledWith('/payment');
   });
 
-  it('saves nothing when Face ID does not pass', async () => {
+  it('saves nothing when the check does not pass', async () => {
     mockAuth.mockResolvedValueOnce({ ok: false, reason: 'cancelled' });
     await renderOn('iPhone', SendScreen);
     fireEvent.changeText(screen.getByTestId('send-to'), RECIPIENT);

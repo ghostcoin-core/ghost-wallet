@@ -122,7 +122,7 @@ describe('ReceiveScreen', () => {
 });
 
 describe('RecoveryWordsScreen', () => {
-  it('shows the words only after Face ID', async () => {
+  it('shows the words only after the phone has checked it is you', async () => {
     mockAuthenticate.mockResolvedValue({ ok: true });
     render(<RecoveryWordsScreen />);
     expect(screen.queryByText('abandon')).toBeNull();
@@ -156,7 +156,7 @@ describe('RecoveryWordsScreen', () => {
     );
   });
 
-  it('keeps the words hidden when Face ID fails or is not in the build', async () => {
+  it('keeps the words hidden when the check fails or is not in the build', async () => {
     mockAuthenticate.mockResolvedValue({ ok: false, reason: 'unavailable' });
     render(<RecoveryWordsScreen />);
 
@@ -166,7 +166,7 @@ describe('RecoveryWordsScreen', () => {
 
     expect(screen.queryByTestId('recovery-words')).toBeNull();
     expect(screen.queryByText('abandon')).toBeNull();
-    expect(screen.getByTestId('recovery-words-message')).toHaveTextContent('Face ID is not available in this build.');
+    expect(screen.getByTestId('recovery-words-message')).toHaveTextContent('Checking it is you is not available in this build.');
   });
 });
 
@@ -214,7 +214,7 @@ describe('SettingsScreen', () => {
     expect(mockPush).toHaveBeenCalledWith('/bench');
   });
 
-  it('changes app lock only after Face ID', async () => {
+  it('changes app lock only after the phone has checked it is you', async () => {
     mockAuthenticate.mockResolvedValueOnce({ ok: false, reason: 'cancelled' }).mockResolvedValueOnce({ ok: true });
     render(<SettingsScreen />);
 

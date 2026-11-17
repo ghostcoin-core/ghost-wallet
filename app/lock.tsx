@@ -1,11 +1,12 @@
 // 9. Lock (docs/mockups/lock.html): shown when the app opens and an account is
-// saved. Face ID or the passcode opens Home.
+// saved. Touch ID, Face ID or the passcode opens Home.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
 import { Screen } from '../components/screen';
 import { AppIcon, Body, Button, TestNetworkBadge, Title } from '../components/onboarding-ui';
 import { unlock } from '../lib/app-lock';
+import { useBiometric, withBiometric } from '../lib/biometric';
 import { useSession } from '../lib/session';
 import { colours, fonts } from '../lib/theme';
 
@@ -15,13 +16,20 @@ export default function LockScreen() {
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const asking = useRef(false);
+  const biometric = useBiometric();
+  // The prompt starts before the phone has said which check it has.
+  const biometricNow = useRef(biometric);
+  useEffect(() => {
+    biometricNow.current = biometric;
+  }, [biometric]);
+  const hasBiometric = biometric !== null && biometric.enrolled;
 
   const prompt = useCallback(() => {
     if (asking.current) {
       return;
     }
     asking.current = true;
-    void unlock().then((outcome) => {
+    void unlock(biometricNow.current).then((outcome) => {
       asking.current = false;
       setBusy(false);
       if (outcome.unlocked) {
@@ -47,8 +55,16 @@ export default function LockScreen() {
       centred
       footer={
         <>
-          <Button disabled={busy} label="Unlock with Face ID" onPress={ask} testID="lock-face-id" />
-          <Button disabled={busy} label="Use passcode" onPress={ask} testID="lock-passcode" variant="secondary" />
+          {biometric === null || hasBiometric ? (
+            <Button disabled={busy} label={withBiometric('Unlock', biometric)} onPress={ask} testID="lock-unlock" />
+          ) : null}
+          <Button
+            disabled={busy}
+            label="Use passcode"
+            onPress={ask}
+            testID="lock-passcode"
+            variant={hasBiometric || biometric === null ? 'secondary' : 'primary'}
+          />
         </>
       }
       label="Locked"
