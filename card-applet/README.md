@@ -170,3 +170,26 @@ code ‖ challenge), from a fresh 16-byte counter block (incremented as one
 128-bit big-endian number), with an AES-CMAC tag under the same with
 "ghost-card-open-mac", over "ghost-card-open-v1" ‖ card id ‖ fill ‖ challenge
 ‖ counter block ‖ ciphertext. An opened card answers Open again with its code.
+
+## On a J3R180
+
+Run on 2026-11-17 over a USB contact reader, which takes answers of at most
+256 bytes, so long answers came back in parts:
+
+| Work | Median of 5 fills | Budget (card on a phone) |
+| --- | --- | --- |
+| Loading: H10 key generation | 51.5 min (3.02 s a leaf) | at the loading station |
+| Make (with the commit data's second part) | 2.15 s | 10 s |
+| Check, with its signature read | 2.88 s | 3 s |
+| Check confirming the open code | 2.89 s | 3 s |
+| Open | 0.58 s | 3 s |
+| Refill | 0.18 s | 3 s |
+
+Every answer was checked: each LMS signature verified, and each Make's commit
+data, commitment and marker recomputed bit for bit from what Open released.
+
+Check is bound by this reader. The card's own work is about 1.7 s: the
+statement about 0.1 s and the one-time chains about 1.6 s. The reader moves
+about 0.44 ms a byte (2,508 signature bytes take about 1.1 s), against about
+0.1 ms a byte over iPhone NFC (docs/j3r180-measurements.md). Over NFC a Check
+comes to about 1.7 s × 1.05 + 0.3 s, so about 2.1 s.

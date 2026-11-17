@@ -751,17 +751,28 @@ Each item is an attack and how the design answers it.
 
 ## Left for the hardware step
 
-The card type is measured. The applet, its loading and the checks on real
-cards and phones are a later step. It must show, on the J3R180 and on an
-iPhone:
+The applet is built (`card-applet/`) and has run on a J3R180 over a contact
+reader on 2026-11-17:
+
+- H10 key generation at loading: 51.5 minutes (3.02 s a leaf), as estimated;
+- five fills, each with Make, a Check, a Check confirming the open code, Open
+  and Refill, every answer checked as a phone would, every LMS signature
+  verified, and each Make's commit data, commitment and marker recomputed bit
+  for bit from what Open released. Medians: Make 2.15 s, Check 2.88 s, Check
+  with the code 2.89 s, Open 0.58 s, Refill 0.18 s;
+- the card's own work in a Check is about 1.7 s (the statement 0.1 s, the
+  one-time chains 1.6 s). The rest is the USB reader, which moves about
+  0.44 ms a byte against about 0.1 ms over iPhone NFC, so a Check on a phone
+  comes to about 2.1 s, within its 3 s budget.
+
+The applet's tests reproduce Ghost's F, commitment, commit data and marker bit
+for bit from vectors computed by Ghost's own client, and cut the power at every
+persistent write of every command, checking the card is left before or after
+it. Still to show, with the app on an iPhone:
 
 - timed Make, Check (with and without an open-code confirmation), Open and
-  Refill on the real applet within the budgets, and H10 key generation at
-  loading;
-- that the applet reproduces Ghost's F, commitment, commit data and marker
-  bit for bit from fixed test inputs taken from Ghost's own client;
-- that a card pulled away mid-Make, mid-Open and mid-Refill is left before or
-  after the command (tearing was not tested);
+  Refill over iPhone NFC within the budgets;
+- a card pulled away mid-Make, mid-Open and mid-Refill on the real card;
 - a seal check from a second phone that never touched the card, a one-way
   open whose later taps all show opened, and a Refill and second fill whose
   checks show the higher fill number while the first fill's code opens
