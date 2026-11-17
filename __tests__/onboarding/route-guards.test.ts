@@ -61,6 +61,7 @@ describe('route guards', () => {
       'fill-card',
       'fill-ghost-card',
       'home',
+      'older-cards',
       'open-card',
       'open-ghost-card',
       'payment',
