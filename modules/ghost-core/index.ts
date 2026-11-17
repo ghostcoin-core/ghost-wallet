@@ -84,8 +84,11 @@ export type JavaCardBindings = {
   verifyJavaCardCheck(input: CoreJavaCardCheckInput): CoreJavaCardVerdict;
   /** Checks the held Open release makes `expect`'s coin and holds its key for the Summon; "" or a refusal code. */
   finishJavaCardOpen(expect: CoreJavaCardOpenExpect): string;
-  /** For a card with no seal checks left: holds the release's key with no statement; the chain decides. */
-  finishJavaCardOpenUnchecked(cardId: ArrayBuffer, fill: number): string;
+  /**
+   * For a card with no seal checks left: checks its certificate, then holds the release's key for the
+   * certified card at `fill` with no statement; the chain decides. "" or a refusal code.
+   */
+  finishJavaCardOpenUnchecked(certificate: ArrayBuffer, chainId: bigint, fill: number): string;
   hasJavaCardRelease(): boolean;
   forgetJavaCardRelease(): void;
 };

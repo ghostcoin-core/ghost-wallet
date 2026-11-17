@@ -82,8 +82,8 @@ function fakeCore(verdict: () => CoreJavaCardVerdict, calls: Calls, finish = '')
       calls.push({ name: 'finish', args: [expect] });
       return finish;
     },
-    finishJavaCardOpenUnchecked: (cardId, fill) => {
-      calls.push({ name: 'finish-unchecked', args: [cardId, fill] });
+    finishJavaCardOpenUnchecked: (certificate, chainId, fill) => {
+      calls.push({ name: 'finish-unchecked', args: [certificate, chainId, fill] });
       return finish;
     },
     hasJavaCardRelease: () => false,
@@ -185,6 +185,7 @@ describe('Check', () => {
     ['a failed signature', () => ({ refusal: 'statement-signature' }), undefined, 'Not a genuine Ghost card: not safe to accept'],
     ['an unknown issuer', () => ({ refusal: 'unknown-issuer' }), undefined, 'Not a genuine Ghost card: not safe to accept'],
     ['no chain', ok(), new Error('down'), "Can't check the chain right now"],
+    ['spent markers that could not be read', ok(), { status: 'buried', spent: null, leaf: statement().leaf }, "Can't check the chain right now"],
   ] as const)('shows %s as not safe', async (_name, verdict, chain, text) => {
     const d = deps(() => ghostTap({ commitData: hex(430) }), verdict, chain as CoinOnChain | Error | undefined);
     const result = await checkGhostCard(d);
@@ -322,7 +323,9 @@ describe('Open', () => {
     const d = deps(() => ghostTap({ statement: undefined, signature: undefined, opened: true }), ok());
     const result = await openGhostCard(d, new Uint8Array(20));
     expect(result).toMatchObject({ ok: true, amountWei: null, fill: 1 });
-    expect(d.calls.find((c) => c.name === 'finish-unchecked')?.args[1]).toBe(1);
+    const unchecked = d.calls.find((c) => c.name === 'finish-unchecked')!.args;
+    expect((unchecked[0] as ArrayBuffer).byteLength).toBe(7990);
+    expect(unchecked.slice(1)).toEqual([CHAIN, 1]);
   });
 });
 

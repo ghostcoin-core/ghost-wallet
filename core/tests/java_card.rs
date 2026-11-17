@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use ghost_client::slh_dsa::SigningKey;
 use ghost_wallet_core::java_card::{
     APPLET_HASHES, CERT_BYTES, CERT_DOMAIN, CardState, CheckParts, OpenExpect, OpenRefusal, PinnedIssuer, Refusal,
-    Trust, certificate_body, check_card, check_certificate, code_confirmation, code_hash, finish_open, forget_release,
+    Trust, certificate_body, check_card, check_certificate, hold_unchecked, code_confirmation, code_hash, finish_open, forget_release,
     lms_verify, open_code_from_text, open_code_text, open_release, parse_statement, pinned_trust, take_open,
 };
 use ghost_wallet_core::card::{forget_card_key, has_card_key};
@@ -352,11 +352,19 @@ fn open_releases_the_key_of_exactly_the_sealed_coin() {
 
     // A card with no seal checks left: the key is held with no statement, for
     // the card and fill its Identify gave; the chain then decides.
+    // A certificate no pinned issuer signed: refused, and the release is wiped.
     take_open(&card_id, &code, &challenge, answer).unwrap();
-    assert_eq!(finish_java_card_open_unchecked(card_id.to_vec(), 2), "open-other-fill");
+    assert_eq!(finish_java_card_open_unchecked(card_cert(&v, &test_issuer(1)), CHAIN, 1), "unknown-issuer");
+    assert_eq!(hold_unchecked(&card_id, 1), Err(OpenRefusal::NothingHeld));
+    take_open(&card_id, &code, &challenge, answer).unwrap();
+    assert_eq!(hold_unchecked(&card_id, 2), Err(OpenRefusal::OtherFill));
     assert!(!has_card_key());
+    let mut other_card = card_id;
+    other_card[0] ^= 1;
     take_open(&card_id, &code, &challenge, answer).unwrap();
-    assert_eq!(finish_java_card_open_unchecked(card_id.to_vec(), 1), "");
+    assert_eq!(hold_unchecked(&other_card, 1), Err(OpenRefusal::OtherFill));
+    take_open(&card_id, &code, &challenge, answer).unwrap();
+    assert_eq!(hold_unchecked(&card_id, 1), Ok(()));
     assert!(has_card_key());
     forget_card_key();
     forget_release();

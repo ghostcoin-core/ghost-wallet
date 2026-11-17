@@ -2,11 +2,13 @@
 // nodes (never a Ghost server): whether a Vanish with exactly the card's
 // commit data added its leaf to the coin tree, whether that leaf is buried
 // under enough blocks, and whether its marker is spent. The coin tree pages
-// are checked against the block headers the nodes send, as every Summon's
-// are; the spent markers are a hint (lib/vanish/coin-pages.ts).
+// are checked against the block headers each node sends, as every Summon's
+// are, and every node the build lists must agree. The headers themselves are
+// not yet checked against the phone's own header chain.
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import type { CoinLeaf } from '../../modules/ghost-core';
-import { devicePageCache, readCoinTreeFrom, readSpentMarkers } from '../vanish/coin-pages';
+import { devicePageCache, readCoinTree, readSpentMarkers, type PageCache } from '../vanish/coin-pages';
+import type { VanishNode } from '../vanish/node';
 import { SETTLE_CONFIRMATIONS } from '../vanish/status-mapping';
 import type { PaymentKit } from '../vanish/use-payment';
 
@@ -21,7 +23,41 @@ export type CoinOnChain = {
 
 const same = (leaf: CoinLeaf, commitment: string) => bytesToHex(leaf.commitment) === commitment;
 
-/** The coin with leaf `commitment` and marker `marker`, on the chain of `kit`. Throws when no node answers. */
+/** What one node says of the coin, its pages checked against its own headers. */
+async function fromNode(
+  kit: PaymentKit,
+  node: VanishNode,
+  cache: PageCache,
+  chainId: bigint,
+  wanted: string,
+  marker: string,
+): Promise<CoinOnChain> {
+  if ((await node.chainId()) !== chainId) {
+    throw new Error('the node is not on the same Ghost network');
+  }
+  const atTip = await readCoinTree(kit.core, node, cache, { complete: true });
+  const leaf = atTip.tree.leaves.find((l) => same(l, wanted)) ?? null;
+  const markers = await readSpentMarkers(node, atTip.tree.hash);
+  const spent = markers === null ? null : markers.map((m) => m.toLowerCase()).includes(marker);
+  if (!leaf) {
+    return { status: 'absent', spent, leaf: null };
+  }
+  const deep = atTip.tip - (SETTLE_CONFIRMATIONS - 1);
+  if (deep < 0) {
+    return { status: 'settling', spent, leaf };
+  }
+  const buried = await readCoinTree(kit.core, node, cache, { complete: true, atHeight: deep });
+  return { status: buried.tree.leaves.some((l) => same(l, wanted)) ? 'buried' : 'settling', spent, leaf };
+}
+
+export const NODES_DISAGREE_TEXT = "the build's nodes disagree about this coin";
+
+/**
+ * The coin with leaf `commitment` and marker `marker`, as every node this
+ * build lists says it is: each node's pages are checked against that node's
+ * own headers, and every node that answers must say the same, or the call
+ * fails. Throws when no node answers.
+ */
 export async function coinOnChain(
   kit: PaymentKit,
   chainId: bigint,
@@ -31,17 +67,33 @@ export async function coinOnChain(
   const nodes = [kit.node, ...(kit.fallbackNodes ?? [])];
   const cache = kit.pages ?? devicePageCache(chainId);
   const wanted = bytesToHex(commitment);
-  const atTip = await readCoinTreeFrom(kit.core, nodes, cache, chainId, { complete: true });
-  const leaf = atTip.tree.leaves.find((l) => same(l, wanted)) ?? null;
-  const markers = await readSpentMarkers(atTip.node, atTip.tree.hash);
-  const spent = markers === null ? null : markers.map((m) => m.toLowerCase()).includes(bytesToHex(marker));
-  if (!leaf) {
-    return { status: 'absent', spent, leaf: null };
+  const markerHex = bytesToHex(marker);
+  const answers: CoinOnChain[] = [];
+  let first: unknown = null;
+  for (const node of nodes) {
+    try {
+      answers.push(await fromNode(kit, node, cache, chainId, wanted, markerHex));
+    } catch (error) {
+      first = first ?? error;
+    }
   }
-  const deep = atTip.tip - (SETTLE_CONFIRMATIONS - 1);
-  if (deep < 0) {
-    return { status: 'settling', spent, leaf };
+  if (answers.length === 0) {
+    throw first ?? new Error('no node answered');
   }
-  const buried = await readCoinTreeFrom(kit.core, nodes, cache, chainId, { complete: true, atHeight: deep });
-  return { status: buried.tree.leaves.some((l) => same(l, wanted)) ? 'buried' : 'settling', spent, leaf };
+  const [one, ...rest] = answers;
+  if (rest.some((a) => a.status !== one.status || a.spent !== one.spent || !sameLeaf(a.leaf, one.leaf))) {
+    throw new Error(NODES_DISAGREE_TEXT);
+  }
+  return one;
+}
+
+function sameLeaf(a: CoinLeaf | null, b: CoinLeaf | null): boolean {
+  if (a === null || b === null) {
+    return a === b;
+  }
+  return (
+    bytesToHex(a.commitment) === bytesToHex(b.commitment) &&
+    bytesToHex(a.note) === bytesToHex(b.note) &&
+    (a.salt ? bytesToHex(a.salt) : null) === (b.salt ? bytesToHex(b.salt) : null)
+  );
 }
