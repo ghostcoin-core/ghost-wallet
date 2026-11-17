@@ -167,7 +167,7 @@ export default function SettingsScreen() {
         <Row
           icon="receive"
           title="Open a Ghost card into my wallet"
-          detail="With its open code"
+          detail="Tap the card: nothing else is needed"
           opens
           onPress={() => router.push('/open-ghost-card')}
           testID="settings-open-ghost-card"

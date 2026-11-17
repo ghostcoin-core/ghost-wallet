@@ -3,8 +3,8 @@
 // in native code; each flow resolves with public parts only, as hex: the
 // card's Identify, its certificate, a seal statement and its signature, the
 // commit data and Make's fill and commitment. An Open's answer goes from the
-// card to the native core, never here. Open codes come here as the 20 bytes
-// the card takes, because the person types or sees them; nothing keeps them.
+// card to the native core, never here. The card is a bearer object: no flow
+// takes a code or PIN.
 import { requireOptionalNativeModule } from 'expo';
 
 import { CardCancelled } from './index';
@@ -13,24 +13,18 @@ import { CardCancelled } from './index';
 export const GHOST_CARD_AID = 'A000000847474341524401';
 
 export const COMMIT_DATA_BYTES = 430;
-export const STATEMENT_BYTES = 194;
+export const STATEMENT_BYTES = 193;
 export const SIGNATURE_BYTES = 2508;
 export const IDENTIFY_BYTES = 29;
 export const MAKE_BYTES = 4 + 32 + COMMIT_DATA_BYTES;
 
 /** The Swift module's Ghost card functions (ios/GhostNfcModule.swift). */
 export type GhostCardNative = {
-  javaCardCheck(alert: string, challenge: Uint8Array, confirmation: Uint8Array | null, commitData: boolean): Promise<NativeTap>;
-  /** `make`: the amount (12 bytes), chain id (8), writer nonce (32) and open-code hash (32). */
-  javaCardFill(alert: string, make: Uint8Array, challenge: Uint8Array, confirmation: Uint8Array): Promise<NativeTap>;
-  javaCardOpen(
-    alert: string,
-    code: Uint8Array,
-    checkChallenge: Uint8Array,
-    confirmation: Uint8Array,
-    openChallenge: Uint8Array,
-  ): Promise<NativeTap>;
-  javaCardRefill(alert: string, code: Uint8Array): Promise<NativeTap>;
+  javaCardCheck(alert: string, challenge: Uint8Array, commitData: boolean): Promise<NativeTap>;
+  /** `make`: the amount (12 bytes), chain id (8) and writer nonce (32). */
+  javaCardFill(alert: string, make: Uint8Array, challenge: Uint8Array): Promise<NativeTap>;
+  javaCardOpen(alert: string, checkChallenge: Uint8Array): Promise<NativeTap>;
+  javaCardRefill(alert: string): Promise<NativeTap>;
 };
 
 /** What a native flow resolves with: hex strings, numbers and flags. */
@@ -63,7 +57,6 @@ export type CardProblem =
   | 'not-ready'
   | 'wrong-state'
   | 'no-checks'
-  | 'wrong-code'
   | 'refused'
   | 'bad-tap'
   | 'failed';
@@ -75,7 +68,6 @@ export const CARD_PROBLEMS: Record<CardProblem, string> = {
   'not-ready': 'This card was never finished at its loading station.',
   'wrong-state': 'The card is not in the state this needs.',
   'no-checks': 'This card has no seal checks left.',
-  'wrong-code': 'That open code does not open this card.',
   refused: 'The card refused a command.',
   'bad-tap': 'The card gave an answer of the wrong size.',
   failed: 'The card could not be read. Hold it still and try again.',
@@ -99,7 +91,6 @@ const NATIVE_PROBLEMS: Record<string, CardProblem> = {
   ERR_GHOST_CARD_NOT_READY: 'not-ready',
   ERR_GHOST_CARD_STATE: 'wrong-state',
   ERR_GHOST_CARD_NO_CHECKS: 'no-checks',
-  ERR_GHOST_CARD_WRONG_CODE: 'wrong-code',
   ERR_GHOST_CARD_FAILED: 'refused',
   ERR_GHOST_CARD_BAD_INPUT: 'failed',
 };

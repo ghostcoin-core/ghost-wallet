@@ -70,12 +70,6 @@ type GhostCoreBindings = RestoreBindings &
 export type JavaCardBindings = {
   /** 32 bytes from the system's random source: a challenge or a writer nonce. */
   javaCardRandom(): ArrayBuffer;
-  /** A new open code from the system's random source, as 32 base32 characters: shown once, kept nowhere. */
-  javaCardNewOpenCode(): string;
-  /** The 20 bytes of an open code typed or scanned; throws for anything that is not one. */
-  javaCardOpenCode(text: string): ArrayBuffer;
-  javaCardCodeHash(code: ArrayBuffer): ArrayBuffer;
-  javaCardCodeConfirmation(code: ArrayBuffer, challenge: ArrayBuffer): ArrayBuffer;
   /** The number printed on the card's face, from its id. */
   javaCardNumber(cardId: ArrayBuffer): string;
   /** Identify's answer, unsigned: for labelling a card only. */
@@ -123,7 +117,6 @@ export type CoreJavaCardStatement = {
   digest: ArrayBuffer;
   marker: ArrayBuffer;
   checksLeft: number;
-  openCode: string;
   batch: number;
   devIssuer: boolean;
   leaf?: CoinLeaf;

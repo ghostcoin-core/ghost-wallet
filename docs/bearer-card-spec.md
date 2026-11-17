@@ -81,8 +81,7 @@ A product qualifies only if it has all of these:
 - Java Card 3.0.5 or later on a GlobalPlatform card manager, contactless
   (ISO/IEC 14443 type A) so an iPhone can talk to it, with extended-length or
   chained APDUs;
-- native SHA-256, native AES-256 with CTR and CMAC, and a hardware true random
-  number generator;
+- native SHA-256 and a hardware true random number generator;
 - SHA3-256 and Ghost's Keccak-256, natively or as bytecode Keccak, fast enough
   that Make, Check and Open meet the time budgets below;
 - persistent memory writes inside atomic transactions, so a card pulled away
@@ -93,7 +92,8 @@ A product qualifies only if it has all of these:
   level (EAL6+ class), covering side-channel and fault-injection resistance.
 
 **The J3R180 qualifies.** It runs Java Card 3.0.5 code on a GlobalPlatform 2.3
-card manager; it has native SHA-256, AES-256, AES-CTR, AES-CMAC and a TRNG;
+card manager; it has native SHA-256 and a TRNG (and AES, which the applet
+does not use);
 its transactions work; it has about 143 KB of persistent memory free with a
 61 KB test applet loaded; extended commands work, and over the iPhone answers
 of 1,000 bytes come back whole; and its chip, JCOP 4 P71, is certified EAL6+.
@@ -111,9 +111,9 @@ and its answers match Ghost's client. It fits every budget:
 | Work, card on an iPhone | Bytecode permutations | Estimate | Budget |
 | --- | --- | --- | --- |
 | Make (below) | 10 (11 with the note lookup tag) | ≈ 2.0 s | ≤ 10 s |
-| Check | none (one more to confirm an open code) | ≈ 1.9 s (≈ 2.0 s) | ≤ 3 s |
-| Open | 3 | ≈ 0.5 s | ≤ 3 s |
-| Refill | 1 | ≈ 0.3 s | ≤ 3 s |
+| Check | none | ≈ 1.9 s | ≤ 3 s |
+| Open | none | ≈ 0.2 s | ≤ 3 s |
+| Refill | none | ≈ 0.2 s | ≤ 3 s |
 
 The estimates add up measured parts (permutations, the note seal, the LMS
 signature, the answer's bytes at the measured rate, and 0.2 s for the atomic

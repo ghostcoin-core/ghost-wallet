@@ -49,24 +49,21 @@ public final class GhostNfcModule: Module {
     // A Ghost Java card (JavaCard.swift): each flow runs natively in one
     // tap, and resolves with public parts only, as hex. An Open's answer goes
     // to the native core, never here.
-    AsyncFunction("javaCardCheck") { (alert: String, challenge: Data, confirmation: Data?, commitData: Bool, promise: Promise) in
-      self.javaCard.check(alert: alert, challenge: challenge, confirmation: confirmation, commitData: commitData, promise: promise)
+    AsyncFunction("javaCardCheck") { (alert: String, challenge: Data, commitData: Bool, promise: Promise) in
+      self.javaCard.check(alert: alert, challenge: challenge, commitData: commitData, promise: promise)
     }
 
-    // `make` is Make's input: amount 12, chain id 8, writer nonce 32, open-code hash 32.
-    AsyncFunction("javaCardFill") { (alert: String, make: Data, challenge: Data, confirmation: Data, promise: Promise) in
-      self.javaCard.fill(alert: alert, make: make, challenge: challenge, confirmation: confirmation, promise: promise)
+    // `make` is Make's input: amount 12, chain id 8, writer nonce 32.
+    AsyncFunction("javaCardFill") { (alert: String, make: Data, challenge: Data, promise: Promise) in
+      self.javaCard.fill(alert: alert, make: make, challenge: challenge, promise: promise)
     }
 
-    AsyncFunction("javaCardOpen") {
-      (alert: String, code: Data, checkChallenge: Data, confirmation: Data, openChallenge: Data, promise: Promise) in
-      self.javaCard.open(
-        alert: alert, code: code, checkChallenge: checkChallenge, confirmation: confirmation, openChallenge: openChallenge,
-        promise: promise)
+    AsyncFunction("javaCardOpen") { (alert: String, checkChallenge: Data, promise: Promise) in
+      self.javaCard.open(alert: alert, checkChallenge: checkChallenge, promise: promise)
     }
 
-    AsyncFunction("javaCardRefill") { (alert: String, code: Data, promise: Promise) in
-      self.javaCard.refill(alert: alert, code: code, promise: promise)
+    AsyncFunction("javaCardRefill") { (alert: String, promise: Promise) in
+      self.javaCard.refill(alert: alert, promise: promise)
     }
 
     AsyncFunction("relayCheck") { (sealUrl: String, alert: String, promise: Promise) in

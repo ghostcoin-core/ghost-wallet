@@ -1,8 +1,9 @@
 /* eslint-disable @typescript-eslint/no-require-imports -- the jest.mock factories reach the test's fakes lazily */
 // The Ghost card screens on the iPhone, the iPhone Duo folded and the iPhone
-// Duo open: Fill shows the open code before any tap and pays only after the
-// card checked out; Open summons at once and offers Reuse once settled; Check
-// shows a Ghost card's state and sends an NTAG 424 card on to its Seal.
+// Duo open: Fill pays only after the card checked out; Open needs nothing but
+// a tap, summons at once and offers Reuse once settled; Check shows a Ghost
+// card's state and sends an NTAG 424 card on to its Seal. No screen asks for
+// or shows a code: the card is a bearer object.
 import { act, fireEvent, screen } from '@testing-library/react-native';
 
 import CheckCardScreen from '../../app/check-card';
@@ -23,13 +24,6 @@ const fake = {
 jest.mock('../../lib/ghost-card/deps', () => ({
   ghostCardDeps: () => ({
     core: {
-      javaCardNewOpenCode: () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567',
-      javaCardOpenCode: (text: string) => {
-        if (text.replace(/[\s-]/g, '').length !== 32) {
-          throw new Error('not-an-open-code');
-        }
-        return new ArrayBuffer(20);
-      },
       forgetJavaCardRelease: () => {},
     },
     nfc: {},
@@ -100,16 +94,11 @@ async function press(testID: string) {
 describe.each(DEVICE_NAMES)('on the %s', (device) => {
   const open = device === 'iPhone Duo open';
 
-  it('Fill: shows the open code before the card is tapped, and pays only after the card checked out', async () => {
+  it('Fill: an amount, then one tap, and pays only after the card checked out', async () => {
     renderOn(device, FillGhostCardScreen);
     expect(sideBySide('fill-ghost-card-screen-content')).toBe(open);
     await act(async () => {});
     fireEvent.changeText(screen.getByTestId('ghost-fill-amount'), '2');
-    await press('ghost-fill-make-code');
-    expect(String(screen.getByTestId('ghost-fill-code-text').props.children)).toBe('ABCDEFGH IJKLMNOP QRSTUVWX YZ234567');
-    // No tap until the writer says the code is kept.
-    expect(screen.queryByTestId('ghost-fill-tap')).toBeNull();
-    await press('ghost-fill-kept');
     fake.fill.mockResolvedValue({
       ok: true,
       commitData: new Uint8Array(430),
@@ -121,9 +110,8 @@ describe.each(DEVICE_NAMES)('on the %s', (device) => {
     });
     await press('ghost-fill-tap');
     expect(fake.fill.mock.calls[0][1]).toBe(2n * 10n ** 18n);
+    expect(fake.fill.mock.calls[0].length).toBe(2);
     expect(fake.calls).toEqual(['vanish']);
-    // The code is gone from the screen once the card holds its hash.
-    expect(screen.queryByTestId('ghost-fill-code')).toBeNull();
     expect(screen.getByTestId('ghost-fill-low-checks')).toBeTruthy();
   });
 
@@ -131,8 +119,6 @@ describe.each(DEVICE_NAMES)('on the %s', (device) => {
     renderOn(device, FillGhostCardScreen);
     await act(async () => {});
     fireEvent.changeText(screen.getByTestId('ghost-fill-amount'), '2');
-    await press('ghost-fill-make-code');
-    await press('ghost-fill-kept');
     fake.fill.mockResolvedValue({ ok: false, status: { kind: 'not-genuine', reason: 'fill-other-amount' } });
     await press('ghost-fill-tap');
     expect(fake.calls).toEqual([]);
@@ -141,14 +127,13 @@ describe.each(DEVICE_NAMES)('on the %s', (device) => {
     );
   });
 
-  it('Open: needs a well-formed code, summons at once, and offers Reuse once the Summon settled', async () => {
+  it('Open: needs nothing but a tap, summons at once, and offers Reuse once the Summon settled', async () => {
     const view = renderOn(device, OpenGhostCardScreen);
     expect(sideBySide('open-ghost-card-screen-content')).toBe(open);
-    fireEvent.changeText(screen.getByTestId('ghost-open-code'), 'ABCD');
-    expect(screen.getByTestId('ghost-open-code-error')).toBeTruthy();
-    fireEvent.changeText(screen.getByTestId('ghost-open-code'), 'ABCDEFGH IJKLMNOP QRSTUVWX YZ234567');
+    expect(screen.queryByLabelText('Open code')).toBeNull();
     fake.open.mockResolvedValue({ ok: true, amountWei: 2n * 10n ** 18n, fill: 1, cardNumber: 'AAAA BBBB', ms: 2600 });
     await press('ghost-open-run');
+    expect(fake.open.mock.calls[0].length).toBe(1);
     expect(fake.calls).toEqual(['summon']);
     expect(screen.queryByTestId('ghost-open-reuse')).toBeNull();
     fake.paymentStatus = 'settled';
@@ -156,23 +141,25 @@ describe.each(DEVICE_NAMES)('on the %s', (device) => {
     fake.refill.mockResolvedValue({ ok: true, fill: 1, ms: 300 });
     await press('ghost-open-refill');
     expect(fake.refill).toHaveBeenCalledTimes(1);
+    expect(fake.refill.mock.calls[0].length).toBe(1);
     await press('ghost-open-fill-next');
     expect(mockRouter.replace).toHaveBeenCalledWith('/fill-ghost-card');
   });
 
-  it('Open: a wrong code opens nothing and summons nothing', async () => {
+  it('Open: a card that does not check out summons nothing', async () => {
     renderOn(device, OpenGhostCardScreen);
-    fireEvent.changeText(screen.getByTestId('ghost-open-code'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567');
-    fake.open.mockResolvedValue({ ok: false, status: { kind: 'code-wrong', cardNumber: 'AAAA' } });
+    fake.open.mockResolvedValue({ ok: false, status: { kind: 'not-genuine', reason: 'open-not-the-coin' } });
     await press('ghost-open-run');
     expect(fake.calls).toEqual([]);
-    expect(String(screen.getByTestId('ghost-open-status-text').props.children)).toBe('Open code wrong: not safe to accept');
+    expect(String(screen.getByTestId('ghost-open-status-text').props.children)).toBe(
+      'Not a genuine Ghost card: not safe to accept',
+    );
   });
 
   it('Check: shows a sealed Ghost card, and sends an NTAG 424 card on to its Seal', async () => {
     renderOn(device, CheckCardScreen);
     fake.check.mockResolvedValue({
-      status: { kind: 'sealed', fill: 2, amountWei: 3n * 10n ** 18n, checksLeft: 900, cardNumber: 'AAAA', codeConfirmed: false },
+      status: { kind: 'sealed', fill: 2, amountWei: 3n * 10n ** 18n, checksLeft: 900, cardNumber: 'AAAA' },
       statement: null,
       ms: 2000,
       commitData: null,

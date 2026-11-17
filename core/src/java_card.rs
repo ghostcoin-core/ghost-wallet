@@ -16,26 +16,23 @@
 //! - the **commit data** a card hands out: its SHA-256 is the statement's
 //!   signed digest, and the commitment from its F and the signed amount is
 //!   the statement's commitment;
-//! - an **Open**: the card's AES-CMAC tag before anything is decrypted, then
-//!   the Phantom Key's seed bytes recomputed from what the card released, and
-//!   F, the commitment, the marker and the commit data's digest recomputed
-//!   from them with Ghost's client and compared with the card's statement.
-//!   Only then is the key held for the Summon or Claim ([`crate::card`]).
+//! - an **Open**: the card is a bearer object, so Open needs nothing but the
+//!   card. The Phantom Key's seed bytes are recomputed from what the card
+//!   released, and F, the commitment, the marker and the commit data's digest
+//!   recomputed from them with Ghost's client and compared with the card's
+//!   statement. Only then is the key held for the Summon or Claim
+//!   ([`crate::card`]).
 //!
 //! The released seed material crosses from the card module to this core
 //! through one C function the JavaScript bindings do not carry
 //! ([`ghost_wallet_java_card_take_open`]); JavaScript gets only a verdict.
 //! No cryptography is written here: SHA3-256 is `sha3`, SHA-256 `sha2`, LMS
-//! `lms-signature`, AES-256-CTR and AES-CMAC `ctr`, `cmac` and `aes`, and
-//! SLH-DSA, F, the commitment, the marker and the commit data come from
-//! `ghost_client`. Nothing here logs, prints or formats a code, a seed or a
-//! key.
+//! `lms-signature`, and SLH-DSA, F, the commitment, the marker and the commit
+//! data come from `ghost_client`. Nothing here logs, prints or formats a seed
+//! or a key.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use aes::Aes256;
-use aes::cipher::{KeyIvInit, StreamCipher};
-use cmac::{Cmac, KeyInit, Mac};
 use ghost_client::commit::salted_commit_data;
 use ghost_client::slh_dsa;
 use ghost_client::{Amount, Rule, Salt};
@@ -46,7 +43,7 @@ use rand::rngs::SysRng;
 use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
 use signature::Verifier;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::card::hold_card_words;
 use crate::seal_open::{GivenBytes, KEY_FORMAT_CODE, phantom_key_from_bytes};
@@ -57,22 +54,18 @@ use crate::vanish::{COMMIT_DATA_BYTES, CoinLeaf};
 pub const CARD_AID_HEX: &str = "A000000847474341524401";
 /// A card id's length.
 pub const CARD_ID_BYTES: usize = 16;
-/// An open code's length: 160 bits.
-pub const OPEN_CODE_BYTES: usize = 20;
-/// An open code's length as the app shows it: 32 base32 characters.
-pub const OPEN_CODE_CHARS: usize = 32;
 /// A challenge's length.
 pub const CHALLENGE_BYTES: usize = 32;
 /// A seal statement's length.
-pub const STATEMENT_BYTES: usize = 194;
+pub const STATEMENT_BYTES: usize = 193;
 /// An LMS signature's length, H10 and W4.
 pub const LMS_SIGNATURE_BYTES: usize = 2508;
 /// An LMS public key's length (RFC 8554: type, OTS type, I, T[1]).
 pub const LMS_PUBLIC_KEY_BYTES: usize = 56;
 /// Identify's answer.
 pub const IDENTIFY_BYTES: usize = 29;
-/// Open's answer: fill 4, counter block 16, ciphertext 64, tag 16.
-pub const OPEN_ANSWER_BYTES: usize = 100;
+/// Open's answer: fill 4, then the release.
+pub const OPEN_ANSWER_BYTES: usize = 4 + RELEASE_BYTES;
 /// What Open releases: the card random and the writer nonce.
 pub const RELEASE_BYTES: usize = 64;
 /// Make's answer: fill 4, commitment 32, commit data 430.
@@ -82,12 +75,8 @@ pub const MAKE_MIN_CHECKS: u32 = 16;
 /// The writer's app warns before Make when fewer seal checks than this remain.
 pub const LOW_CHECKS: u32 = 64;
 
-const STATEMENT_DOMAIN: &[u8; 18] = b"ghost-card-seal-v1";
-const CODE_DOMAIN: &[u8] = b"ghost-card-code";
+const STATEMENT_DOMAIN: &[u8; 18] = b"ghost-card-seal-v2";
 const KEY_DOMAIN: &[u8] = b"ghost-card-key";
-const OPEN_ENC_DOMAIN: &[u8] = b"ghost-card-open-enc";
-const OPEN_MAC_DOMAIN: &[u8] = b"ghost-card-open-mac";
-const OPEN_DOMAIN: &[u8] = b"ghost-card-open-v1";
 
 /// The certificate's domain, its first bytes and its SLH-DSA context.
 pub const CERT_DOMAIN: &[u8; 18] = b"ghost-card-cert-v1";
@@ -142,8 +131,8 @@ pub const ISSUERS: &[PinnedIssuer] = &[DEV_ISSUER];
 /// The applet builds a card may carry: the code hash `card-applet/build.sh`
 /// prints, which every certificate names.
 pub const APPLET_HASHES: &[[u8; 32]] = &[[
-    0x2c, 0x79, 0x42, 0x80, 0xf0, 0xa6, 0x24, 0x02, 0x41, 0x3f, 0x11, 0x26, 0x35, 0x70, 0x88, 0x5a, 0xc0, 0xd6, 0xb6,
-    0xf1, 0xb8, 0xde, 0x5e, 0x8c, 0xff, 0x75, 0xbe, 0x15, 0xa8, 0x04, 0xb2, 0xb0,
+    0xb8, 0x28, 0x07, 0xcf, 0x31, 0xf6, 0x5b, 0x2f, 0xa6, 0xbb, 0x4e, 0xa0, 0xd3, 0xbc, 0x2e, 0x6b, 0x31, 0x86, 0xca,
+    0x92, 0xf0, 0xa7, 0x7a, 0x29, 0x67, 0x52, 0x38, 0x10, 0xb4, 0x34, 0x6d, 0x10,
 ]];
 
 /// Cards an issuer revoked (lost from a loading station, failed a sample).
@@ -321,8 +310,6 @@ pub struct Statement {
     pub marker: [u8; 32],
     pub checks_left: u32,
     pub leaf: u32,
-    /// 0 not asked, 1 right, 2 wrong.
-    pub code: u8,
     pub challenge: [u8; CHALLENGE_BYTES],
 }
 
@@ -332,17 +319,13 @@ fn array<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
     out
 }
 
-/// Reads a statement's 194 bytes; `None` for anything else.
+/// Reads a statement's 193 bytes; `None` for anything else.
 pub fn parse_statement(bytes: &[u8]) -> Option<Statement> {
     if bytes.len() != STATEMENT_BYTES || &bytes[..18] != STATEMENT_DOMAIN {
         return None;
     }
     let mut amount = [0u8; 16];
     amount[4..].copy_from_slice(&bytes[47..59]);
-    let code = bytes[161];
-    if code > 2 {
-        return None;
-    }
     Some(Statement {
         card_id: array(bytes, 18),
         state: CardState::from_byte(bytes[34])?,
@@ -354,8 +337,7 @@ pub fn parse_statement(bytes: &[u8]) -> Option<Statement> {
         marker: array(bytes, 123),
         checks_left: u32::from(u16::from_be_bytes(array(bytes, 155))),
         leaf: u32::from_be_bytes(array(bytes, 157)),
-        code,
-        challenge: array(bytes, 162),
+        challenge: array(bytes, 161),
     })
 }
 
@@ -442,14 +424,14 @@ pub fn check_commit_data(data: &[u8], statement: &Statement) -> Result<CoinLeaf,
     Ok(leaf)
 }
 
-// ---------------------------------------------------------------- open codes
+// ---------------------------------------------------------------- hashes and text
 
 const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
-/// An open code's 32 base32 characters (RFC 4648 alphabet).
-pub fn open_code_text(code: &[u8; OPEN_CODE_BYTES]) -> String {
-    let mut out = String::with_capacity(OPEN_CODE_CHARS);
-    for chunk in code.chunks(5) {
+/// 20 bytes as 32 base32 characters (RFC 4648 alphabet).
+fn base32_text(bytes: &[u8; 20]) -> String {
+    let mut out = String::with_capacity(32);
+    for chunk in bytes.chunks(5) {
         let mut value: u64 = 0;
         for byte in chunk {
             value = (value << 8) | u64::from(*byte);
@@ -459,43 +441,6 @@ pub fn open_code_text(code: &[u8; OPEN_CODE_BYTES]) -> String {
         }
     }
     out
-}
-
-/// An open code from its text: 32 base32 characters, in any case, with any
-/// spaces or dashes between them. `None` for anything else.
-pub fn open_code_from_text(text: &str) -> Option<Zeroizing<[u8; OPEN_CODE_BYTES]>> {
-    let mut code = Zeroizing::new([0u8; OPEN_CODE_BYTES]);
-    let mut value: u64 = 0;
-    let mut count = 0usize;
-    for c in text.chars() {
-        if c == ' ' || c == '-' {
-            continue;
-        }
-        let upper = c.to_ascii_uppercase();
-        let digit = BASE32.iter().position(|&b| b as char == upper)?;
-        if count >= OPEN_CODE_CHARS {
-            return None;
-        }
-        value = (value << 5) | digit as u64;
-        count += 1;
-        if count % 8 == 0 {
-            let at = (count / 8 - 1) * 5;
-            code[at..at + 5].copy_from_slice(&value.to_be_bytes()[3..]);
-            value = 0;
-        }
-    }
-    value.zeroize();
-    (count == OPEN_CODE_CHARS).then_some(code)
-}
-
-/// SHA3-256 of an open code: what Make stores on the card.
-pub fn code_hash(code: &[u8]) -> [u8; 32] {
-    sha3(&[code])
-}
-
-/// The value a Check sends to confirm an open code for one challenge.
-pub fn code_confirmation(code: &[u8], challenge: &[u8]) -> [u8; 32] {
-    sha3(&[CODE_DOMAIN, &code_hash(code), challenge])
 }
 
 fn sha3(parts: &[&[u8]]) -> [u8; 32] {
@@ -512,13 +457,11 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
 // ---------------------------------------------------------------- open
 
-/// Why an Open did not give a key. Never holds a code, a seed or a key.
+/// Why an Open did not give a key. Never holds a seed or a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenRefusal {
     /// The answer is not an Open answer, or it is for another fill.
     Malformed,
-    /// The answer's tag is wrong: altered, or not for this code and challenge.
-    BadTag,
     /// Nothing was released to this core, or it was already used.
     NothingHeld,
     /// The release is for another card or fill than the one checked.
@@ -534,7 +477,6 @@ impl OpenRefusal {
     pub fn code(self) -> &'static str {
         match self {
             OpenRefusal::Malformed => "open-malformed",
-            OpenRefusal::BadTag => "open-bad-tag",
             OpenRefusal::NothingHeld => "open-nothing-held",
             OpenRefusal::OtherFill => "open-other-fill",
             OpenRefusal::NotTheCoin => "open-not-the-coin",
@@ -543,35 +485,15 @@ impl OpenRefusal {
     }
 }
 
-/// Checks an Open answer's tag, then decrypts it: the card random and the
-/// writer nonce, and the fill it is for.
-pub fn open_release(
-    card_id: &[u8; CARD_ID_BYTES],
-    code: &[u8; OPEN_CODE_BYTES],
-    challenge: &[u8; CHALLENGE_BYTES],
-    answer: &[u8],
-) -> Result<(u32, Zeroizing<[u8; RELEASE_BYTES]>), OpenRefusal> {
+/// Reads an Open answer: the fill it is for, and the card random and the
+/// writer nonce. Nothing in it is trusted until [`finish_open`] has
+/// recomputed the card's coin from it.
+pub fn open_release(answer: &[u8]) -> Result<(u32, Zeroizing<[u8; RELEASE_BYTES]>), OpenRefusal> {
     if answer.len() != OPEN_ANSWER_BYTES {
         return Err(OpenRefusal::Malformed);
     }
-    let fill = &answer[..4];
-    let counter: [u8; 16] = array(answer, 4);
-    let ciphertext = &answer[20..84];
-    let tag = &answer[84..100];
-    let enc = Zeroizing::new(sha3(&[OPEN_ENC_DOMAIN, card_id, fill, code, challenge]));
-    let mac_key = Zeroizing::new(sha3(&[OPEN_MAC_DOMAIN, card_id, fill, code, challenge]));
-    let mut mac = <Cmac<Aes256> as KeyInit>::new_from_slice(&mac_key[..]).map_err(|_| OpenRefusal::Malformed)?;
-    mac.update(OPEN_DOMAIN);
-    mac.update(card_id);
-    mac.update(fill);
-    mac.update(challenge);
-    mac.update(&counter);
-    mac.update(ciphertext);
-    mac.verify_slice(tag).map_err(|_| OpenRefusal::BadTag)?;
     let mut release = Zeroizing::new([0u8; RELEASE_BYTES]);
-    release.copy_from_slice(ciphertext);
-    let mut cipher = ctr::Ctr128BE::<Aes256>::new_from_slices(&enc[..], &counter).map_err(|_| OpenRefusal::Malformed)?;
-    cipher.apply_keystream(&mut release[..]);
+    release.copy_from_slice(&answer[4..]);
     Ok((u32::from_be_bytes(array(answer, 0)), release))
 }
 
@@ -628,14 +550,9 @@ fn released() -> MutexGuard<'static, Option<PendingRelease>> {
     RELEASED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Checks and decrypts an Open answer and holds what it released.
-pub fn take_open(
-    card_id: &[u8; CARD_ID_BYTES],
-    code: &[u8; OPEN_CODE_BYTES],
-    challenge: &[u8; CHALLENGE_BYTES],
-    answer: &[u8],
-) -> Result<(), OpenRefusal> {
-    let (fill, release) = open_release(card_id, code, challenge, answer)?;
+/// Reads an Open answer from card `card_id` and holds what it released.
+pub fn take_open(card_id: &[u8; CARD_ID_BYTES], answer: &[u8]) -> Result<(), OpenRefusal> {
+    let (fill, release) = open_release(answer)?;
     *released() = Some(PendingRelease { card_id: *card_id, fill, release });
     Ok(())
 }
@@ -680,48 +597,39 @@ pub fn forget_release() {
 
 /// The Open answer was taken and is held.
 pub const JAVA_OPEN_OK: isize = 0;
-/// The answer's tag is wrong, or it is not an Open answer.
+/// It is not an Open answer.
 pub const JAVA_OPEN_REFUSED: isize = -1;
 /// A length is wrong.
 pub const JAVA_OPEN_WRONG_LENGTH: isize = -2;
 /// A null pointer was passed.
 pub const JAVA_OPEN_NULL: isize = -3;
 
-/// Takes a card's Open answer (`answer_len` bytes at `answer`) for card
-/// `card_id` (16 bytes), opened with `code` (20 bytes) over `challenge` (32
-/// bytes): checks its tag, decrypts it and holds the release for
-/// [`finish_java_card_open`]. Returns [`JAVA_OPEN_OK`], [`JAVA_OPEN_REFUSED`],
+/// Takes a card's Open answer (`answer_len` bytes at `answer`) from card
+/// `card_id` (16 bytes) and holds the release for [`finish_java_card_open`].
+/// Returns [`JAVA_OPEN_OK`], [`JAVA_OPEN_REFUSED`],
 /// [`JAVA_OPEN_WRONG_LENGTH`] or [`JAVA_OPEN_NULL`]. The card module calls
 /// this; JavaScript cannot.
 ///
 /// # Safety
 ///
 /// Each pointer must be valid for reads of its length: 16 bytes at
-/// `card_id`, 20 at `code`, 32 at `challenge` and `answer_len` at `answer`.
+/// `card_id` and `answer_len` at `answer`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ghost_wallet_java_card_take_open(
     card_id: *const u8,
-    code: *const u8,
-    challenge: *const u8,
     answer: *const u8,
     answer_len: usize,
 ) -> isize {
-    if card_id.is_null() || code.is_null() || challenge.is_null() || answer.is_null() {
+    if card_id.is_null() || answer.is_null() {
         return JAVA_OPEN_NULL;
     }
     if answer_len != OPEN_ANSWER_BYTES {
         return JAVA_OPEN_WRONG_LENGTH;
     }
     // SAFETY: the caller guarantees each pointer holds its length.
-    let (card_id, code, challenge, answer) = unsafe {
-        (
-            &*card_id.cast::<[u8; CARD_ID_BYTES]>(),
-            &*code.cast::<[u8; OPEN_CODE_BYTES]>(),
-            &*challenge.cast::<[u8; CHALLENGE_BYTES]>(),
-            core::slice::from_raw_parts(answer, answer_len),
-        )
-    };
-    match take_open(card_id, code, challenge, answer) {
+    let (card_id, answer) =
+        unsafe { (&*card_id.cast::<[u8; CARD_ID_BYTES]>(), core::slice::from_raw_parts(answer, answer_len)) };
+    match take_open(card_id, answer) {
         Ok(()) => JAVA_OPEN_OK,
         Err(_) => JAVA_OPEN_REFUSED,
     }
@@ -748,42 +656,13 @@ fn failed(code: &str) -> JavaCardError {
     JavaCardError::Failed { code: code.to_owned() }
 }
 
-/// A new open code, from the operating system's random source, as its 32
-/// base32 characters: shown once, kept nowhere.
-#[uniffi::export]
-pub fn java_card_new_open_code() -> Result<String, JavaCardError> {
-    let mut code = Zeroizing::new([0u8; OPEN_CODE_BYTES]);
-    SysRng.try_fill_bytes(&mut code[..]).map_err(|_| failed("randomness"))?;
-    Ok(open_code_text(&code))
-}
-
-/// 32 bytes from the operating system's random source: a Check's or Open's
-/// challenge, or a Make's writer nonce.
+/// 32 bytes from the operating system's random source: a Check's challenge
+/// or a Make's writer nonce.
 #[uniffi::export]
 pub fn java_card_random() -> Result<Vec<u8>, JavaCardError> {
     let mut bytes = vec![0u8; CHALLENGE_BYTES];
     SysRng.try_fill_bytes(&mut bytes).map_err(|_| failed("randomness"))?;
     Ok(bytes)
-}
-
-/// The open code typed or scanned as `text`, as the 20 bytes the card takes.
-#[uniffi::export]
-pub fn java_card_open_code(text: String) -> Result<Vec<u8>, JavaCardError> {
-    let code = open_code_from_text(&text).ok_or_else(|| failed("not-an-open-code"));
-    crate::accounts::wipe_string(text);
-    Ok(code?.to_vec())
-}
-
-/// SHA3-256 of an open code, for Make.
-#[uniffi::export]
-pub fn java_card_code_hash(code: Vec<u8>) -> Vec<u8> {
-    code_hash(&code).to_vec()
-}
-
-/// The open-code confirmation a Check sends with `challenge`.
-#[uniffi::export]
-pub fn java_card_code_confirmation(code: Vec<u8>, challenge: Vec<u8>) -> Vec<u8> {
-    code_confirmation(&code, &challenge).to_vec()
 }
 
 /// The card number printed on a card's face: its 16-byte id as 26 base32
@@ -793,7 +672,7 @@ pub fn java_card_number(card_id: Vec<u8>) -> String {
     let mut padded = [0u8; 20];
     let n = card_id.len().min(CARD_ID_BYTES);
     padded[..n].copy_from_slice(&card_id[..n]);
-    let text: String = open_code_text(&padded).chars().take(26).collect();
+    let text: String = base32_text(&padded).chars().take(26).collect();
     text.as_bytes().chunks(4).map(|chunk| String::from_utf8_lossy(chunk).into_owned()).collect::<Vec<_>>().join(" ")
 }
 
@@ -858,8 +737,6 @@ pub struct JavaCardStatement {
     pub digest: Vec<u8>,
     pub marker: Vec<u8>,
     pub checks_left: u32,
-    /// "not-asked", "right" or "wrong".
-    pub open_code: String,
     pub batch: u32,
     pub dev_issuer: bool,
     /// The leaf the coin's Vanish adds, when commit data came with the Check.
@@ -887,7 +764,6 @@ fn statement_record(card: CheckedCard) -> JavaCardStatement {
         digest: s.digest.to_vec(),
         marker: s.marker.to_vec(),
         checks_left: s.checks_left,
-        open_code: ["not-asked", "right", "wrong"][usize::from(s.code)].to_owned(),
         batch: card.certificate.batch,
         dev_issuer: card.certificate.dev,
         leaf: card.leaf,

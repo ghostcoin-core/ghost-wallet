@@ -27,10 +27,9 @@ public final class CardClient {
 
     public static final byte[] AID = hex("A000000847474341524401");
     public static final int SW_WRONG_STATE = 0x6985;
-    public static final int SW_WRONG_CODE = 0x6982;
     public static final int SW_NO_CHECKS = 0x6984;
     public static final int SIGNATURE_LEN = 2508;
-    public static final int STATEMENT_LEN = 194;
+    public static final int STATEMENT_LEN = 193;
 
     private final Link link;
     /** The longest answer asked for in one command (the USB reader takes 256). */
@@ -124,8 +123,8 @@ public final class CardClient {
     }
 
     /** Make: answers fill 4 || commitment 32 || commit data 430. */
-    public byte[] make(byte[] amount12, byte[] chainId8, byte[] writerNonce, byte[] codeHash) {
-        byte[] in = concat(amount12, chainId8, writerNonce, codeHash);
+    public byte[] make(byte[] amount12, byte[] chainId8, byte[] writerNonce) {
+        byte[] in = concat(amount12, chainId8, writerNonce);
         int want = Math.min(maxAnswer, 466);
         byte[] first = send(0x20, 0, in, want);
         if (first.length == 466) {
@@ -148,9 +147,8 @@ public final class CardClient {
     }
 
     /** Check: the statement and its signature, read in parts. */
-    public byte[][] check(byte[] challenge, byte[] confirmation) {
-        byte[] in = confirmation == null ? challenge : concat(challenge, confirmation);
-        byte[] statement = send(0x30, 0, in, STATEMENT_LEN);
+    public byte[][] check(byte[] challenge) {
+        byte[] statement = send(0x30, 0, challenge, STATEMENT_LEN);
         byte[] signature = readParts(0x32, SIGNATURE_LEN);
         return new byte[][] {statement, signature};
     }
@@ -164,13 +162,13 @@ public final class CardClient {
         return send(0x32, offset, null, len);
     }
 
-    /** Open: answers fill 4 || counter block 16 || ciphertext 64 || tag 16. */
-    public byte[] open(byte[] code, byte[] challenge) {
-        return send(0x40, 0, concat(code, challenge), 100);
+    /** Open: answers fill 4 || card random 32 || writer nonce 32. */
+    public byte[] open() {
+        return send(0x40, 0, null, 68);
     }
 
-    public void refill(byte[] code) {
-        send(0x50, 0, code, 0);
+    public void refill() {
+        send(0x50, 0, null, 0);
     }
 
     /** GENERATE: makes up to `count` more LMS leaves; answers the number made so far. */

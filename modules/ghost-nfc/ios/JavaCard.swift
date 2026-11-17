@@ -4,14 +4,17 @@
 // public parts the native core verifies (Identify, the certificate, the seal
 // statement and its signature, the commit data, and Make's fill and
 // commitment) and nothing else: an Open's answer goes from the card straight
-// to the native core (ghost_wallet_java_card_take_open), which checks its tag
-// and holds the released seed material for the Summon or Claim.
+// to the native core (ghost_wallet_java_card_take_open), which holds the
+// released seed material until the coin it makes is checked, for the Summon
+// or Claim. The card is a bearer object: no flow takes a code or PIN.
 //
 // Every flow starts with SELECT and Identify and decides from the card's
 // state what is left to do, so a card pulled away mid-flow is asked for
 // again on the same sheet and the flow carries on: a Make whose answer was
 // lost reads the commit data back, an Open that went through answers again
-// with the same code, and a Refill that went through is not sent twice.
+// with the same seed material, and a Refill that went through is not sent
+// twice. While a flow runs, the sheet shows how far it has got and the holder
+// feels it ticking (TapFeedback.swift).
 import ExpoModulesCore
 import Foundation
 
@@ -25,10 +28,6 @@ final class GhostCardStateException: GenericException<String> {
 
 final class GhostCardNoChecksException: Exception {
   override var reason: String { "The card has too few seal checks left for this." }
-}
-
-final class GhostCardWrongCodeException: Exception {
-  override var reason: String { "That open code does not open this card." }
 }
 
 final class GhostCardFailedException: GenericException<String> {
@@ -60,10 +59,12 @@ final class JavaCard {
   private let lock = NSLock()
 
   static let aid = Data([0xA0, 0x00, 0x00, 0x08, 0x47, 0x47, 0x43, 0x41, 0x52, 0x44, 0x01])
-  static let statementBytes = 194
+  static let statementBytes = 193
   static let signatureBytes = 2508
   static let commitDataBytes = 430
   static let identifyBytes = 29
+  /// Open's answer: fill 4, card random 32, writer nonce 32.
+  static let openAnswerBytes = 68
   /// The longest answer asked for in one command. iPhone NFC takes extended
   /// answers; the card cuts an answer to what it can send, and the parts are
   /// read on from where it stopped.
@@ -74,7 +75,6 @@ final class JavaCard {
   static let commandTimeout: DispatchTimeInterval = .seconds(10)
   static let reconnectTimeout: DispatchTimeInterval = .seconds(30)
 
-  private static let swWrongCode: UInt16 = 0x6982
   private static let swNoChecks: UInt16 = 0x6984
 
   init(reader: TagReader) {
@@ -83,36 +83,36 @@ final class JavaCard {
 
   // MARK: The flows
 
-  /// Check: Identify, the certificate, a Check over `challenge` (with an
-  /// open-code `confirmation` when given) and its signature, and, when the
-  /// card is sealed and `commitData` is asked, the commit data.
-  func check(alert: String, challenge: Data, confirmation: Data?, commitData: Bool, promise: Promise) {
-    guard challenge.count == 32, confirmation == nil || confirmation?.count == 32 else {
+  /// Check: Identify, the certificate, a Check over `challenge` and its
+  /// signature, and, when the card is sealed and `commitData` is asked, the
+  /// commit data.
+  func check(alert: String, challenge: Data, commitData: Bool, promise: Promise) {
+    guard challenge.count == 32 else {
       promise.reject(GhostCardBadInputException())
       return
     }
-    run(alert: alert, promise: promise) { link, out in
+    run(alert: alert, working: "Checking the card", steps: commitData ? 15 : 14, promise: promise) { link, out in
       let id = try self.identify(link, out)
-      try self.readCheck(link, out, identity: id, challenge: challenge, confirmation: confirmation)
+      try self.readCheck(link, out, identity: id, challenge: challenge)
       if commitData, id.state == 1 {
         out["commitData"] = try self.readParts(link, ins: 0x22, total: Self.commitDataBytes)
       }
     }
   }
 
-  /// Fill: Make on a blank card with `input` (the amount, chain id, writer
-  /// nonce and open-code hash, 84 bytes), then, in the same tap, the certificate and a Check over
-  /// `challenge` confirming the new code. A Make cut off is not sent again:
-  /// the card says sealed at the next fill, and its commit data is read back.
-  func fill(alert: String, make input: Data, challenge: Data, confirmation: Data, promise: Promise) {
-    guard input.count == 84, challenge.count == 32, confirmation.count == 32 else {
+  /// Fill: Make on a blank card with `input` (the amount, chain id and writer
+  /// nonce, 52 bytes), then, in the same tap, the certificate and a Check over
+  /// `challenge`. A Make cut off is not sent again: the card says sealed at
+  /// the next fill, and its commit data is read back.
+  func fill(alert: String, make input: Data, challenge: Data, promise: Promise) {
+    guard input.count == 52, challenge.count == 32 else {
       promise.reject(GhostCardBadInputException())
       return
     }
     // What carries over between attempts of this one tap.
     var startFill: UInt32?
     var made: Data?
-    run(alert: alert, promise: promise) { link, out in
+    run(alert: alert, working: "Filling the card", steps: 16, promise: promise) { link, out in
       let id = try self.identify(link, out)
       if startFill == nil {
         guard id.state == 0 else { throw GhostCardStateException(Self.stateName(id.state)) }
@@ -144,31 +144,24 @@ final class JavaCard {
         }
       }
       out["make"] = made
-      try self.readCheck(link, out, identity: try self.identify(link, out), challenge: challenge, confirmation: confirmation)
+      try self.readCheck(link, out, identity: try self.identify(link, out), challenge: challenge)
     }
   }
 
-  /// Open: the certificate, a Check confirming `code` over `checkChallenge`,
-  /// the commit data while the card is still sealed, then Open with the code
-  /// over `openChallenge`. The answer goes to the native core only. With a
-  /// code the card says is wrong, Open is not sent.
-  func open(alert: String, code: Data, checkChallenge: Data, confirmation: Data, openChallenge: Data, promise: Promise) {
-    guard code.count == 20, checkChallenge.count == 32, confirmation.count == 32, openChallenge.count == 32 else {
+  /// Open: the certificate, a Check over `checkChallenge`, the commit data
+  /// while the card is still sealed, then Open, which needs nothing but the
+  /// card. The answer goes to the native core only.
+  func open(alert: String, checkChallenge: Data, promise: Promise) {
+    guard checkChallenge.count == 32 else {
       promise.reject(GhostCardBadInputException())
       return
     }
     var commitData: Data?
-    run(alert: alert, promise: promise) { link, out in
+    run(alert: alert, working: "Opening the card", steps: 16, promise: promise) { link, out in
       let id = try self.identify(link, out)
       guard id.state == 1 || id.state == 2 else { throw GhostCardStateException(Self.stateName(id.state)) }
       if id.checksLeft > 0 {
-        try self.readCheck(link, out, identity: id, challenge: checkChallenge, confirmation: confirmation)
-        if let statement = out["statement"] as? Data, statement.count == Self.statementBytes,
-           statement[statement.startIndex + 161] == 2
-        {
-          out["opened"] = false
-          return
-        }
+        try self.readCheck(link, out, identity: id, challenge: checkChallenge)
       } else {
         out["certificate"] = try self.readParts(link, ins: 0x12, total: Int(id.certLength))
       }
@@ -178,38 +171,26 @@ final class JavaCard {
       if let commitData {
         out["commitData"] = commitData
       }
-      let answer: Data
-      do {
-        answer = try self.send(link, ins: 0x40, p1p2: 0, data: code + openChallenge, le: 100)
-      } catch let status as CardStatus where status.sw == Self.swWrongCode {
-        throw GhostCardWrongCodeException()
-      }
-      let taken = Self.takeOpen(cardId: id.cardId, code: code, challenge: openChallenge, answer: answer)
+      let answer = try self.send(link, ins: 0x40, p1p2: 0, data: nil, le: Self.openAnswerBytes)
+      let taken = Self.takeOpen(cardId: id.cardId, answer: answer)
       out["opened"] = taken
       out["openTaken"] = taken
     }
   }
 
-  /// Refill: an opened card, with its fill's code, goes back to blank. A
-  /// Refill that went through before the card was lost is not sent again.
-  func refill(alert: String, code: Data, promise: Promise) {
-    guard code.count == 20 else {
-      promise.reject(GhostCardBadInputException())
-      return
-    }
+  /// Refill: an opened card goes back to blank. A Refill that went through
+  /// before the card was lost is not sent again.
+  func refill(alert: String, promise: Promise) {
     var startFill: UInt32?
-    run(alert: alert, promise: promise) { link, out in
+    run(alert: alert, working: "Clearing the card", steps: 4, promise: promise) { link, out in
       let id = try self.identify(link, out)
       if startFill == nil {
         guard id.state == 2 else { throw GhostCardStateException(Self.stateName(id.state)) }
         startFill = id.fill
       }
       if id.state == 2 {
-        do {
-          _ = try self.send(link, ins: 0x50, p1p2: 0, data: code, le: 0)
-        } catch let status as CardStatus where status.sw == Self.swWrongCode {
-          throw GhostCardWrongCodeException()
-        }
+        // No answer data; asked as a short Le so the command is never header-only.
+        _ = try self.send(link, ins: 0x50, p1p2: 0, data: nil, le: 256)
       } else if !(id.state == 0 && id.fill == startFill) {
         throw GhostCardStateException(Self.stateName(id.state))
       }
@@ -243,15 +224,14 @@ final class JavaCard {
   }
 
   /// The certificate (once per tap), a Check and its whole signature.
-  private func readCheck(_ link: Link, _ out: Out, identity: Identity, challenge: Data, confirmation: Data?) throws {
+  private func readCheck(_ link: Link, _ out: Out, identity: Identity, challenge: Data) throws {
     if out["certificate"] == nil {
       out["certificate"] = try readParts(link, ins: 0x12, total: Int(identity.certLength))
     }
     let start = DispatchTime.now().uptimeNanoseconds
-    let input = confirmation.map { challenge + $0 } ?? challenge
     let statement: Data
     do {
-      statement = try send(link, ins: 0x30, p1p2: 0, data: input, le: Self.statementBytes)
+      statement = try send(link, ins: 0x30, p1p2: 0, data: challenge, le: Self.statementBytes)
     } catch let status as CardStatus where status.sw == Self.swNoChecks {
       throw GhostCardNoChecksException()
     }
@@ -315,13 +295,27 @@ final class JavaCard {
     }
   }
 
-  /// Sends one APDU on the connected card, blocking the flow's queue.
+  /// Sends one APDU on the connected card, blocking the flow's queue, and
+  /// shows on the sheet how far the flow has got.
   private final class Link {
     let reader: TagReader
+    let working: String
+    /// About how many commands the flow sends, for its progress.
+    let steps: Int
     var commands = 0
 
-    init(reader: TagReader) {
+    init(reader: TagReader, working: String, steps: Int) {
       self.reader = reader
+      self.working = working
+      self.steps = max(steps, 1)
+    }
+
+    /// "Checking the card ▰▰▰▱▱▱▱▱▱▱ 30%", held below 100% until the flow ends.
+    func showProgress() {
+      let percent = min(95, commands * 100 / steps)
+      let filled = percent / 10
+      let bar = String(repeating: "▰", count: filled) + String(repeating: "▱", count: 10 - filled)
+      reader.update(alert: "\(working)  \(bar)  \(percent)%\nKeep holding it still.")
     }
 
     func transmit(_ apdu: Data) throws -> Data {
@@ -335,6 +329,7 @@ final class JavaCard {
         throw CardLost()
       }
       commands += 1
+      showProgress()
       return answer
     }
 
@@ -351,7 +346,9 @@ final class JavaCard {
   /// `maxReconnects` times) and `body` runs again from the start; a flow is
   /// written so that is safe. An NTAG 424 card resolves `{ kind: "ntag" }`
   /// with nothing sent to it.
-  private func run(alert: String, promise: Promise, body: @escaping (Link, Out) throws -> Void) {
+  private func run(
+    alert: String, working: String, steps: Int, promise: Promise, body: @escaping (Link, Out) throws -> Void
+  ) {
     lock.lock()
     guard !running else {
       lock.unlock()
@@ -362,7 +359,7 @@ final class JavaCard {
     lock.unlock()
     queue.async {
       let started = DispatchTime.now().uptimeNanoseconds
-      let link = Link(reader: self.reader)
+      let link = Link(reader: self.reader, working: working, steps: steps)
       let out = Out()
       var reconnects = 0
       var connect: Result<TappedCard, Exception> = self.waitForCard { self.reader.begin(alert: alert, onConnected: $0) }
@@ -453,22 +450,16 @@ final class JavaCard {
 
   // MARK: Helpers
 
-  /// Hands an Open answer to the native core, which checks its tag and holds
-  /// what it released. True when it was taken.
-  private static func takeOpen(cardId: Data, code: Data, challenge: Data, answer: Data) -> Bool {
+  /// Hands an Open answer to the native core, which holds what it released
+  /// until the coin it makes is checked. True when it was taken.
+  private static func takeOpen(cardId: Data, answer: Data) -> Bool {
     let result = cardId.withUnsafeBytes { id in
-      code.withUnsafeBytes { c in
-        challenge.withUnsafeBytes { ch in
-          answer.withUnsafeBytes { a in
-            ghost_wallet_java_card_take_open(
-              id.bindMemory(to: UInt8.self).baseAddress,
-              c.bindMemory(to: UInt8.self).baseAddress,
-              ch.bindMemory(to: UInt8.self).baseAddress,
-              a.bindMemory(to: UInt8.self).baseAddress,
-              UInt(a.count)
-            )
-          }
-        }
+      answer.withUnsafeBytes { a in
+        ghost_wallet_java_card_take_open(
+          id.bindMemory(to: UInt8.self).baseAddress,
+          a.bindMemory(to: UInt8.self).baseAddress,
+          UInt(a.count)
+        )
       }
     }
     return result == 0

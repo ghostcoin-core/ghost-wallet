@@ -7,6 +7,10 @@
 // end); the Seal relay (SealRelay.swift) drives it natively through the
 // callback forms (begin with the card's UID, send), so the relayed card
 // traffic never reaches JavaScript.
+//
+// The holder feels each read (TapFeedback.swift): a tap and a click when the
+// card is found, ticks while it is read, a buzz if it slips away and a
+// success tap at the end.
 import CoreNFC
 import ExpoModulesCore
 
@@ -49,6 +53,10 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
   private(set) var tapped: TappedCard = .other
   /// Called once, on `queue`, with the connected card's UID or why there is none.
   private var connected: ((Result<Data, Exception>) -> Void)?
+  private let feedback = TapFeedback()
+
+  /// What the sheet says from the moment a card is found until a flow says more.
+  static let readingAlert = "Reading the card. Keep holding it still."
 
   static var available: Bool { NFCTagReaderSession.readingAvailable }
 
@@ -72,6 +80,7 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
         return
       }
       self.close(alert: nil, error: nil)
+      self.feedback.stop()
       self.connected = onConnected
       guard let session = NFCTagReaderSession(pollingOption: [.iso14443], delegate: self, queue: self.queue) else {
         self.connected = nil
@@ -129,6 +138,7 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
       }
       self.tag = nil
       self.connected = onConnected
+      self.feedback.lost()
       session.alertMessage = alert
       session.restartPolling()
     }
@@ -146,8 +156,15 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
     }
   }
 
+  /// Closes the sheet: with `error`, showing it; otherwise with `alert`, if
+  /// any, as a success (the success tap plays only then).
   func end(alert: String?, error: String?) {
     queue.async {
+      if self.session != nil, error == nil, alert != nil {
+        self.feedback.succeeded()
+      } else {
+        self.feedback.stop()
+      }
       self.close(alert: alert, error: error)
     }
   }
@@ -172,6 +189,7 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
 
   func tagReaderSession(_ session: NFCTagReaderSession, didInvalidateWithError error: Error) {
     guard session === self.session || self.session == nil else { return }
+    feedback.stop()
     if let onConnected = connected {
       connected = nil
       let cancelled = (error as? NFCReaderError)?.code == .readerSessionInvalidationErrorUserCanceled
@@ -194,9 +212,12 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
       self.queue.async {
         guard session === self.session else { return }
         if error != nil {
+          self.feedback.stop()
           session.invalidate(errorMessage: "The card could not be read. Hold it still and try again.")
           return
         }
+        self.feedback.found()
+        session.alertMessage = Self.readingAlert
         self.tag = iso
         self.tapped = TappedCard(selectedAid: iso.initialSelectedAID)
         self.connected?(.success(iso.identifier))

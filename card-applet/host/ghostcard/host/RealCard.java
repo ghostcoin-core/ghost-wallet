@@ -132,10 +132,8 @@ public final class RealCard {
 
     static void run(CardClient c, int fills) {
         byte[] pub = c.publicKey();
-        byte[] cardId = c.identify().cardId;
         List<double[]> rows = new ArrayList<>();
         for (int n = 0; n < fills; n++) {
-            byte[] code = rand(20);
             byte[] nonce = rand(32);
             byte[] amount = new byte[12];
             amount[4] = 0x0d;
@@ -143,7 +141,7 @@ public final class RealCard {
             byte[] chain = {0, 0, 0, 0, 0, 0, 0, 1};
 
             long t = System.nanoTime();
-            byte[] made = c.make(amount, chain, nonce, Ghost.codeHash(code));
+            byte[] made = c.make(amount, chain, nonce);
             double tMake = since(t);
             long fill = Ghost.u32(made, 0);
             byte[] commitment = Arrays.copyOfRange(made, 4, 36);
@@ -152,7 +150,7 @@ public final class RealCard {
             // The writer's Check, as the app runs it right after Make.
             byte[] challenge = rand(32);
             t = System.nanoTime();
-            byte[][] r = c.check(challenge, null);
+            byte[][] r = c.check(challenge);
             double tCheck = since(t);
             need(Ghost.lmsVerify(pub, r[0], r[1]), "the statement's LMS signature verifies");
             Ghost.Statement s = new Ghost.Statement(r[0]);
@@ -161,19 +159,10 @@ public final class RealCard {
             need(Arrays.equals(s.digest, Ghost.sha256(commitData)), "statement digest");
             need(Arrays.equals(s.challenge, challenge), "statement challenge");
 
-            // A receiver's Check confirming the open code.
-            challenge = rand(32);
             t = System.nanoTime();
-            r = c.check(challenge, Ghost.confirmation(Ghost.codeHash(code), challenge));
-            double tCheckCode = since(t);
-            need(Ghost.lmsVerify(pub, r[0], r[1]), "the second statement verifies");
-            need(new Ghost.Statement(r[0]).confirmation == 1, "the open code is confirmed");
-
-            challenge = rand(32);
-            t = System.nanoTime();
-            byte[] opened = c.open(code, challenge);
+            byte[] opened = c.open();
             double tOpen = since(t);
-            byte[] release = Ghost.openRelease(cardId, code, challenge, fill, opened);
+            byte[] release = Ghost.openRelease(fill, opened);
             need(Arrays.equals(Arrays.copyOfRange(release, 32, 64), nonce), "Open releases the writer nonce");
             Ghost.Coin coin = Ghost.coin(Arrays.copyOf(release, 32), nonce, Arrays.copyOfRange(commitData, 34, 50),
                     Arrays.copyOfRange(commitData, 53, 62), amount, chain);
@@ -182,15 +171,15 @@ public final class RealCard {
             need(Arrays.equals(coin.marker, s.marker), "and its marker");
 
             t = System.nanoTime();
-            c.refill(code);
+            c.refill();
             double tRefill = since(t);
             need(c.identify().state == 0, "blank after Refill");
-            System.out.printf("fill %d: Make %.0f ms, Check %.0f ms, Check with code %.0f ms, Open %.0f ms, Refill %.0f ms (all answers verified)%n",
-                    fill, tMake, tCheck, tCheckCode, tOpen, tRefill);
-            rows.add(new double[] {tMake, tCheck, tCheckCode, tOpen, tRefill});
+            System.out.printf("fill %d: Make %.0f ms, Check %.0f ms, Open %.0f ms, Refill %.0f ms (all answers verified)%n",
+                    fill, tMake, tCheck, tOpen, tRefill);
+            rows.add(new double[] {tMake, tCheck, tOpen, tRefill});
         }
-        String[] names = {"Make", "Check", "Check with open code", "Open", "Refill"};
-        double[] budget = {10000, 3000, 3000, 3000, 3000};
+        String[] names = {"Make", "Check", "Open", "Refill"};
+        double[] budget = {10000, 3000, 3000, 3000};
         System.out.println("median over " + fills + " fills, this reader:");
         for (int i = 0; i < names.length; i++) {
             final int k = i;

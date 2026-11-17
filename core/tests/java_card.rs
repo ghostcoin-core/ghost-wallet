@@ -1,18 +1,18 @@
 //! The phone's checks of a Ghost Java Card (`src/java_card.rs`), against one
 //! card's real answers on jcardsim (`card-applet/test/phone-vectors.txt`):
-//! certificates, LMS seal statements, commit data, open codes and Open.
+//! certificates, LMS seal statements, commit data and Open.
 
 use std::collections::HashMap;
 
 use ghost_client::slh_dsa::SigningKey;
 use ghost_wallet_core::java_card::{
     APPLET_HASHES, CERT_BYTES, CERT_DOMAIN, CardState, CheckParts, OpenExpect, OpenRefusal, PinnedIssuer, Refusal,
-    Trust, certificate_body, check_card, check_certificate, hold_unchecked, code_confirmation, code_hash, finish_open, forget_release,
-    lms_verify, open_code_from_text, open_code_text, open_release, parse_statement, pinned_trust, take_open,
+    Trust, certificate_body, check_card, check_certificate, hold_unchecked, finish_open, forget_release,
+    lms_verify, open_release, parse_statement, pinned_trust, take_open,
 };
 use ghost_wallet_core::card::{forget_card_key, has_card_key};
 use ghost_wallet_core::{
-    JavaCardCheckInput, finish_java_card_open_unchecked, java_card_identity, java_card_number, java_card_open_code,
+    JavaCardCheckInput, finish_java_card_open_unchecked, java_card_identity, java_card_number,
     verify_java_card_check,
 };
 use rand::SeedableRng;
@@ -83,7 +83,7 @@ fn parts<'a>(cert: &'a [u8], v: &'a HashMap<String, Vec<u8>>, name: &str, commit
 fn every_recorded_statement_verifies_and_only_its_own() {
     let v = vectors();
     let key = get(&v, "lms_public_key");
-    for name in ["blank", "sealed", "wrong_code", "opened"] {
+    for name in ["blank", "sealed", "opened"] {
         let statement = get(&v, &format!("{name}_statement"));
         let signature = get(&v, &format!("{name}_signature"));
         assert!(lms_verify(key, statement, signature), "{name}");
@@ -107,17 +107,16 @@ fn statements_read_as_recorded() {
     let v = vectors();
     let blank = parse_statement(get(&v, "blank_statement")).unwrap();
     assert_eq!(blank.state, CardState::Blank);
-    assert_eq!((blank.fill, blank.checks_left, blank.leaf, blank.code), (0, 1023, 0, 0));
+    assert_eq!((blank.fill, blank.checks_left, blank.leaf), (0, 1023, 0));
     assert_eq!(blank.commitment, [0; 32]);
     let sealed = parse_statement(get(&v, "sealed_statement")).unwrap();
     assert_eq!(sealed.state, CardState::Sealed);
-    assert_eq!((sealed.fill, sealed.checks_left, sealed.leaf, sealed.code), (1, 1022, 1, 1));
+    assert_eq!((sealed.fill, sealed.checks_left, sealed.leaf), (1, 1022, 1));
     assert_eq!(sealed.amount, 1_000_000_000_000_000_000);
     assert_eq!(sealed.chain_id, CHAIN);
     assert_eq!(&sealed.commitment[..], &get(&v, "make_answer")[4..36]);
-    assert_eq!(parse_statement(get(&v, "wrong_code_statement")).unwrap().code, 2);
     assert_eq!(parse_statement(get(&v, "opened_statement")).unwrap().state, CardState::Opened);
-    assert!(parse_statement(&get(&v, "blank_statement")[..193]).is_none());
+    assert!(parse_statement(&get(&v, "blank_statement")[..192]).is_none());
     let mut bad = get(&v, "blank_statement").to_vec();
     bad[34] = 3;
     assert!(parse_statement(&bad).is_none(), "an unknown state");
@@ -138,7 +137,7 @@ fn a_genuine_sealed_card_passes_with_its_commit_data() {
     assert_eq!(leaf.salt.as_deref(), Some(&make[36 + 34..36 + 50]));
     assert_eq!(&leaf.note[..], &make[36 + 50..]);
     // Every other recorded Check passes too, with no commit data.
-    for name in ["blank", "wrong_code", "opened"] {
+    for name in ["blank", "opened"] {
         check_card(&parts(&cert, &v, name, None), &trust(&issuer, false, false), CHAIN).unwrap();
     }
 }
@@ -248,29 +247,6 @@ fn the_pinned_trust_knows_no_test_issuer() {
 }
 
 #[test]
-fn open_codes() {
-    let v = vectors();
-    let code: [u8; 20] = fixed(get(&v, "open_code"));
-    let text = open_code_text(&code);
-    assert_eq!(text.len(), 32);
-    assert_eq!(*open_code_from_text(&text).unwrap(), code);
-    let spaced: String = text.to_lowercase().chars().enumerate().flat_map(|(i, c)| {
-        if i > 0 && i % 4 == 0 { vec![' ', c] } else { vec![c] }
-    }).collect();
-    assert_eq!(*open_code_from_text(&spaced).unwrap(), code);
-    assert_eq!(java_card_open_code(spaced).unwrap(), code.to_vec());
-    assert!(open_code_from_text(&text[..31]).is_none());
-    assert!(open_code_from_text(&format!("{text}A")).is_none());
-    assert!(open_code_from_text(&text.replace(text.chars().next().unwrap(), "1")).is_none());
-    // The confirmation the card checked, recorded with the sealed Check.
-    assert_eq!(
-        code_confirmation(&code, get(&v, "sealed_challenge")).to_vec(),
-        get(&v, "sealed_confirmation")
-    );
-    assert_eq!(code_hash(&code).len(), 32);
-}
-
-#[test]
 fn card_numbers_and_identify() {
     let number = java_card_number(vec![0; 16]);
     assert_eq!(number, "AAAA AAAA AAAA AAAA AAAA AAAA AA");
@@ -292,28 +268,15 @@ fn card_numbers_and_identify() {
 fn open_releases_the_key_of_exactly_the_sealed_coin() {
     let v = vectors();
     let card_id: [u8; 16] = fixed(get(&v, "card_id"));
-    let code: [u8; 20] = fixed(get(&v, "open_code"));
-    let challenge: [u8; 32] = fixed(get(&v, "open_challenge"));
     let answer = get(&v, "open_answer");
 
-    let (fill, release) = open_release(&card_id, &code, &challenge, answer).unwrap();
+    let (fill, release) = open_release(answer).unwrap();
     assert_eq!(fill, 1);
     assert_eq!(&release[..32], get(&v, "card_random"));
     assert_eq!(&release[32..], get(&v, "writer_nonce"));
 
-    // Anything altered, or another code, challenge or card: the tag fails first.
-    for at in [0, 3, 4, 19, 20, 83, 84, 99] {
-        let mut altered = answer.to_vec();
-        altered[at] ^= 1;
-        assert_eq!(open_release(&card_id, &code, &challenge, &altered).err(), Some(OpenRefusal::BadTag), "byte {at}");
-    }
-    let wrong: [u8; 20] = fixed(get(&v, "wrong_open_code"));
-    assert_eq!(open_release(&card_id, &wrong, &challenge, answer).err(), Some(OpenRefusal::BadTag));
-    assert_eq!(open_release(&card_id, &code, &[0; 32], answer).err(), Some(OpenRefusal::BadTag));
-    let mut other_card = card_id;
-    other_card[5] ^= 1;
-    assert_eq!(open_release(&other_card, &code, &challenge, answer).err(), Some(OpenRefusal::BadTag));
-    assert_eq!(open_release(&card_id, &code, &challenge, &answer[..99]).err(), Some(OpenRefusal::Malformed));
+    assert_eq!(open_release(&answer[..67]).err(), Some(OpenRefusal::Malformed));
+    assert_eq!(open_release(&[answer, &[0]].concat()).err(), Some(OpenRefusal::Malformed));
 
     let sealed = parse_statement(get(&v, "sealed_statement")).unwrap();
     let make = get(&v, "make_answer");
@@ -334,18 +297,28 @@ fn open_releases_the_key_of_exactly_the_sealed_coin() {
     assert_eq!(finish_open(&expect(sealed.commitment, 1)), Err(OpenRefusal::NothingHeld));
 
     // Another coin than the release makes: refused, and nothing is held.
-    take_open(&card_id, &code, &challenge, answer).unwrap();
+    take_open(&card_id, answer).unwrap();
     let mut other = sealed.commitment;
     other[0] ^= 1;
     assert_eq!(finish_open(&expect(other, 1)), Err(OpenRefusal::NotTheCoin));
     assert!(!has_card_key());
     assert_eq!(finish_open(&expect(sealed.commitment, 1)), Err(OpenRefusal::NothingHeld), "the release was wiped");
 
-    take_open(&card_id, &code, &challenge, answer).unwrap();
+    take_open(&card_id, answer).unwrap();
     assert_eq!(finish_open(&expect(sealed.commitment, 2)), Err(OpenRefusal::OtherFill));
 
+    // Nothing but the card stands behind a release, so a release altered on
+    // the way (or a card that lies) never makes the checked coin.
+    for at in [4, 35, 36, 67] {
+        let mut altered = answer.to_vec();
+        altered[at] ^= 1;
+        take_open(&card_id, &altered).unwrap();
+        assert_eq!(finish_open(&expect(sealed.commitment, 1)), Err(OpenRefusal::NotTheCoin), "byte {at}");
+        assert!(!has_card_key());
+    }
+
     // The right coin: the key is held for the Summon.
-    take_open(&card_id, &code, &challenge, answer).unwrap();
+    take_open(&card_id, answer).unwrap();
     assert_eq!(finish_open(&expect(sealed.commitment, 1)), Ok(()));
     assert!(has_card_key());
     forget_card_key();
@@ -353,17 +326,17 @@ fn open_releases_the_key_of_exactly_the_sealed_coin() {
     // A card with no seal checks left: the key is held with no statement, for
     // the card and fill its Identify gave; the chain then decides.
     // A certificate no pinned issuer signed: refused, and the release is wiped.
-    take_open(&card_id, &code, &challenge, answer).unwrap();
+    take_open(&card_id, answer).unwrap();
     assert_eq!(finish_java_card_open_unchecked(card_cert(&v, &test_issuer(1)), CHAIN, 1), "unknown-issuer");
     assert_eq!(hold_unchecked(&card_id, 1), Err(OpenRefusal::NothingHeld));
-    take_open(&card_id, &code, &challenge, answer).unwrap();
+    take_open(&card_id, answer).unwrap();
     assert_eq!(hold_unchecked(&card_id, 2), Err(OpenRefusal::OtherFill));
     assert!(!has_card_key());
     let mut other_card = card_id;
     other_card[0] ^= 1;
-    take_open(&card_id, &code, &challenge, answer).unwrap();
+    take_open(&card_id, answer).unwrap();
     assert_eq!(hold_unchecked(&other_card, 1), Err(OpenRefusal::OtherFill));
-    take_open(&card_id, &code, &challenge, answer).unwrap();
+    take_open(&card_id, answer).unwrap();
     assert_eq!(hold_unchecked(&card_id, 1), Ok(()));
     assert!(has_card_key());
     forget_card_key();

@@ -15,8 +15,8 @@ import ghostcard.host.Ghost.Statement;
  * The phone's test vectors (test/phone-vectors.txt): one card's real answers
  * on jcardsim, for the wallet's own checks of a card (core/src/java_card.rs)
  * to be tested against. A blank Check, a Make from the first case of
- * vectors.txt, a Check confirming the right open code, one with a wrong code,
- * an Open and a Check of the opened card, each with its LMS signature.
+ * vectors.txt, a Check of the sealed card, an Open and a Check of the opened
+ * card, each with its LMS signature.
  *
  * The answers carry fresh LMS randomness, so the file is written once (with
  * UPDATE_PHONE_VECTORS=1) and kept; every run checks that every signature in
@@ -44,14 +44,8 @@ final class PhoneVectors {
         out.put("lms_public_key", c.client.publicKey());
         out.put("card_id", c.client.identify().cardId);
 
-        byte[] code = counting(0x60, 20);
-        byte[] wrongCode = counting(0x61, 20);
-        byte[] codeHash = Ghost.codeHash(code);
-        out.put("open_code", code);
-        out.put("wrong_open_code", wrongCode);
-
         byte[] ch = counting(0x80, 32);
-        byte[][] blank = c.client.check(ch, null);
+        byte[][] blank = c.client.check(ch);
         out.put("blank_challenge", ch);
         out.put("blank_statement", blank[0]);
         out.put("blank_signature", blank[1]);
@@ -63,30 +57,18 @@ final class PhoneVectors {
         out.put("chain_id", v.get("chain_id"));
         out.put("writer_nonce", v.get("writer_nonce"));
         out.put("card_random", v.get("card_random"));
-        out.put("make_answer", c.client.make(v.get("amount"), v.get("chain_id"), v.get("writer_nonce"), codeHash));
+        out.put("make_answer", c.client.make(v.get("amount"), v.get("chain_id"), v.get("writer_nonce")));
 
         ch = counting(0xa0, 32);
-        byte[] confirm = Ghost.confirmation(codeHash, ch);
-        byte[][] sealed = c.client.check(ch, confirm);
+        byte[][] sealed = c.client.check(ch);
         out.put("sealed_challenge", ch);
-        out.put("sealed_confirmation", confirm);
         out.put("sealed_statement", sealed[0]);
         out.put("sealed_signature", sealed[1]);
 
-        ch = counting(0xc0, 32);
-        confirm = Ghost.confirmation(Ghost.codeHash(wrongCode), ch);
-        byte[][] wrong = c.client.check(ch, confirm);
-        out.put("wrong_code_challenge", ch);
-        out.put("wrong_code_confirmation", confirm);
-        out.put("wrong_code_statement", wrong[0]);
-        out.put("wrong_code_signature", wrong[1]);
-
-        ch = counting(0xe0, 32);
-        out.put("open_challenge", ch);
-        out.put("open_answer", c.client.open(code, ch));
+        out.put("open_answer", c.client.open());
 
         ch = counting(0x10, 32);
-        byte[][] opened = c.client.check(ch, null);
+        byte[][] opened = c.client.check(ch);
         out.put("opened_challenge", ch);
         out.put("opened_statement", opened[0]);
         out.put("opened_signature", opened[1]);
@@ -126,10 +108,9 @@ final class PhoneVectors {
         byte[] pub = v.get("lms_public_key");
         byte[] cardId = v.get("card_id");
         String[][] checks = {
-            {"blank", "0", "0"},
-            {"sealed", "1", "1"},
-            {"wrong_code", "1", "2"},
-            {"opened", "2", "0"},
+            {"blank", "0"},
+            {"sealed", "1"},
+            {"opened", "2"},
         };
         long leaf = 0;
         for (String[] k : checks) {
@@ -139,7 +120,6 @@ final class PhoneVectors {
             CardTests.same(s.cardId, cardId, k[0] + ": card id");
             CardTests.same(s.challenge, v.get(k[0] + "_challenge"), k[0] + ": challenge");
             CardTests.check(s.state == Integer.parseInt(k[1]), k[0] + ": state");
-            CardTests.check(s.confirmation == Integer.parseInt(k[2]), k[0] + ": code confirmation");
             CardTests.check(s.leaf == leaf, k[0] + ": leaf " + leaf);
             leaf++;
             byte[] other = st.clone();
@@ -151,7 +131,7 @@ final class PhoneVectors {
         CardTests.check(Ghost.u32pub(make, 0) == 1 && sealed.fill == 1, "the first fill");
         CardTests.same(Arrays.copyOfRange(make, 4, 36), sealed.commitment, "Make's commitment is the statement's");
         CardTests.same(Ghost.sha256(Arrays.copyOfRange(make, 36, 466)), sealed.digest, "digest of Make's commit data");
-        byte[] release = Ghost.openRelease(cardId, v.get("open_code"), v.get("open_challenge"), 1, v.get("open_answer"));
+        byte[] release = Ghost.openRelease(1, v.get("open_answer"));
         CardTests.same(Arrays.copyOf(release, 32), v.get("card_random"), "Open releases the card random");
         CardTests.same(Arrays.copyOfRange(release, 32, 64), v.get("writer_nonce"), "and the writer nonce");
     }
