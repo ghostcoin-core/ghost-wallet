@@ -71,6 +71,33 @@ public class Host {
         byte[] want = MessageDigest.getInstance("SHA3-256").digest(msg);
         byte[] gotS = tx(0x22, 0, msg, 32).getData();
         System.out.println("SHA3-256 bytecode (16-bit limbs) matches host: " + Arrays.equals(want, gotS));
+        byte[] gotF = tx(0x25, 0, msg, 32).getData();
+        System.out.println("SHA3-256 bytecode (unrolled) matches host: " + Arrays.equals(want, gotF));
+        double kf1 = time(0x24, 1, 3), kf10 = time(0x24, 10, 3);
+        System.out.printf("Keccak-f[1600] bytecode, unrolled: %.0f ms per permutation (1 run %.0f ms, 10 runs %.0f ms)%n",
+                (kf10 - kf1) / 9, kf1 - nop, kf10 - nop);
+        double cc1 = time(0x31, 1, 3), cc3 = time(0x31, 3, 3);
+        System.out.printf("ChaCha20 alone, 7 blocks: %.0f ms%n", (cc3 - cc1) / 2);
+        byte[] rf = tx(0x32, 1, null, 32).getData();
+        {
+            byte[] k = new byte[32], nn = new byte[12], pt = new byte[352], ad = new byte[40];
+            for (int i = 0; i < 32; i++) k[i] = (byte) i;
+            for (int i = 0; i < 12; i++) nn[i] = (byte) i;
+            for (int i = 0; i < 352; i++) pt[i] = (byte) i;
+            for (int i = 0; i < 40; i++) ad[i] = (byte) (0xA0 + i);
+            Cipher cf = Cipher.getInstance("ChaCha20-Poly1305");
+            cf.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(k, "ChaCha20"), new IvParameterSpec(nn));
+            cf.updateAAD(ad);
+            byte[] ctf = cf.doFinal(pt);
+            System.out.println("ChaCha20-Poly1305 unrolled Poly1305 matches host: tag "
+                    + Arrays.equals(Arrays.copyOfRange(ctf, 352, 368), Arrays.copyOfRange(rf, 0, 16)));
+        }
+        double af1 = time(0x32, 1, 3), af3 = time(0x32, 3, 3);
+        System.out.printf("ChaCha20-Poly1305 seal, unrolled Poly1305: %.0f ms%n", (af3 - af1) / 2);
+        if (mode.equals("fast")) {
+            card.disconnect(false);
+            return;
+        }
         double ks1 = time(0x20, 1, 3), ks10 = time(0x20, 10, 3);
         System.out.printf("Keccak-f[1600] bytecode, 16-bit limbs: %.0f ms per permutation (1 run %.0f ms, 10 runs %.0f ms)%n",
                 (ks10 - ks1) / 9, ks1 - nop, ks10 - nop);
