@@ -42,6 +42,8 @@ public final class CardTests {
         Map<String, Test> tests = new LinkedHashMap<>();
         tests.put("vectors: Make gives Ghost's F, commitment, marker and commit data bit for bit", CardTests::vectors);
         tests.put("host reference matches Ghost's vectors", CardTests::referenceMatchesVectors);
+        tests.put("the phone's vectors: every signature verifies, every statement as recorded",
+                () -> PhoneVectors.run(vectorsPath.resolveSibling("phone-vectors.txt"), readVectors()));
         tests.put("a full life: two fills, every answer checked", CardTests::fullLife);
         tests.put("every LMS signature verifies with an RFC 8554 verifier, and only for its statement", CardTests::signatures);
         tests.put("signatures read in parts of any size are the same bytes", CardTests::signatureParts);

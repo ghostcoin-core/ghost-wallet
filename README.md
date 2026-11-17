@@ -11,6 +11,9 @@ An iPhone wallet for Ghost.
   send, and receive to fresh addresses. Accounts use lattice-based signatures
   with a hash-based rescue key. No elliptic-curve key exists anywhere in the app.
 - **Vanish, Summon and Claim,** proved on the phone itself.
+- **Ghost cards.** Fill a Ghost Java card with GHOST, check any card on any
+  phone, open it into the wallet and fill it again. The card makes and keeps
+  the key; no server takes part (`card-applet/`, `docs/bearer-card-spec.md`).
 - **Phantom Keys on a card.** Write a Phantom Key to a blank NTAG 424 DNA card,
   then tap the card later to Summon or Claim. The card is never the only
   backup: every Phantom Key is also shown as words.

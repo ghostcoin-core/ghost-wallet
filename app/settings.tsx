@@ -151,23 +151,39 @@ export default function SettingsScreen() {
           first
           icon="check"
           title="Check NFC Chip"
-          detail="What a Ghost card holds, checked with the Seal"
+          detail="What a card holds, checked on this iPhone"
           opens
           onPress={() => router.push('/check-card')}
           testID="settings-check-card"
         />
         <Row
           icon="key"
-          title="Fill a card"
-          detail="Put GHOST on an empty Ghost card"
+          title="Fill a Ghost card"
+          detail="Put GHOST on a blank Ghost card"
+          opens
+          onPress={() => router.push('/fill-ghost-card')}
+          testID="settings-fill-ghost-card"
+        />
+        <Row
+          icon="receive"
+          title="Open a Ghost card into my wallet"
+          detail="With its open code"
+          opens
+          onPress={() => router.push('/open-ghost-card')}
+          testID="settings-open-ghost-card"
+        />
+        <Row
+          icon="key"
+          title="Fill a Sealed card"
+          detail="An NTAG 424 Ghost Sealed card, with the Seal"
           opens
           onPress={() => router.push('/fill-card')}
           testID="settings-fill-card"
         />
         <Row
           icon="receive"
-          title="Open a card into my wallet"
-          detail="Empty a Ghost card into this account"
+          title="Open a Sealed card into my wallet"
+          detail="An NTAG 424 Ghost Sealed card, with the Seal"
           opens
           onPress={() => router.push('/open-card')}
           testID="settings-open-card"

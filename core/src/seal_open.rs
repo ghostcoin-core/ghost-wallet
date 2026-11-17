@@ -329,10 +329,22 @@ pub fn phantom_key_from_bytes(bytes: &[u8]) -> Result<PhantomKey, OpenError> {
 }
 
 /// A source that gives exactly the bytes it holds, then zeros (and says so).
-struct GivenBytes {
-    bytes: Zeroizing<Vec<u8>>,
-    used: usize,
-    overdrawn: bool,
+pub(crate) struct GivenBytes {
+    pub(crate) bytes: Zeroizing<Vec<u8>>,
+    pub(crate) used: usize,
+    pub(crate) overdrawn: bool,
+}
+
+impl GivenBytes {
+    /// A source holding a copy of `bytes`.
+    pub(crate) fn new(bytes: &[u8]) -> Self {
+        Self { bytes: Zeroizing::new(bytes.to_vec()), used: 0, overdrawn: false }
+    }
+
+    /// Whether exactly every held byte was drawn.
+    pub(crate) fn drawn_exactly(&self) -> bool {
+        !self.overdrawn && self.used == self.bytes.len()
+    }
 }
 
 impl TryRng for GivenBytes {

@@ -33,6 +33,9 @@ export const ROUTE_GROUPS = {
   'check-card': 'wallet',
   'fill-card': 'wallet',
   'open-card': 'wallet',
+  // Ghost Java cards: Fill pays from the account and Open summons into it.
+  'fill-ghost-card': 'wallet',
+  'open-ghost-card': 'wallet',
   // The feasibility bench holds only the public test words, and the device and
   // simulator scripts open it by link (ghostwallet://bench), so it stays
   // reachable without an account or unlock. Seven taps on the version in
