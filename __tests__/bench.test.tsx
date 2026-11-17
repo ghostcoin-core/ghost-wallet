@@ -42,6 +42,9 @@ const mockRequireNativeModule = jest.fn((name: string) => {
   };
 });
 
+const mockPush = jest.fn();
+jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
+
 jest.mock('expo', () => ({
   requireNativeModule: (name: string) => mockRequireNativeModule(name),
 }));
@@ -139,5 +142,13 @@ describe('Bench screen', () => {
 
     expect(screen.getByText('Benchmarks unavailable in this build')).toBeOnTheScreen();
     expect(screen.getByTestId('bench-run')).toBeDisabled();
+  });
+
+  it('opens the card probe screen', () => {
+    render(<BenchScreen />);
+
+    fireEvent.press(screen.getByTestId('bench-card-probe'));
+
+    expect(mockPush).toHaveBeenCalledWith('/card-probe');
   });
 });

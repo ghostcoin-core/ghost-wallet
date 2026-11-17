@@ -42,6 +42,7 @@ function GuardedStack() {
       <Stack.Protected guard={open.developer}>
         <Stack.Screen name="bench" options={{ contentStyle: { backgroundColor: '#0A0A12' } }} />
         <Stack.Screen name="seal-speed" options={{ contentStyle: { backgroundColor: '#0A0A12' } }} />
+        <Stack.Screen name="card-probe" options={{ contentStyle: { backgroundColor: '#0A0A12' } }} />
       </Stack.Protected>
     </Stack>
   );

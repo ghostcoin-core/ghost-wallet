@@ -25,15 +25,19 @@ function openRoutes(state: AccountState): RouteName[] {
 
 describe('route guards', () => {
   it('without an account opens only onboarding and the developer screens', () => {
-    expect(openRoutes(NO_ACCOUNT).sort()).toEqual(['backup', 'bench', 'check', 'import', 'index', 'seal-speed']);
+    expect(openRoutes(NO_ACCOUNT).sort()).toEqual(['backup', 'bench', 'card-probe', 'check', 'import', 'index', 'seal-speed']);
   });
 
   it('with a locked account opens only the lock and the developer screens', () => {
-    expect(openRoutes(LOCKED).sort()).toEqual(['bench', 'lock', 'seal-speed']);
+    expect(openRoutes(LOCKED).sort()).toEqual(['bench', 'card-probe', 'lock', 'seal-speed']);
   });
 
   it('puts the Seal speed test with the bench, never with the wallet', () => {
     expect(ROUTE_GROUPS['seal-speed']).toBe('developer');
+  });
+
+  it('puts the card probe with the bench, never with the wallet', () => {
+    expect(ROUTE_GROUPS['card-probe']).toBe('developer');
   });
 
   it('opens the Sealed card screens only with an unlocked account', () => {
@@ -48,6 +52,7 @@ describe('route guards', () => {
   it('with an unlocked account opens the wallet screens and the developer screens, and no onboarding screen', () => {
     expect(openRoutes(UNLOCKED).sort()).toEqual([
       'bench',
+      'card-probe',
       'check-card',
       'check-words',
       'fill-card',
