@@ -121,7 +121,7 @@ write and I/O); a timed run of the real applet is part of the hardware step.
 
 The J3R180's other limits shape the applet: about 3.7 KB of RAM for one
 applet, no RAM `int` arrays (32-bit state lives in local variables or short
-arrays), and no AES-GCM or AES-CCM.
+arrays).
 
 Cards from a reseller arrive with the card manager in OP_READY and factory
 default keys. The certificate covers the chip, not that card's history, which
@@ -152,8 +152,6 @@ and the attestation is hash-based end to end.
 - **Fill**: one Phantom Key and its coin on a card, from Make to Refill.
   **Fill number**: a counter on the card that every Make advances by one, so
   the card's first fill is fill 1.
-- **Open code**: a 160-bit secret, one per fill, that the holder needs to open
-  that fill. The card keeps only its SHA3-256.
 - **Writer**: whoever loads value onto a card (taps it to make the key, then
   sends the Vanish).
 - **Holder**: whoever has the card now. **Receiver**: someone being offered
@@ -181,7 +179,7 @@ Blank (1) --Make--> Sealed (2) --Open--> Opened (2) --Refill--> Blank (2) ...
 ```
 
 - Make works only on a blank card, Open only on a sealed or opened card, and
-  Refill only on an opened card with that fill's open code. No command takes a
+  Refill only on an opened card. No command takes a
   sealed card back to blank, so a key that has never left the card is never
   thrown away with its coin still on it.
 - No command writes a key or a coin into a card. Every fill's key is drawn on
@@ -196,8 +194,8 @@ Blank (1) --Make--> Sealed (2) --Open--> Opened (2) --Refill--> Blank (2) ...
 | --- | --- |
 | card id and the issuer's certificate | the card random and the writer nonce |
 | the LMS attestation key, its stored tree and its next leaf index | the commit data, amount, chain id, commitment and marker |
-| the fill number | the open code's hash |
-| the applet | the opened flag |
+| the fill number | the opened flag |
+| the applet | |
 
 The seed bytes and the key's secrets are never stored at all: Make derives
 them, uses them and drops them, and the opener's phone derives them again from
@@ -208,9 +206,9 @@ what Open releases.
 The card makes the Phantom Key and computes everything a Vanish needs from it;
 the phone only ever sees public values.
 
-1. The writer's app makes a new open code (below) and sends **Make** with the
-   amount, the chain id, a 32-byte writer nonce from the phone's random source
-   and the SHA3-256 of the new open code.
+1. The writer's app sends **Make** with the amount, the chain id and a 32-byte
+   writer nonce from the phone's random source. Nothing else: there is no code
+   or PIN to set.
 2. The card refuses unless it is blank and has at least 16 seal checks left
    (see "A quantum-safe attestation signature"). It draws 32 bytes from its
    own random source and sets the Phantom Key's seed bytes to
@@ -225,7 +223,7 @@ the phone only ever sees public values.
    SHA-256 into the commit-data digest.
 4. In one atomic write it advances the fill number to N, stores the card
    random, the writer nonce, the commit data, the digest, the amount, the chain
-   id, the commitment, the marker and the open code's hash, and becomes
+   id, the commitment and the marker, and becomes
    **Sealed (fill N)**.
 5. It answers with the fill number, the 430-byte commit data and the
    commitment, **unsigned**. It never answers with the key, the card random or
@@ -253,42 +251,42 @@ previous opener's nonce instead of the writer's, so it is not used.
 The card is now the only copy of the key. A lost or destroyed sealed card is
 lost value, as with cash; the app says so before Make.
 
-### The open code
+### Bearer: the card is all it takes
 
-Each fill has its own open code, made by the writer's app at Make:
+A Ghost card is a bearer object, like cash: whoever holds the card can open
+it. There is no open code, PIN or other secret, and nothing is printed on the
+card or handed over with it except the card itself. Fill shows no code, Open
+is one tap, and Refill is one tap.
 
-- 160 bits from the phone's random source, shown once as a QR code and as 32
-  base32 characters, for the writer to keep with the card (a sticker on the
-  card, or written down) and hand over with it. The app keeps no copy and
-  never logs it; it warns that a lost code means the coins can only be taken
-  off by whoever has both the card and the code, so nobody.
-- The card keeps only the code's SHA3-256 and checks a code by hashing it.
-- A code works for its own fill only. After Refill its hash is wiped, and the
-  next Make stores the next writer's new code.
+The trade-off is deliberate, and it is the point:
 
-A receiver handed a card and a code can confirm the code without opening:
-the receiver's app adds SHA3-256("ghost-card-code" || SHA3-256(code) ||
-challenge) to its Check, the card compares it with its stored hash and signs
-the result into the statement. The value sent is good for that one challenge
-only and does not give the code away.
+- Anyone who gets a tap on the card can empty it: someone who takes it, or a
+  reader held near a pocket. The same is true of cash.
+- During the Open tap the card's seed material crosses the radio in the clear.
+  Only a reader within a few centimetres can read it, and only at that moment.
+- The writer who filled the card cannot open it later without the card. The
+  card made the key from its own card random and the writer's nonce; the
+  writer knows only the nonce, and the card random never leaves a sealed card.
+- Receivers still **Check** before accepting. The Check proves the card is
+  genuine, sealed, at its current fill and what it holds; the chain shows the
+  coin is buried and unspent. An opened card says so on every later Check, so
+  a card someone opened cannot be passed on as sealed.
 
-The trade-off: the writer knows the code, and so does anyone they showed it
-to. That gives nothing without the card in hand, the same as anyone who saw
-the code on its way to the receiver. Pocket skimming still fails, because a
-skimmer has no code.
+So the holder's protection is the same as with cash: keep the card, and
+accept a card only after a Check on your own phone.
 
 ### Seal check on every tap
 
 Any phone can check a card. The receiver's app sends **Check** with a fresh
-32-byte random challenge (and, optionally, an open-code confirmation as above).
-The card advances its LMS leaf index in an atomic write and answers with a
-seal statement signed by its attestation key:
+32-byte random challenge and nothing else. The card advances its LMS leaf
+index in an atomic write and answers with a seal statement signed by its
+attestation key:
 
-- the statement's domain ("ghost-card-seal-v1"), the card id, the state
+- the statement's domain ("ghost-card-seal-v2"), the card id, the state
   (blank, sealed or opened), the fill number, the chain id, the amount, the
   commitment, the commit-data digest (SHA-256), the coin's marker, how many
-  seal checks remain, the attestation signature's leaf index, whether an open
-  code was confirmed (not asked, right or wrong) and the receiver's challenge;
+  seal checks remain, the attestation signature's leaf index and the
+  receiver's challenge;
 - the card's certificate from the issuer: card id, attestation public key,
   applet code hash and batch, signed by an issuer key the app pins.
 
@@ -313,21 +311,19 @@ The receiver's app then checks, on the receiver's own phone:
 It shows one of:
 
 - **Sealed: holds X GHOST** (all checks pass), with the fill number, as
-  "Sealed (fill N): holds X GHOST", and whether the open code was confirmed;
+  "Sealed (fill N): holds X GHOST", and the line "Whoever holds this card can
+  open it, like cash.";
 - **Opened: not safe to accept**;
 - **Blank (fill N): holds nothing**;
 - **Not on the chain yet: not safe to accept** (sealed but no matching Vanish,
   or a Vanish whose commit data differ);
 - **Spent while sealed: not safe to accept** (the marker is spent; the card is
   broken and the app asks the holder to report it);
-- **Open code wrong: not safe to accept** (the code handed over does not open
-  this fill);
 - **Not a genuine Ghost card: not safe to accept** (any signature fails, or
   the issuer is unknown or revoked);
 - **Carry to Claim: not safe to accept** (an NTAG 424 DNA card).
 
-The app asks the receiver to confirm the open code before accepting a card,
-and shows how many seal checks remain.
+The app also shows how many seal checks remain.
 
 The marker is public once the coin is spent, so showing it early costs only
 privacy: whoever tapped the card can later recognise the spend.
@@ -339,56 +335,43 @@ it to label a card quickly; it is never shown as proof.
 ### Opening is one-way
 
 Within a fill, opening is one-way. To Summon or Claim, the opener's app sends
-**Open** with that fill's open code and a fresh 32-byte challenge.
+**Open**, with no data: one tap, no code.
 
-- Without the code no tap can open the card, so a reader held near a pocket
-  cannot open it.
-- On a right code the card first writes "opened" (atomic, persistent), then
-  releases the card random and the writer nonce (64 bytes), encrypted with
-  **AES-256-CTR and authenticated with AES-CMAC** (the card has no GCM or CCM):
-  - the encryption key is SHA3-256("ghost-card-open-enc" || card id || fill
-    number || open code || challenge), and the MAC key is the same with
-    "ghost-card-open-mac";
-  - the CTR counter block starts from 16 fresh bytes from the card's random
-    source, sent with the answer;
-  - the tag is the full 16-byte AES-CMAC over the domain
-    ("ghost-card-open-v1"), card id, fill number, challenge, counter block and
-    ciphertext (encrypt, then MAC).
-
-  The opener's app checks the tag before it decrypts anything and refuses on a
-  mismatch. Because each key is bound to the card, the fill and the challenge,
-  and each answer has a fresh counter block, no key stream is ever used twice.
-  An eavesdropper on the NFC field sees only ciphertext and cannot guess a
-  160-bit code.
-- The opener's app recomputes the seed bytes, then F, the commitment and the
-  commit-data digest, and checks they match the card's statement (or, if the
-  card has no checks left, the Vanish on chain) before Summoning or Claiming at
-  once. The key is held in native code, as a typed key is today, and kept there
-  until the Summon or Claim is confirmed.
-- An opened card answers **Open** again with the same code, so a card pulled
-  away mid-release is not lost. Every later **Check** says opened, until
-  Refill starts a new fill.
+- The card first writes "opened" (atomic, persistent), then answers the fill
+  number and the card random and the writer nonce (64 bytes) **in the clear**.
+  No AES is needed and none is used: the release is not encrypted, because
+  the phone checks it instead of trusting it.
+- The opener's app trusts nothing in the release until it recomputes the
+  Phantom Key's seed bytes, SHA3-256("ghost-card-key" || card random || writer
+  nonce), then F, the commitment, the marker and the commit-data digest with
+  Ghost's client, and checks they match the card's LMS-signed statement (or, if
+  the card has no checks left, the Vanish on chain). A release altered on the
+  way, or one from another card or fill, never makes the checked coin, and the
+  app refuses it. Only then is the key held, in native code as a typed key is
+  today, and kept there until the Summon or Claim is confirmed; the app
+  Summons or Claims at once.
+- An opened card answers **Open** again with the same release, so a card
+  pulled away mid-release is not lost. Every later **Check** says opened,
+  until Refill starts a new fill.
 
 ### Refill: filling the card again
 
 After a fill is opened, its coins taken off and confirmed, the card can be
 filled again:
 
-1. The opener's app sends **Refill** with that fill's open code, and only once
-   the app shows the released coin's marker spent on chain. The card cannot
-   see the chain, so it gates on the code instead: only someone with the card
-   and the code can refill it.
-2. The card refuses unless it is opened and the code is right. In one atomic
-   write it wipes the fill (the table above) and becomes **Blank (fill N)**.
+1. The opener's app offers **Refill** (shown as Reuse), one tap with no data,
+   once it shows the released coin's marker spent on chain. The card cannot
+   see the chain; it only requires that the fill was opened.
+2. The card refuses unless it is opened. In one atomic write it wipes the fill
+   (the table above) and becomes **Blank (fill N)**.
 3. The next writer, the same person or anyone they hand the card to, sends
-   Make, which draws a fresh key on the card, advances to fill N + 1 and sets a
-   new open code.
+   Make, which draws a fresh key on the card and advances to fill N + 1.
 
 Refilling can't hurt anyone: the old key is already out, so wiping it takes
 nothing from the card that the opener does not already have, and the new
-fill's key is new card randomness plus the new writer's nonce. Refill is only
-a convenience gate: if an opened card were refilled before its claim
-confirmed, the opener's app still holds the released seed material.
+fill's key is new card randomness plus the new writer's nonce. If an opened
+card were refilled before its Claim confirmed, by the opener or anyone else
+holding it, the opener's app still holds the released seed material.
 
 ### Java Cards need no Seal
 
@@ -407,8 +390,8 @@ the card alone. No Ghost server takes part, so this removes, for Java Cards:
 What the receiver still checks, all on their own phone: the issuer's
 certificate against the pinned issuer keys and the revocation list that ships
 with the app; the LMS signature over their own fresh challenge; the card id
-against the printed number; the state, fill number and remaining checks; the
-open code if they have it; and, from Ghost nodes, that a Vanish with this
+against the printed number; the state, fill number and remaining checks; and,
+from Ghost nodes, that a Vanish with this
 commit-data digest is buried in the coin tree under a header the app checked
 and that the marker is unspent. Talking to chain nodes is not a Ghost server:
 the app checks their answers against headers itself and asks more than one.
@@ -431,11 +414,11 @@ model), not a service.
 | Command     | Allowed in     | Does                                                                              |
 | ----------- | -------------- | --------------------------------------------------------------------------------- |
 | Identify    | any state      | card id, state, fill number, checks left, certificate; unsigned, uses no check    |
-| Make        | blank          | with a new open code's hash: makes the key and the coin, advances the fill number; returns commit data and commitment, unsigned |
+| Make        | blank          | with the amount, chain id and writer nonce: makes the key and the coin, advances the fill number; returns commit data and commitment, unsigned |
 | Commit data | sealed         | returns the 430-byte commit data again                                            |
-| Check       | any state      | signed seal statement over the receiver's challenge, optionally confirming an open code; uses one check |
-| Open        | sealed, opened | with the fill's open code: marks opened, releases the seed material (AES-256-CTR plus AES-CMAC) |
-| Refill      | opened         | with the fill's open code: wipes the fill and returns to blank                   |
+| Check       | any state      | signed seal statement over the receiver's challenge; uses one check               |
+| Open        | sealed, opened | no data: marks opened, releases the seed material in the clear                   |
+| Refill      | opened         | no data: wipes the fill and returns to blank                                      |
 
 ## Open questions
 
@@ -474,7 +457,7 @@ Ghost's client.
 
 Budgets on the chosen product, card on the phone: Make within 10 seconds,
 Check within 3 seconds, Open within 3 seconds. The estimates (Make 2.0 s,
-Check 1.9 s, Open 0.5 s) meet them; the hardware step times the real applet.
+Check 1.9 s, Open 0.2 s) meet them; the hardware step times the real applet.
 
 Rejected alternative: the card hands the phone the note key and the phone
 seals the note. The writer would keep a key that reads the coin's notes and
@@ -549,8 +532,9 @@ issuers can be added later, each with its own pinned key.
   in parallel readers. The issuer reads the public key and signs the
   certificate offline with its SLH-DSA key (kept in a hardware security
   module), and writes the certificate to the card.
-- No open code is printed or loaded: each fill's code is made by its writer's
-  app at Make, so the issuer never knows one.
+- No secret is printed on the card or loaded for its holder: the card is a
+  bearer object, and each fill's key is drawn on the card at its writer's
+  Make, so the issuer never knows one.
 - The issuer replaces the card manager keys with discarded random keys,
   prints the card number (from the card id) on the face, and records the card
   in a published batch list.
@@ -579,7 +563,8 @@ issuers can be added later, each with its own pinned key.
 - The **card maker and the issuer**, and anyone in the supply chain between
   them and the writer.
 - A **previous holder** or **thief** who had the card for a while, including
-  the writer or opener of an earlier fill, who knows that fill's open code.
+  the writer or opener of an earlier fill, and a **skimmer**: a reader held
+  near the card without the holder knowing.
 - A **network** attacker or dishonest node, and a future quantum computer.
 
 ### What remains to trust
@@ -597,12 +582,16 @@ No Ghost server is trusted for a Java Card.
 
 ### Not protected
 
-- **Possession**: a bearer card is cash. Whoever has the card and its open
-  code can open it and take the coins; a sealed card that is lost or destroyed
-  is lost value, and so is a sealed card whose open code is lost.
-- **The writer's knowledge of the code**: the writer of a fill knows its open
-  code. With the card in hand they could open it, like anyone holding the card
-  and the code.
+- **Possession**: a bearer card is cash. Whoever has the card can open it and
+  take the coins; a sealed card that is lost, stolen or destroyed is lost
+  value.
+- **A tap in reach**: any reader that gets a tap on the card can open it,
+  including one held near a pocket. The card then says opened on every later
+  Check, so it cannot be passed on as sealed, but the coins are gone, as with
+  cash taken from a pocket.
+- **The Open tap**: the seed material crosses the radio in the clear during
+  Open. A reader within a few centimetres at that moment could read it and
+  race the opener's Summon or Claim.
 - **Relay**: see the middleware red-team below; a relay with a convincing
   counterfeit card body is a residual risk.
 - **Laboratory attacks** on the chip: the app should advise against putting
@@ -615,8 +604,10 @@ Each item is an attack and how the design answers it.
 ### A modified app
 
 - **Attack:** read the Phantom Key, the card random or any secret while the
-  card is sealed. **Answer:** no command returns them; Make and Check answer
-  with public values only, and Open needs the fill's open code.
+  card is sealed. **Answer:** no command returns them while the card is
+  sealed; Make and Check answer with public values only. Open does release
+  the seed material, but it first marks the card opened, and every later
+  Check says so under a signature over the receiver's own challenge.
 - **Attack:** choose or bias the key through the writer nonce (for example
   all zeros, or a value it can replay). **Answer:** the seed bytes hash the
   card's own random bytes with the nonce, and those bytes never leave a sealed
@@ -624,19 +615,15 @@ Each item is an attack and how the design answers it.
 - **Attack:** make the card make a second key, or reset a sealed card to
   blank, keeping the first key's coin. **Answer:** Make works only on a blank
   card, and the only way back to blank is Refill, which works only on an
-  opened card with that fill's code; the card manager is locked so the applet
-  cannot be replaced.
+  opened card; the card manager is locked so the applet cannot be replaced.
 - **Attack:** commit one amount on the card but send a Vanish of less, or send
   commit data with a corrupted note, or never send it. **Answer:** the card
   signs the amount and the SHA-256 of its own commit data; the receiver's app
   shows "not on the chain yet" unless those exact bytes are in the coin tree.
 - **Attack:** open the card quietly and give it on as sealed. **Answer:**
-  opening needs the fill's open code, and an opened card reports opened on
-  every later tap, under a signature over the receiver's own challenge.
-- **Attack:** hand the receiver a sealed, funded card with a wrong open code,
-  so nobody but the writer can ever open it. **Answer:** the receiver's app
-  confirms the code with the card before accepting, and the card signs the
-  result into the statement; a wrong code shows "Open code wrong".
+  opening is one-way within a fill: an opened card reports opened on every
+  later tap, under a signature over the receiver's own challenge, and the
+  receiver Checks before accepting.
 - **Attack:** use up the card's seal checks. **Answer:** this denies checks,
   not coins: a sealed card can still be opened, every statement shows how many
   checks remain, Identify reads the count without using one, and 1,024 checks
@@ -646,16 +633,16 @@ Each item is an attack and how the design answers it.
 - **Attack:** pull the card away mid-Make, mid-Open or mid-Refill to leave it
   half-done. **Answer:** all three are atomic; Make leaves a blank or sealed
   card, Refill an opened or blank one, and an opened card releases its seed
-  material again with the same code.
+  material again on the next Open.
 - **Attack:** refill a card whose fill was just opened, before the opener's
-  Claim confirms, to destroy the coins. **Answer:** Refill needs that fill's
-  open code, which only its writer and opener have, and the opener's app keeps
-  the released seed material until the Claim confirms, so a wiped card takes
-  nothing from it.
-- **Attack:** keep an earlier fill's open code and use it on a later fill.
-  **Answer:** each fill's code hash is wiped at Refill and replaced by the new
-  writer's at Make, and the open keys mix in the fill number; an old code
-  opens nothing.
+  Claim confirms, to destroy the coins. **Answer:** Refill works only on an
+  opened card, whose seed material the opener's app already holds; the app
+  keeps it until the Claim confirms, so a wiped card takes nothing from the
+  opener.
+- **Attack:** keep an earlier fill's release and use it on a later fill.
+  **Answer:** each fill's key mixes in fresh card random drawn at its own
+  Make; an old release makes only the old coin, which is already spent, and
+  never matches the later fill's signed statement.
 - **Attack:** write an NTAG 424 DNA card and present it as sealed. **Answer:**
   the receiver's app shows "sealed" only for answers that chain to a pinned
   issuer key; an NTAG 424 DNA card is always shown as carry to Claim.
@@ -663,17 +650,17 @@ Each item is an attack and how the design answers it.
 ### Middleware
 
 - **Attack:** record the NFC traffic to catch the key. **Answer:** a sealed
-  card never sends it; Open sends it encrypted under keys from the 160-bit
-  open code, the fill and the tap's challenge, which a recording does not
-  hold.
-- **Attack:** record an open-code confirmation and replay it, or learn the
-  code from it. **Answer:** the confirmation hashes the tap's own challenge, so
-  it is good for one Check, and it is built from the code's hash, so it does
-  not reveal the code that Open needs.
-- **Attack:** alter the ciphertext of an Open answer, or replay one from an
-  earlier fill. **Answer:** the opener's app checks the AES-CMAC tag over the
-  card id, fill number, its own challenge and the ciphertext before decrypting,
-  and then checks the recomputed commitment against the statement.
+  card never sends it; Make, Identify and Check answer with public values
+  only. The Open tap does carry the seed material in the clear: only a reader
+  within a few centimetres can catch it, only during that tap, and the
+  opener's app Summons or Claims at once. That is the bearer trade-off, stated
+  under "Not protected".
+- **Attack:** alter an Open release on the way, or replay one from an earlier
+  fill or another card. **Answer:** the opener's app trusts nothing in the
+  release until it recomputes the seed bytes, F, the commitment, the marker
+  and the commit-data digest and compares them with the card's LMS-signed
+  statement; an altered or old release never makes the checked coin, and the
+  app refuses it.
 - **Attack:** replace the commit data that Make returns unsigned, so the
   writer sends a Vanish for a coin no key can spend. **Answer:** before signing
   the Vanish, the writer's app runs a Check and requires the statement's
@@ -695,8 +682,11 @@ Each item is an attack and how the design answers it.
   not there, or hides a spent marker. **Answer:** the app checks the coin's
   path to a root in a header it checked itself, asks more than one node for
   spent markers, and waits for the Vanish to be buried under enough blocks.
-- **Attack:** skim a card in a pocket and open or refill it. **Answer:** both
-  need the fill's open code, which a skimmer does not have.
+- **Attack:** skim a card in a pocket and open or refill it. **Answer:** a
+  skimmer within a few centimetres can, as a pickpocket can take cash; that is
+  what a bearer card is. The card then says opened on every later Check, so it
+  cannot be passed on as sealed, and a receiver who Checks before accepting is
+  never handed an emptied card. The holder's protection is keeping the card.
 
 ### The card maker and loader
 
@@ -714,10 +704,9 @@ Each item is an attack and how the design answers it.
   hardware security module; the app pins issuer keys, checks the published
   batch list and revokes a misbehaving issuer. Certifying emulators is the
   issuer's remaining trust.
-- **Attack:** sell a card that already holds a key the maker knows, or keep
-  the open codes. **Answer:** a card must reach its writer blank, and the
-  writer's app refuses Make on any other state; the state is signed. No open
-  code exists until the writer's app makes one at Make.
+- **Attack:** sell a card that already holds a key the maker knows.
+  **Answer:** a card must reach its writer blank, and the writer's app refuses
+  Make on any other state; the state is signed.
 - **Attack:** leave the card manager open, or keep its factory default keys,
   to replace the applet later. **Answer:** the card manager's keys are replaced
   by discarded random keys at loading, so no one, the issuer included, can
@@ -728,10 +717,10 @@ Each item is an attack and how the design answers it.
 
 ### A previous holder or a thief
 
-- **Attack:** note the open code while holding the card and pass it on.
-  **Answer:** the code is useless without the card itself; the card's coins
-  move only to whoever holds the card and the code, and the code dies with its
-  fill.
+- **Attack:** the writer hands over a sealed card and later tries to take its
+  coins without it. **Answer:** the writer knows only its writer nonce; the
+  key also needs the card random, which never leaves a sealed card, so the
+  writer cannot make the key without the card.
 - **Attack:** open the card, take the coins, then pass it on. **Answer:** the
   card says opened until refilled, a refilled card shows a higher fill number
   and holds nothing until its next Make, and the marker shows the old coin
@@ -742,12 +731,11 @@ Each item is an attack and how the design answers it.
 
 ### A quantum attacker
 
-- **Attack:** forge a seal statement or a certificate, or break the open
-  encryption, with a quantum computer. **Answer:** the seal statement is LMS
-  over SHA-256, the certificate is SLH-DSA, the open encryption is AES-256-CTR
-  with AES-CMAC under keys hashed with SHA3-256 from a 160-bit code, and the
-  coin itself uses Ghost's hash-based commitments. None rests on elliptic
-  curves or factoring.
+- **Attack:** forge a seal statement or a certificate, or derive a sealed
+  card's key, with a quantum computer. **Answer:** the seal statement is LMS
+  over SHA-256, the certificate is SLH-DSA, the key is SHA3-256 of 32 bytes of
+  card random and the writer nonce, and the coin itself uses Ghost's
+  hash-based commitments. None rests on elliptic curves or factoring.
 
 ## Left for the hardware step
 
@@ -755,11 +743,10 @@ The applet is built (`card-applet/`) and has run on a J3R180 over a contact
 reader on 2026-11-17:
 
 - H10 key generation at loading: 51.5 minutes (3.02 s a leaf), as estimated;
-- five fills, each with Make, a Check, a Check confirming the open code, Open
-  and Refill, every answer checked as a phone would, every LMS signature
-  verified, and each Make's commit data, commitment and marker recomputed bit
-  for bit from what Open released. Medians: Make 2.15 s, Check 2.88 s, Check
-  with the code 2.89 s, Open 0.58 s, Refill 0.18 s;
+- five fills, each with Make, a Check, Open and Refill, every answer checked
+  as a phone would, every LMS signature verified, and each Make's commit data,
+  commitment and marker recomputed bit for bit from what Open released.
+  Medians: Make 2.15 s, Check 2.88 s, Open 0.58 s, Refill 0.18 s;
 - the card's own work in a Check is about 1.7 s (the statement 0.1 s, the
   one-time chains 1.6 s). The rest is the USB reader, which moves about
   0.44 ms a byte against about 0.1 ms over iPhone NFC, so a Check on a phone
@@ -770,10 +757,9 @@ for bit from vectors computed by Ghost's own client, and cut the power at every
 persistent write of every command, checking the card is left before or after
 it. Still to show, with the app on an iPhone:
 
-- timed Make, Check (with and without an open-code confirmation), Open and
-  Refill over iPhone NFC within the budgets;
+- timed Make, Check, Open and Refill over iPhone NFC within the budgets;
 - a card pulled away mid-Make, mid-Open and mid-Refill on the real card;
 - a seal check from a second phone that never touched the card, a one-way
   open whose later taps all show opened, and a Refill and second fill whose
-  checks show the higher fill number while the first fill's code opens
-  nothing.
+  checks show the higher fill number while the first fill's release does not
+  make the second fill's coin.

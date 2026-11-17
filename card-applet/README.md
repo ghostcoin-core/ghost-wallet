@@ -7,8 +7,11 @@ describes it, for the NXP J3R180 (JCOP 4 P71) measured in
 The card draws each fill's Phantom Key itself, computes the coin's F,
 commitment, marker and sealed note exactly as Ghost's client does, signs seal
 statements with an LMS key it made itself, and releases a fill's seed material
-only to that fill's open code. No command returns the key, the card random,
-the LMS private seed or the applet's code.
+to whoever holds the card and opens it. The card is a bearer object, like
+cash: there is no open code, PIN or other secret. Until Open, no command
+returns the key or the card random; none ever returns the LMS private seed or
+the applet's code. The applet uses no AES or CMAC (the J3R180 has them; the
+applet does not need them).
 
 ## Layout
 
@@ -77,18 +80,17 @@ length in Le) return the rest.
 | `10` | Identify | always | | format 1, phase 1, state 1, card id 16, fill 4, checks left 2, leaves made 2, certificate length 2 |
 | `12` | Read certificate | ready | | certificate bytes from P1P2 |
 | `14` | Public key | tree made | | the LMS public key, 56 bytes (RFC 8554) |
-| `20` | Make | ready, blank, 16+ checks left | amount 12, chain id 8, writer nonce 32, SHA3-256(open code) 32 | fill 4, commitment 32, commit data 430 (unsigned) |
+| `20` | Make | ready, blank, 16+ checks left | amount 12, chain id 8, writer nonce 32 | fill 4, commitment 32, commit data 430 (unsigned) |
 | `22` | Commit data | ready, sealed | | commit data bytes from P1P2 |
-| `30` | Check | ready, 1+ check left | challenge 32, optionally a code confirmation 32 | the 194-byte seal statement |
+| `30` | Check | ready, 1+ check left | challenge 32 | the 193-byte seal statement |
 | `32` | Read signature | right after Check | | bytes from P1P2 of the statement's 2,508-byte LMS signature |
-| `40` | Open | ready, sealed or opened | open code 20, challenge 32 | fill 4, counter block 16, ciphertext 64, tag 16 |
-| `50` | Refill | ready, opened | open code 20 | |
+| `40` | Open | ready, sealed or opened | | fill 4, card random 32, writer nonce 32 (in the clear) |
+| `50` | Refill | ready, opened | | |
 | `60` | Generate | loading | | P1 = leaves to make (1 to 16); answers leaves made, 2 |
 | `64` | Write certificate | loading | up to 512 bytes at offset P1P2 | |
 | `66` | Finish | loading, tree made | certificate length 2 | |
 
-Status words: `6985` not in this state, `6982` wrong open code, `6984` too few
-seal checks (Make needs 16, Check needs 1), `6700` wrong length, `6A86` bad
+Status words: `6985` not in this state, `6984` too few seal checks (Make needs 16, Check needs 1), `6700` wrong length, `6A86` bad
 offset or count, `6A80` bad certificate length.
 
 The applet's AID is `A000000847474341524401` (package `A0000008474743415244`).
@@ -152,11 +154,11 @@ The seed bytes and secrets are wiped from RAM before Make answers.
 
 ### Check and its signature
 
-The statement (194 bytes):
+The statement (193 bytes):
 
 | Bytes | Field |
 | --- | --- |
-| 0..18 | "ghost-card-seal-v1" |
+| 0..18 | "ghost-card-seal-v2" |
 | 18..34 | card id |
 | 34 | state |
 | 35..39 | fill number |
@@ -167,12 +169,9 @@ The statement (194 bytes):
 | 123..155 | marker |
 | 155..157 | seal checks left after this one |
 | 157..161 | the LMS leaf this signature uses |
-| 161 | open code: 0 not asked, 1 right, 2 wrong |
-| 162..194 | the receiver's challenge |
+| 161..193 | the receiver's challenge |
 
-A blank card's coin fields (chain id to marker) are zero. The code
-confirmation is SHA3-256("ghost-card-code" ‖ SHA3-256(open code) ‖ challenge);
-a blank card answers 2 to one.
+A blank card's coin fields (chain id to marker) are zero.
 
 Check advances the next leaf in an atomic write before anything is signed,
 draws the signature's random C, and hashes the statement into the message
@@ -187,13 +186,28 @@ appendix A).
 
 ### Open
 
-On the fill's right code, the card first marks the fill opened (if it was
-sealed), then answers the card random and writer nonce (64 bytes) encrypted
-with AES-256-CTR under SHA3-256("ghost-card-open-enc" ‖ card id ‖ fill ‖ open
-code ‖ challenge), from a fresh 16-byte counter block (incremented as one
-128-bit big-endian number), with an AES-CMAC tag under the same with
-"ghost-card-open-mac", over "ghost-card-open-v1" ‖ card id ‖ fill ‖ challenge
-‖ counter block ‖ ciphertext. An opened card answers Open again with its code.
+Open takes no data. The card first marks the fill opened (if it was sealed),
+then answers the fill number, the card random and the writer nonce (68 bytes)
+in the clear. An opened card answers Open again with the same bytes.
+
+The phone trusts nothing in the release until it recomputes the Phantom Key's
+seed bytes, SHA3-256("ghost-card-key" ‖ card random ‖ writer nonce), then F,
+the commitment, the marker and the commit-data digest with Ghost's client, and
+compares them with the card's LMS-signed statement. A release altered on the
+way never makes the checked coin; only then is the key held.
+
+The trade-off is the bearer one: anyone who gets a tap on the card can open
+it, and during the Open tap the seed material crosses the radio in the clear,
+readable only by a reader within a few centimetres at that moment. A writer
+cannot open a card later without it: the writer knows only its nonce, and the
+card random never leaves a sealed card. Receivers Check before accepting.
+
+### Refill
+
+Refill takes no data and works only on an opened card. In one atomic write it
+wipes the fill (card random, writer nonce, amount, chain id, commitment,
+digest, marker, commit data) and makes the card blank, keeping its fill
+number, card id, certificate and LMS key.
 
 ## On a J3R180
 
@@ -205,7 +219,6 @@ Run on 2026-11-17 over a USB contact reader, which takes answers of at most
 | Loading: H10 key generation | 51.5 min (3.02 s a leaf) | at the loading station |
 | Make (with the commit data's second part) | 2.15 s | 10 s |
 | Check, with its signature read | 2.88 s | 3 s |
-| Check confirming the open code | 2.89 s | 3 s |
 | Open | 0.58 s | 3 s |
 | Refill | 0.18 s | 3 s |
 
