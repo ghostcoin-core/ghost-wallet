@@ -19,6 +19,9 @@ export const ROUTE_GROUPS = {
   import: 'onboarding',
   lock: 'lock',
   home: 'wallet',
+  // The other tabs beside Home.
+  cards: 'wallet',
+  activity: 'wallet',
   send: 'wallet',
   payment: 'wallet',
   receive: 'wallet',
@@ -87,4 +90,17 @@ export function stateAfterSave(): AccountState {
 /** The state after a passed unlock. Unlocking without an account changes nothing. */
 export function stateAfterUnlock(state: AccountState): AccountState {
   return state.hasAccount ? { ...state, unlocked: true } : state;
+}
+
+/**
+ * True when the wallet is open but the path still names a screen that has
+ * closed (Welcome, the lock), so the app must move to Home itself.
+ */
+export function leftOnClosedScreen(pathname: string, state: AccountState): boolean {
+  const open = openGroups(state);
+  if (!open.wallet) {
+    return false;
+  }
+  const name = pathname.split('/')[1] || 'index';
+  return name in ROUTE_GROUPS && !open[ROUTE_GROUPS[name as RouteName]];
 }

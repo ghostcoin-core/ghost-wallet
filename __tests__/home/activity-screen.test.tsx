@@ -1,6 +1,6 @@
 import { act, render, screen, within } from '@testing-library/react-native';
 
-import HomeScreen from '../../app/home';
+import HomeScreen from '../../app/(tabs)/home';
 import type { ActivityItem } from '../../lib/home/activity';
 import type { AccountReading } from '../../lib/home/cache-refresh';
 import { HISTORY_DELAY_MS, REFRESH_EVERY_MS } from '../../lib/home/use-home';

@@ -1,16 +1,18 @@
+import { router } from 'expo-router';
 import { act, fireEvent, renderRouter, screen, waitFor } from 'expo-router/testing-library';
 
 import BackupScreen from '../../app/backup';
 import BenchScreen from '../../app/bench';
 import CheckScreen from '../../app/check';
 import CheckWordsScreen from '../../app/check-words';
-import HomeScreen from '../../app/home';
+import TabsLayout from '../../app/(tabs)/_layout';
+import HomeScreen from '../../app/(tabs)/home';
 import ImportScreen from '../../app/import';
 import WelcomeScreen from '../../app/index';
 import LockScreen from '../../app/lock';
 import ReceiveScreen from '../../app/receive';
 import RecoveryWordsScreen from '../../app/recovery-words';
-import SettingsScreen from '../../app/settings';
+import SettingsScreen from '../../app/(tabs)/settings';
 import RootLayout from '../../app/_layout';
 import { TEST_WORDS } from '../../modules/ghost-core/test-words';
 
@@ -91,9 +93,10 @@ const APP = {
   check: CheckScreen,
   import: ImportScreen,
   lock: LockScreen,
-  home: HomeScreen,
+  '(tabs)/_layout': TabsLayout,
+  '(tabs)/home': HomeScreen,
   receive: ReceiveScreen,
-  settings: SettingsScreen,
+  '(tabs)/settings': SettingsScreen,
   'recovery-words': RecoveryWordsScreen,
   'check-words': CheckWordsScreen,
   bench: BenchScreen,
@@ -329,7 +332,8 @@ describe('Home', () => {
     await openApp();
     await screen.findByTestId('home-screen');
 
-    fireEvent.press(screen.getByTestId('open-settings'));
+    // Settings is a tab, drawn by iOS; open it the way the tab bar does.
+    act(() => router.navigate('/settings'));
     await screen.findByTestId('settings-version');
     await act(async () => {
       for (let tap = 0; tap < 7; tap++) {

@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react-n
 import type { ComponentType } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import HomeScreen from '../../app/home';
+import HomeScreen from '../../app/(tabs)/home';
 import { encodeDetails, type Advance } from '../../lib/vanish/payments';
 import { holdVanish, resetPending, takeReopened } from '../../lib/vanish/pending';
 

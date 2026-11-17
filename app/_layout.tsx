@@ -1,15 +1,27 @@
 import { useFonts } from 'expo-font';
-import { Stack } from 'expo-router';
+import { Stack, usePathname, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect } from 'react';
 
 import { colors } from '../components/theme';
-import { openGroups } from '../lib/onboarding/route-guards';
+import { leftOnClosedScreen, openGroups } from '../lib/onboarding/route-guards';
 import { SessionProvider, useSession } from '../lib/session';
 import { fontFiles } from '../lib/theme';
 
 function GuardedStack() {
   const session = useSession();
   const open = openGroups(session);
+  const router = useRouter();
+  const pathname = usePathname();
+
+  // When onboarding or the lock closes, the router is left on that closed
+  // screen. The wallet's tabs are a group, which the fallback below does not
+  // open by itself, so open Home.
+  useEffect(() => {
+    if (leftOnClosedScreen(pathname, session)) {
+      router.replace('/home');
+    }
+  }, [pathname, session, router]);
 
   // Screen order matters: when a guard closes the open screen, the router
   // falls back to the first screen still open.
@@ -25,11 +37,10 @@ function GuardedStack() {
         <Stack.Screen name="lock" options={{ gestureEnabled: false }} />
       </Stack.Protected>
       <Stack.Protected guard={open.wallet}>
-        <Stack.Screen name="home" options={{ gestureEnabled: false }} />
+        <Stack.Screen name="(tabs)" options={{ gestureEnabled: false }} />
         <Stack.Screen name="send" />
         <Stack.Screen name="payment" />
         <Stack.Screen name="receive" />
-        <Stack.Screen name="settings" />
         <Stack.Screen name="recovery-words" />
         <Stack.Screen name="check-words" />
         <Stack.Screen name="vanish" />

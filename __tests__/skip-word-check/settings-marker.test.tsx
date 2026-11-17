@@ -3,7 +3,7 @@ import type { ComponentType } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import CheckWordsScreen from '../../app/check-words';
-import SettingsScreen from '../../app/settings';
+import SettingsScreen from '../../app/(tabs)/settings';
 import { backupStatusStore, createBackupStatusStore, parseBackupStatus } from '../../lib/onboarding/backup-status';
 
 // Plain test words stand in for the saved account.

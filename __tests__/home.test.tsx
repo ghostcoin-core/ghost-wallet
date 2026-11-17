@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 
-import HomeScreen from '../app/home';
+import HomeScreen from '../app/(tabs)/home';
 import type { AccountReading } from '../lib/home/cache-refresh';
 
 const ADDRESS = '0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd';
@@ -110,21 +110,27 @@ describe('HomeScreen', () => {
     expect(screen.getByTestId('balance-status')).toHaveTextContent('Node not reachable, last updated 2 hours ago');
   });
 
-  it('opens receive and settings', () => {
+  it('opens receive', () => {
     render(<HomeScreen />);
 
     fireEvent.press(screen.getByTestId('open-receive'));
-    fireEvent.press(screen.getByLabelText('Settings'));
 
-    expect(mockPush.mock.calls).toEqual([['/receive'], ['/settings']]);
+    expect(mockPush.mock.calls).toEqual([['/receive']]);
   });
 
-  it('opens Check NFC Chip without waiting on any card', () => {
+  it('shows the news under the activity', () => {
+    render(<HomeScreen />);
+
+    expect(screen.getByTestId('news')).toBeOnTheScreen();
+    expect(screen.getAllByTestId(/^news-/)).toHaveLength(4);
+  });
+
+  it('opens the card check without waiting on any card', () => {
     render(<HomeScreen />);
 
     fireEvent.press(screen.getByTestId('open-check-card'));
 
-    expect(screen.getByTestId('open-check-card')).toHaveTextContent('Check NFC Chip');
+    expect(screen.getByLabelText('Tap a card')).toBeOnTheScreen();
     expect(mockPush.mock.calls).toEqual([['/check-card']]);
     // The balance is not held back by a card.
     expect(screen.getByTestId('balance-amount')).toBeOnTheScreen();

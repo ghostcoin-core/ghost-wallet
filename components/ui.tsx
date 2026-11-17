@@ -109,6 +109,7 @@ export function Button({
   icon,
   onPress,
   secondary,
+  ink,
   disabled,
   testID,
 }: {
@@ -116,6 +117,8 @@ export function Button({
   icon?: IconName;
   onPress: () => void;
   secondary?: boolean;
+  /** The one main action beside a violet card: ink, so the two do not blend. */
+  ink?: boolean;
   disabled?: boolean;
   testID?: string;
 }) {
@@ -129,6 +132,7 @@ export function Button({
       style={({ pressed }) => [
         styles.button,
         secondary && styles.buttonSecondary,
+        ink && styles.buttonInk,
         (pressed || disabled) && styles.buttonDimmed,
       ]}
       testID={testID}
@@ -345,6 +349,10 @@ const styles = StyleSheet.create({
   buttonSecondary: {
     borderColor: colors.line,
     backgroundColor: colors.paper,
+  },
+  buttonInk: {
+    borderColor: colors.ink,
+    backgroundColor: colors.ink,
   },
   buttonDimmed: {
     opacity: 0.6,
