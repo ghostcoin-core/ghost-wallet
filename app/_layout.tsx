@@ -46,6 +46,7 @@ function GuardedStack() {
         <Stack.Screen name="vanish" />
         <Stack.Screen name="summon" />
         <Stack.Screen name="wipe-card" />
+        <Stack.Screen name="older-cards" />
         <Stack.Screen name="check-card" />
         <Stack.Screen name="fill-card" />
         <Stack.Screen name="open-card" />
