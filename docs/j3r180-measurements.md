@@ -51,6 +51,43 @@ and marker use Keccak-256 with the original 0x01 padding. A card's SHA3-256 API
 pads with 0x06 and cannot compute them, so even a card with native SHA3-256
 still runs at least 4 of the 14 permutations in bytecode.
 
+## Over iPhone NFC
+
+Measured on 2026-11-17 with the card held to an iPhone, running TestFlight
+build 132's Card probe screen against the probe from main (commit 0dcf579).
+**Over NFC the card is about 5% slower than over contact, and every budget
+passes with room to spare.**
+
+| Work | Contact | iPhone NFC |
+| --- | --- | --- |
+| No-op round trip | 7.9 ms | 7.1 ms |
+| SHA-256, native, per call | 2.41 ms | 2.53 ms |
+| **Keccak-f\[1600\], generated code** | 139 ms | **146 ms** (SHA3-256 right) |
+| Keccak-f\[1600\], plain loop | 1.44 s | 1.53 s |
+| **Note seal** | 346 ms | **362 ms** (tag right) |
+| **LMS H10/W4 sign** | 1.57–1.59 s | **1.62 s** (568 SHA-256 calls) |
+| Extended command, 1,000 bytes | 0.36 s, hash right | 128 ms, hash right |
+| Answer of 256 bytes | yes | yes, 36 ms |
+| Answer of 257 bytes | no (USB reader) | **yes, 37 ms**, all bytes right |
+| Answer of 1,000 bytes | no (USB reader) | **yes, 106 ms**, all bytes right |
+
+Answers longer than 256 bytes work over the iPhone, so the failure over
+contact was the USB reader's limit, not the card's. A Check's 2.5 KB answer
+can go back in a few long answers.
+
+| Budget, over iPhone NFC | Estimate | Result |
+| --- | --- | --- |
+| Make, spec as written | 4.23 s | **pass** (≤ 10 s) |
+| Make, recommended (SHA-256 digest, statement signed at Check) | 2.02 s | **pass** |
+| Make, precomputed (signature at Make) | 2.33 s | **pass** |
+| Check | 1.88 s | **pass** (≤ 3 s) |
+| Open, spec as written | 0.39 s | **pass** (≤ 3 s) |
+
+The estimates add up the measured parts as the tables above do: permutations,
+seal and signature, plus 0.2 s for the atomic write and I/O at Make, and for
+Check the signature plus 2.6 KB of answer at the measured rate. They are not a
+timed Make, which needs the real applet.
+
 ## Where the time goes, and what is left to try
 
 This is the fastest live design: live Make, a native SHA-256 commit-data
@@ -148,11 +185,10 @@ still match the host.
 - Extended-length commands work: 300, 500, 600 and 1,000 data bytes in one
   command. The card's SHA-256 of the data matched the host's. A 1,000-byte
   command took 0.36 s.
-- Responses work up to 256 bytes. Any longer response fails with
-  `SCARD_E_NOT_TRANSACTED` at the reader. A 1,000-byte command passes, so this
-  looks like a limit of this reader, not of the card. The iPhone test settles
-  it. Either way, the applet can send long answers, such as a 2.5 KB LMS
-  signature, as several 256-byte responses.
+- Over the USB reader, responses work up to 256 bytes and any longer one fails
+  with `SCARD_E_NOT_TRANSACTED`. Over the iPhone, answers of 257 and 1,000
+  bytes come back whole (see "Over iPhone NFC"), so that limit belongs to the
+  reader, not the card.
 - Plain no-op round trip: 8 ms.
 
 ## Timings
@@ -238,8 +274,8 @@ recommendation now that it fits. Precomputing now saves only that 1.4 s.
 | Requirement | Result |
 | --- | --- |
 | Java Card 3.0.5+ on a GlobalPlatform card manager | **pass** (GP 2.3, runs JC 3.0.5 code) |
-| Contactless ISO 14443-A | not measured here (contact only). The card is sold as dual-interface. |
-| Extended-length or chained APDUs | **pass** for commands up to 1,000 bytes. Long responses are unconfirmed through this reader (see above). |
+| Contactless ISO 14443-A | **pass**: every test ran over iPhone Core NFC (`NFCISO7816Tag`), about 5% slower than contact |
+| Extended-length or chained APDUs | **pass**: 1,000-byte commands, and answers of 257 and 1,000 bytes over the iPhone |
 | Native SHA-256 | **pass** |
 | Native SHA3-256 | **fail** (not in the API) |
 | Native AES-256 | **pass**. There is no AEAD mode: Open's "authenticated mode" must be AES-256-CTR plus AES-CMAC (both native). |
@@ -247,20 +283,17 @@ recommendation now that it fits. Precomputing now saves only that 1.4 s.
 | Atomic persistent writes | **pass**. The transaction API works: every LMS signature advanced its leaf index inside one. Tearing was not tested. |
 | ≥ 100 KiB free persistent memory | **pass** (143,412 bytes free with the 61 KB probe loaded) |
 | CC EAL6+ secure element | JCOP 4 P71 is certified EAL6+. This card matches it, but a reseller card in OP_READY with default keys is not in the certified delivery state, so the certificate covers the chip, not this card's history. |
-| **Make ≤ 10 s** | **pass live, ≈ 4.1 s as written** with the generated code; ≈ 1.9 s with the SHA-256 digest and the signature moved to Check. (The plain-loop code took 23.6 s and the second version 8.4 s.) |
-| **Check ≤ 3 s** | **pass**, estimated 1.6–1.8 s: one LMS signature, with the statement's digest and marker stored at Make, plus about 2.5 KB of output |
-| **Open ≤ 3 s** | **pass, ≈ 0.3 s as written** (two bytecode SHA3-256 permutations plus native AES). It drops under 0.1 s with native SHA-256 for the open-code hash and the open key, but that change isn't needed. |
+| **Make ≤ 10 s** | **pass over iPhone NFC, ≈ 4.2 s as written**, ≈ 2.0 s recommended (contact: 4.1 s and 1.9 s) with the generated code; ≈ 1.9 s with the SHA-256 digest and the signature moved to Check. (The plain-loop code took 23.6 s and the second version 8.4 s.) |
+| **Check ≤ 3 s** | **pass, ≈ 1.9 s over iPhone NFC**: one LMS signature (1.62 s), with the statement's digest and marker stored at Make, plus about 2.5 KB of answer |
+| **Open ≤ 3 s** | **pass, ≈ 0.4 s as written over iPhone NFC (0.3 s over contact)** (two bytecode SHA3-256 permutations plus native AES). It drops under 0.1 s with native SHA-256 for the open-code hash and the open key, but that change isn't needed. |
 | LMS key generation "up to about half an hour" | **fail at H10, about 50 min.** H9 takes about 25 min and H8 about 12.5 min. Alternatively, accept 50 minutes in parallel readers at the loading station. |
 
-Does bytecode Keccak still fit the budgets? Yes, over contact, with the
-generated code: live Make takes about 4.1 s as written and Open about 0.3 s.
-The plain-loop version did not fit. Over NFC the card may run slower, so the iPhone run
-(below) is what confirms it.
+Does bytecode Keccak still fit the budgets? Yes, with the generated code, over
+contact and over iPhone NFC: live Make takes about 4.2 s as written over NFC
+and Open about 0.4 s. The plain-loop version did not fit.
 
 ## Not measured here
 
-- The iPhone Core NFC round trip, a long response over NFC, and contactless
-  timings. This needs the card on the phone.
 - A bytecode ML-DSA-44 signature. The spec already rules ML-DSA out on this
   card class, and with about 3.7 KB of RAM for an applet and no RAM int arrays
   this card is further from it than the spec assumed.
