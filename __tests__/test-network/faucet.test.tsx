@@ -3,7 +3,7 @@ import path from 'path';
 
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 
-import HomeScreen from '../../app/home';
+import HomeScreen from '../../app/(tabs)/home';
 import type { AccountReading } from '../../lib/home/cache-refresh';
 import { FAUCET_AMOUNT_WEI, FaucetError, requestTestGhost } from '../../lib/node/faucet';
 

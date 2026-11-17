@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  leftOnClosedScreen,
   canOpen,
   landingRoute,
   openGroups,
@@ -51,8 +52,10 @@ describe('route guards', () => {
 
   it('with an unlocked account opens the wallet screens and the developer screens, and no onboarding screen', () => {
     expect(openRoutes(UNLOCKED).sort()).toEqual([
+      'activity',
       'bench',
       'card-probe',
+      'cards',
       'check-card',
       'check-words',
       'fill-card',
@@ -89,8 +92,10 @@ describe('route guards', () => {
   });
 
   it('gives every screen in app/ a group, so none is left unguarded', () => {
-    const screens = fs
-      .readdirSync(path.join(__dirname, '..', '..', 'app'))
+    const appDir = path.join(__dirname, '..', '..', 'app');
+    // The tab screens sit in their own folder, which adds nothing to the route.
+    const screens = [appDir, path.join(appDir, '(tabs)')]
+      .flatMap((dir) => fs.readdirSync(dir))
       .filter((file) => file.endsWith('.tsx') && !file.startsWith('_'))
       .map((file) => file.replace(/\.tsx$/, ''));
 
@@ -126,5 +131,25 @@ describe('state changes', () => {
   it('unlocks a saved account, and nothing without one', () => {
     expect(stateAfterUnlock(LOCKED)).toEqual(UNLOCKED);
     expect(stateAfterUnlock(NO_ACCOUNT)).toEqual(NO_ACCOUNT);
+  });
+});
+
+describe('left on a closed screen', () => {
+  it('is true on Welcome or the lock once the wallet is open', () => {
+    expect(leftOnClosedScreen('/', UNLOCKED)).toBe(true);
+    expect(leftOnClosedScreen('/lock', UNLOCKED)).toBe(true);
+    expect(leftOnClosedScreen('/check', UNLOCKED)).toBe(true);
+  });
+
+  it('is false on a wallet or developer screen', () => {
+    expect(leftOnClosedScreen('/home', UNLOCKED)).toBe(false);
+    expect(leftOnClosedScreen('/settings', UNLOCKED)).toBe(false);
+    expect(leftOnClosedScreen('/bench', UNLOCKED)).toBe(false);
+  });
+
+  it('is false while the wallet is closed, and for a path that names no screen', () => {
+    expect(leftOnClosedScreen('/lock', LOCKED)).toBe(false);
+    expect(leftOnClosedScreen('/', NO_ACCOUNT)).toBe(false);
+    expect(leftOnClosedScreen('/nowhere', UNLOCKED)).toBe(false);
   });
 });

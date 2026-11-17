@@ -21,7 +21,9 @@ export type IconName =
   | 'globe'
   | 'node'
   | 'info'
-  | 'dot';
+  | 'dot'
+  | 'card'
+  | 'tap';
 
 function shapes(name: IconName) {
   switch (name) {
@@ -115,6 +117,15 @@ function shapes(name: IconName) {
           <Path d="M12 11v5M12 8v.01" />
         </>
       );
+    case 'card':
+      return (
+        <>
+          <Rect x="3" y="6" width="18" height="12" rx="2" />
+          <Path d="M3 10h18" />
+        </>
+      );
+    case 'tap':
+      return <Path d="M7 9a5 5 0 0 1 0 6M11 6.5a9 9 0 0 1 0 11M15 4a13 13 0 0 1 0 16" />;
     case 'dot':
       return <Circle cx="12" cy="12" r="5" />;
   }

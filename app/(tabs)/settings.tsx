@@ -7,12 +7,10 @@ import { useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
-import { colors, monoFont } from '../components/theme';
+import { colors, monoFont } from '../../components/theme';
 import {
   Button,
   ButtonRow,
-  IconButton,
-  Logo,
   NetworkBadge,
   Panel,
   Row,
@@ -21,13 +19,13 @@ import {
   Spacer,
   textStyles,
   Title,
-} from '../components/ui';
-import { accountZeroAddress } from '../lib/account';
-import { authenticate, authFailureMessage } from '../lib/device-auth';
-import { shortAddress } from '../lib/home/balance-format';
-import { useBackupUnchecked } from '../lib/onboarding/backup-status';
-import { createTapCounter } from '../lib/settings/developer-entry';
-import { DEFAULT_SETTINGS, normaliseNodeUrl, settingsStore, useSettings } from '../lib/settings/settings';
+} from '../../components/ui';
+import { accountZeroAddress } from '../../lib/account';
+import { authenticate, authFailureMessage } from '../../lib/device-auth';
+import { shortAddress } from '../../lib/home/balance-format';
+import { useBackupUnchecked } from '../../lib/onboarding/backup-status';
+import { createTapCounter } from '../../lib/settings/developer-entry';
+import { DEFAULT_SETTINGS, normaliseNodeUrl, settingsStore, useSettings } from '../../lib/settings/settings';
 
 function appVersion(): string {
   return Constants.expoConfig?.version ?? 'unknown';
@@ -104,10 +102,8 @@ export default function SettingsScreen() {
       background="mist"
       topBar={
         <>
-          <IconButton icon="back" label="Back" background={colors.mist} onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge background={colors.paper} />
-          <Logo />
         </>
       }
     >
