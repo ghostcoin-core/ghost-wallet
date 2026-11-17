@@ -21,6 +21,7 @@ the LMS private seed or the applet's code.
 | `test/ghostcard/` | The tests on jcardsim |
 | `test/tear/ghostcard/Nvm.java` | The tests' `Nvm`: the same writes, with a power cut at any of them |
 | `test/vectors.txt` | Ghost's vectors, written by `core/tests/card_applet_vectors.rs` |
+| `test/phone-vectors.txt` | One card's real answers on jcardsim, for the app's checks (`core/tests/java_card.rs`) |
 | `host/ghostcard/host/` | What a phone does: the command client, Ghost's derivations, statement and Open checks, and `RealCard`, the run on a real card |
 
 ## Building and testing
@@ -60,7 +61,8 @@ On a real card (a sacrificial one with known card manager keys; never lock it):
 ```
 gp --install build/ghostcard.cap
 java -cp <host classes>:<bcprov> ghostcard.host.RealCard load      # the H10 tree, about 50 minutes
-java -cp <host classes>:<bcprov> ghostcard.host.RealCard certify   # a test certificate
+java -cp <host classes>:<bcprov> ghostcard.host.RealCard certify   # a stand-in certificate no app accepts
+java -cp <host classes>:<bcprov> ghostcard.host.RealCard certify <file>   # the issuer's certificate, hex
 java -cp <host classes>:<bcprov> ghostcard.host.RealCard run 5     # five timed fills, every answer checked
 ```
 
@@ -92,6 +94,28 @@ offset or count, `6A80` bad certificate length.
 The applet's AID is `A000000847474341524401` (package `A0000008474743415244`).
 The install parameters may give the certificate's room as 2 bytes; the default
 is 8,192 bytes, enough for an SLH-DSA-SHA2-128s certificate.
+
+### The certificate
+
+The applet stores the certificate as the issuer wrote it and never reads it.
+The app (`core/src/java_card.rs`) takes this layout, 7,990 bytes:
+
+| Bytes | Field |
+| --- | --- |
+| 0..18 | "ghost-card-cert-v1" |
+| 18..26 | issuer id: the first 8 bytes of SHA3-256("ghost-card-issuer" ‖ issuer public key) |
+| 26..42 | card id |
+| 42..98 | the card's LMS public key (Public key's answer) |
+| 98..130 | the applet's code hash |
+| 130..134 | batch |
+| 134.. | the issuer's SLH-DSA-SHAKE-128s signature (7,856 bytes) of bytes 0..134, with context "ghost-card-cert-v1" |
+
+A phone accepts a card only when the issuer is one it pins, the signature
+verifies, the batch is one that issuer published, the code hash is a published
+build, and the card is not revoked. Development cards are certified with a
+development issuer key that only builds for a test network trust;
+`core/examples/card_issuer.rs` makes such a key and signs certificates with it,
+and `RealCard certify <file>` writes one to a card.
 
 ### Phases and states
 

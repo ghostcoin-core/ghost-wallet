@@ -22,10 +22,31 @@ final class NfcSessionException: Exception {
   override var reason: String { "The card could not be read. Hold it still and try again." }
 }
 
+/// Which application the reader selected on the card tapped: the NTAG 424
+/// DNA's NDEF application, the Ghost card applet, or another listed one.
+enum TappedCard {
+  case ntag
+  case ghostCard
+  case other
+
+  static let ghostCardAid = "A000000847474341524401"
+  static let ntagAid = "D2760000850101"
+
+  init(selectedAid: String) {
+    switch selectedAid.uppercased() {
+    case Self.ghostCardAid: self = .ghostCard
+    case Self.ntagAid: self = .ntag
+    default: self = .other
+    }
+  }
+}
+
 final class TagReader: NSObject, NFCTagReaderSessionDelegate {
   private let queue = DispatchQueue(label: "com.ghostcoin.wallet.nfc")
   private var session: NFCTagReaderSession?
   private var tag: NFCISO7816Tag?
+  /// The kind of the card connected now; read on the reader's queue.
+  private(set) var tapped: TappedCard = .other
   /// Called once, on `queue`, with the connected card's UID or why there is none.
   private var connected: ((Result<Data, Exception>) -> Void)?
 
@@ -97,6 +118,27 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
     }
   }
 
+  /// After the card was lost mid-command: keeps the sheet open, asks for the
+  /// card again and calls back (on the reader's queue) once a card is
+  /// connected, or with why not. Fails at once when the session is gone.
+  func reconnect(alert: String, onConnected: @escaping (Result<Data, Exception>) -> Void) {
+    queue.async {
+      guard let session = self.session else {
+        onConnected(.failure(NfcSessionException()))
+        return
+      }
+      self.tag = nil
+      self.connected = onConnected
+      session.alertMessage = alert
+      session.restartPolling()
+    }
+  }
+
+  /// The kind of the card connected now, read on the reader's queue.
+  func tappedCard(_ completion: @escaping (TappedCard) -> Void) {
+    queue.async { completion(self.tapped) }
+  }
+
   /// Changes the message on the card sheet.
   func update(alert: String) {
     queue.async {
@@ -144,7 +186,7 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
   func tagReaderSession(_ session: NFCTagReaderSession, didDetect tags: [NFCTag]) {
     guard session === self.session else { return }
     guard tags.count == 1, let first = tags.first, case let .iso7816(iso) = first else {
-      session.alertMessage = "Hold one NTAG 424 card near the top of the iPhone."
+      session.alertMessage = "Hold one Ghost card near the top of the iPhone."
       session.restartPolling()
       return
     }
@@ -156,6 +198,7 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
           return
         }
         self.tag = iso
+        self.tapped = TappedCard(selectedAid: iso.initialSelectedAID)
         self.connected?(.success(iso.identifier))
         self.connected = nil
       }

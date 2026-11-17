@@ -132,6 +132,7 @@ export const RELAY_PROBLEMS = {
   'wrong-state': 'This card cannot do that now.',
   'fill-pending': 'This card is already being filled with another amount or PIN.',
   'wrong-region': 'This card is served by another Seal region than the one this iPhone chose. Update Ghost Wallet, then try again.',
+  'ghost-card': 'This is a Ghost card, which needs no Seal. Check it from Check NFC Chip.',
   failed: 'The card could not be checked. Try again.',
 } as const;
 
@@ -174,6 +175,7 @@ const NATIVE_PROBLEMS: Record<string, RelayProblem> = {
   ERR_SEAL_WRONG_STATE: 'wrong-state',
   ERR_SEAL_FILL_PENDING: 'fill-pending',
   ERR_SEAL_WRONG_REGION: 'wrong-region',
+  ERR_GHOST_CARD_TAPPED: 'ghost-card',
 };
 
 /** The Seal address that sends a flow to the card's home region, chosen natively once its UID is read. */

@@ -184,6 +184,10 @@ private final class PinnedSealTrust: NSObject, URLSessionDelegate, URLSessionTas
   }
 }
 
+final class GhostCardTappedException: Exception {
+  override var reason: String { "This is a Ghost card, which needs no Seal. Check it from Check NFC Chip." }
+}
+
 final class SealRelayBusyException: Exception {
   override var reason: String { "A Check is already running." }
 }
@@ -393,10 +397,15 @@ final class SealRelay {
       }
       self.running = true
       self.reader.begin(alert: alert) { result in
+        // Called on the reader's queue, where the tapped card's kind is set.
+        let tapped = self.reader.tapped
         self.queue.async {
           switch result {
           case let .failure(error):
             self.end(promise, error: error)
+          case .success where tapped == .ghostCard:
+            // A Ghost Java card needs no Seal: nothing is sent for it.
+            self.end(promise, error: GhostCardTappedException())
           case let .success(uid):
             // One Seal per tap, chosen here once. A region with no pin is no
             // connection at all: nothing is sent, and no other region is tried.

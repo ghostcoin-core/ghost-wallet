@@ -18,6 +18,7 @@ import javax.smartcardio.TerminalFactory;
  *   info           what the card says about itself
  *   load           makes the whole LMS tree (about 50 minutes on a J3R180; resumes where it stopped)
  *   certify        writes a test certificate and finishes loading (a test card only)
+ *   certify <file> writes the issuer's certificate (hex, from core/examples/card_issuer.rs) and finishes loading
  *   run [fills]    Make, Check, Open and Refill for that many fills (default 3), timed
  *
  * Set GHOST_MAX_ANSWER to the reader's longest answer (default 256, a USB contact reader's limit).
@@ -46,7 +47,14 @@ public final class RealCard {
         switch (mode) {
             case "info" -> info(c);
             case "load" -> load(c);
-            case "certify" -> certify(c);
+            case "certify" -> {
+                if (args.length > 1) {
+                    certifyWith(c, java.util.HexFormat.of().parseHex(
+                            java.nio.file.Files.readString(java.nio.file.Path.of(args[1])).strip()));
+                } else {
+                    certify(c);
+                }
+            }
             case "run" -> run(c, args.length > 1 ? Integer.parseInt(args[1]) : 3);
             default -> throw new IllegalArgumentException(mode);
         }
@@ -83,6 +91,22 @@ public final class RealCard {
         RNG.nextBytes(cert);
         System.arraycopy(c.identify().cardId, 0, cert, 0, 16);
         System.arraycopy(c.publicKey(), 0, cert, 16, 56);
+        c.certify(cert, 240);
+        if (!Arrays.equals(c.certificate(), cert)) {
+            throw new IllegalStateException("certificate read back differs");
+        }
+        info(c);
+    }
+
+    /** Writes the issuer's certificate for this card, checks it reads back, and finishes loading. */
+    static void certifyWith(CardClient c, byte[] cert) {
+        byte[] cardId = c.identify().cardId;
+        if (!Arrays.equals(Arrays.copyOfRange(cert, 26, 42), cardId)) {
+            throw new IllegalStateException("the certificate is for another card");
+        }
+        if (!Arrays.equals(Arrays.copyOfRange(cert, 42, 98), c.publicKey())) {
+            throw new IllegalStateException("the certificate names another LMS key");
+        }
         c.certify(cert, 240);
         if (!Arrays.equals(c.certificate(), cert)) {
             throw new IllegalStateException("certificate read back differs");

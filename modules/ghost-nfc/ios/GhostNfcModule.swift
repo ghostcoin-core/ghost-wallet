@@ -25,6 +25,7 @@ public final class GhostNfcModule: Module {
   private let vault = CardVault()
   private lazy var relay = SealRelay(reader: reader)
   private let attestation = SealAttestation()
+  private lazy var javaCard = JavaCard(reader: reader)
 
   public func definition() -> ModuleDefinition {
     Name("GhostNfc")
@@ -43,6 +44,29 @@ public final class GhostNfcModule: Module {
 
     Function("endSession") { (alert: String?, error: String?) in
       self.reader.end(alert: alert, error: error)
+    }
+
+    // A Ghost Java card (JavaCard.swift): each flow runs natively in one
+    // tap, and resolves with public parts only, as hex. An Open's answer goes
+    // to the native core, never here.
+    AsyncFunction("javaCardCheck") { (alert: String, challenge: Data, confirmation: Data?, commitData: Bool, promise: Promise) in
+      self.javaCard.check(alert: alert, challenge: challenge, confirmation: confirmation, commitData: commitData, promise: promise)
+    }
+
+    // `make` is Make's input: amount 12, chain id 8, writer nonce 32, open-code hash 32.
+    AsyncFunction("javaCardFill") { (alert: String, make: Data, challenge: Data, confirmation: Data, promise: Promise) in
+      self.javaCard.fill(alert: alert, make: make, challenge: challenge, confirmation: confirmation, promise: promise)
+    }
+
+    AsyncFunction("javaCardOpen") {
+      (alert: String, code: Data, checkChallenge: Data, confirmation: Data, openChallenge: Data, promise: Promise) in
+      self.javaCard.open(
+        alert: alert, code: code, checkChallenge: checkChallenge, confirmation: confirmation, openChallenge: openChallenge,
+        promise: promise)
+    }
+
+    AsyncFunction("javaCardRefill") { (alert: String, code: Data, promise: Promise) in
+      self.javaCard.refill(alert: alert, code: code, promise: promise)
     }
 
     AsyncFunction("relayCheck") { (sealUrl: String, alert: String, promise: Promise) in

@@ -75,6 +75,8 @@ export type PageReadOptions = {
   complete?: boolean;
   /** Reads every page's notes and salts from the node again, whatever was kept. */
   freshNotes?: boolean;
+  /** The tree as of this block instead of the tip (a node without `anchorAt` cannot). */
+  atHeight?: number;
 };
 
 /** Where a node's pages are said to come from: its address. */
@@ -257,7 +259,14 @@ export async function readCoinTree(
   cache: PageCache,
   options: PageReadOptions = {},
 ): Promise<CoinTreeRead> {
-  const anchor: NodeAnchor = await node.anchor();
+  let anchor: NodeAnchor;
+  if (options.atHeight === undefined) {
+    anchor = await node.anchor();
+  } else if (node.anchorAt) {
+    anchor = await node.anchorAt(options.atHeight);
+  } else {
+    throw new Error('the node cannot read the coin tree at an earlier block');
+  }
   const roots = await ask(() => node.pageRoots(TREE_INDEX, anchor.hash));
   if (roots.length >= TREE_PAGES) {
     throw new Error(TREE_FULL_TEXT);

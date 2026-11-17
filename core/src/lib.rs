@@ -12,6 +12,7 @@ pub mod accounts;
 pub mod card;
 pub mod coin_tree;
 pub mod header_sync;
+pub mod java_card;
 #[cfg(target_os = "ios")]
 pub mod keychain;
 pub mod restore_scan;
@@ -39,6 +40,12 @@ pub use header_sync::{
     ChainState, DeviceConditions, HeaderChainConstants, HeaderProgress, HeaderRun, HeaderStore, HeaderSync,
     HeaderSyncError, PinnedKeyBlock, RECENT_HEADERS, ReorgEvent, RunBudget, RunProgress, RunSpent,
     SAVED_STATE_VERSION, StopReason, ThermalState,
+};
+pub use java_card::{
+    JavaCardCheckInput, JavaCardError, JavaCardIdentity, JavaCardOpenExpect, JavaCardStatement, JavaCardVerdict,
+    finish_java_card_open, finish_java_card_open_unchecked, forget_java_card_release, has_java_card_release, java_card_code_confirmation,
+    java_card_code_hash, java_card_identity, java_card_new_open_code, java_card_number, java_card_open_code, java_card_random,
+    verify_java_card_check,
 };
 pub use restore_scan::{
     AccountLookup, AccountState, DerivedAccount, GAP_LIMIT, RestoreError, RestoreLookup, RestoreResult,

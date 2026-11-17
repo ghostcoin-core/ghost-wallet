@@ -110,7 +110,7 @@ export async function startSealedCardVanish(
   commitData: Uint8Array,
 ): Promise<{ sequence: CorePaymentSequence; again: boolean }> {
   if (commitData.length !== COMMIT_DATA_BYTES) {
-    throw new Error('the Seal handed back commit data of the wrong size');
+    throw new Error('the card handed back commit data of the wrong size');
   }
   if (amountWei <= 0n) {
     throw new Error('a card is filled with more than nothing');

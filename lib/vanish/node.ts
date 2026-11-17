@@ -378,6 +378,8 @@ export type VanishNode = {
   chainId(): Promise<bigint>;
   /** The tip's header: its height, hash and `coinTreeRoot`. */
   anchor(): Promise<NodeAnchor>;
+  /** Block `height` as an anchor, like `anchor` for the tip. */
+  anchorAt?(height: number): Promise<NodeAnchor>;
   /** The page roots of coin tree `treeIndex` as of block `anchorHash`. */
   pageRoots(treeIndex: number, anchorHash: string): Promise<string[]>;
   /** Each set of pages (`ghost_getPageSet`), all in one batch. */
@@ -414,6 +416,15 @@ export type VanishNode = {
   sendRaw(bytes: string): Promise<string>;
 };
 
+function parseAnchor(raw: unknown): NodeAnchor {
+  const block = (raw ?? {}) as Record<string, unknown>;
+  return {
+    height: Number(quantity(block.number, 'block height')),
+    hash: hash(block.hash, 'block hash'),
+    coinTreeRoot: hash(block.coinTreeRoot, 'coin tree root'),
+  };
+}
+
 /** The node at `url`, through JSON-RPC batches. */
 export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
   const call = (calls: [string, unknown[]][]) => rpcBatch(url, calls, fetchImpl);
@@ -429,12 +440,15 @@ export function vanishNode(url: string, fetchImpl?: FetchLike): VanishNode {
     },
     async anchor() {
       const [raw] = await call([['eth_getBlockByNumber', ['latest', false]]]);
-      const block = (raw ?? {}) as Record<string, unknown>;
-      return {
-        height: Number(quantity(block.number, 'block height')),
-        hash: hash(block.hash, 'block hash'),
-        coinTreeRoot: hash(block.coinTreeRoot, 'coin tree root'),
-      };
+      return parseAnchor(raw);
+    },
+    async anchorAt(height) {
+      const [raw] = await call([['eth_getBlockByNumber', [hexQuantity(height), false]]]);
+      const anchor = parseAnchor(raw);
+      if (anchor.height !== height) {
+        throw new Error('the node sent another block than the one asked for');
+      }
+      return anchor;
     },
     async pageRoots(treeIndex, anchorHash) {
       const [roots] = await call([['ghost_getPageRoots', [COIN_KIND, hexQuantity(treeIndex), anchorHash]]]);

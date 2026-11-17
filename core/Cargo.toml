@@ -48,6 +48,14 @@ zeroize = "=1.9.1"
 # that verifies; nothing in src/ signs or holds a private key.
 p384 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
 sha2 = { version = "=0.11.1", default-features = false }
+# Ghost Java Cards (src/java_card.rs): the card's LMS seal statements (RFC 8554,
+# LMS_SHA256_M32_H10 with LMOTS_SHA256_N32_W4), verify only, and its Open
+# release, AES-256-CTR with an AES-CMAC tag. RustCrypto crates on the `aes`
+# above; no signature scheme, cipher or MAC is written here.
+lms-signature = { version = "=0.1.0-rc.2", default-features = false }
+ctr = { version = "=0.10.1", default-features = false }
+cmac = { version = "=0.8.0", default-features = false }
+signature = { version = "=3.0.0", default-features = false }
 
 [dev-dependencies]
 rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }

@@ -57,7 +57,87 @@ type GhostCoreBindings = RestoreBindings &
 } & Partial<VanishBindings> &
   Partial<SendBindings> &
   Partial<SealBindings> &
-  Partial<SealAttestationBindings>;
+  Partial<SealAttestationBindings> &
+  Partial<JavaCardBindings>;
+
+/**
+ * The Ghost Java card calls of core/src/java_card.rs, as generated. The
+ * card's certificate (SLH-DSA, against the issuer keys this app pins), its
+ * LMS seal statements, its commit data and an Open's release are all checked
+ * there. An Open's release reaches the core from the card module, never
+ * through JavaScript; JavaScript gets a verdict only.
+ */
+export type JavaCardBindings = {
+  /** 32 bytes from the system's random source: a challenge or a writer nonce. */
+  javaCardRandom(): ArrayBuffer;
+  /** A new open code from the system's random source, as 32 base32 characters: shown once, kept nowhere. */
+  javaCardNewOpenCode(): string;
+  /** The 20 bytes of an open code typed or scanned; throws for anything that is not one. */
+  javaCardOpenCode(text: string): ArrayBuffer;
+  javaCardCodeHash(code: ArrayBuffer): ArrayBuffer;
+  javaCardCodeConfirmation(code: ArrayBuffer, challenge: ArrayBuffer): ArrayBuffer;
+  /** The number printed on the card's face, from its id. */
+  javaCardNumber(cardId: ArrayBuffer): string;
+  /** Identify's answer, unsigned: for labelling a card only. */
+  javaCardIdentity(answer: ArrayBuffer): CoreJavaCardIdentity;
+  /** One Check tap: `refusal` is empty and `statement` set only when the card passed. */
+  verifyJavaCardCheck(input: CoreJavaCardCheckInput): CoreJavaCardVerdict;
+  /** Checks the held Open release makes `expect`'s coin and holds its key for the Summon; "" or a refusal code. */
+  finishJavaCardOpen(expect: CoreJavaCardOpenExpect): string;
+  /** For a card with no seal checks left: holds the release's key with no statement; the chain decides. */
+  finishJavaCardOpenUnchecked(cardId: ArrayBuffer, fill: number): string;
+  hasJavaCardRelease(): boolean;
+  forgetJavaCardRelease(): void;
+};
+
+export type CoreJavaCardIdentity = {
+  phase: number;
+  state: string;
+  cardId: ArrayBuffer;
+  cardNumber: string;
+  fill: number;
+  checksLeft: number;
+  certificateBytes: number;
+};
+
+export type CoreJavaCardCheckInput = {
+  certificate: ArrayBuffer;
+  statement: ArrayBuffer;
+  signature: ArrayBuffer;
+  challenge: ArrayBuffer;
+  commitData?: ArrayBuffer;
+  chainId: bigint;
+};
+
+export type CoreJavaCardStatement = {
+  cardId: ArrayBuffer;
+  cardNumber: string;
+  state: string;
+  fill: number;
+  chainId: bigint;
+  amountWei: string;
+  commitment: ArrayBuffer;
+  digest: ArrayBuffer;
+  marker: ArrayBuffer;
+  checksLeft: number;
+  openCode: string;
+  batch: number;
+  devIssuer: boolean;
+  leaf?: CoinLeaf;
+};
+
+export type CoreJavaCardVerdict = { refusal: string; statement?: CoreJavaCardStatement };
+
+export type CoreJavaCardOpenExpect = {
+  cardId: ArrayBuffer;
+  fill: number;
+  amountWei: string;
+  commitment: ArrayBuffer;
+  marker: ArrayBuffer;
+  digest: ArrayBuffer;
+  salt: ArrayBuffer;
+  note: ArrayBuffer;
+};
 
 /**
  * The Seal attestation check of core/src/seal_attestation.rs, as generated.
@@ -437,6 +517,15 @@ export function sealCore(): SealBindings {
     throw new Error('this build has no Sealed card checks in its native core');
   }
   return core as GhostCoreBindings & SealBindings;
+}
+
+/** The Ghost Java card calls; throws when this build has none in its native core. */
+export function javaCardCore(): JavaCardBindings {
+  const core = bindings();
+  if (typeof core.verifyJavaCardCheck !== 'function' || typeof core.finishJavaCardOpen !== 'function') {
+    throw new Error('this build has no Ghost card checks in its native core');
+  }
+  return core as GhostCoreBindings & JavaCardBindings;
 }
 
 /** The Seal attestation check; throws when this build has none in its native core. */
