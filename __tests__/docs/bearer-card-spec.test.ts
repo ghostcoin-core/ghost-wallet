@@ -172,7 +172,7 @@ describe('docs/bearer-card-spec.md', () => {
     expect(section(text, 2, 'Card type')).toMatch(/Java Card/);
   });
 
-  it('settles the J3R180: bytecode Keccak, SHA-256 digest, unsigned Make, CTR plus CMAC, H10', () => {
+  it('settles the J3R180: bytecode Keccak, SHA-256 digest, unsigned Make, Open in the clear, H10', () => {
     const card = flat(section(text, 2, 'Card type'));
     expect(card).toMatch(/\*\*The J3R180 qualifies\.\*\*/);
     expect(card).toMatch(/146 ms per permutation over iPhone NFC/);
@@ -185,7 +185,11 @@ describe('docs/bearer-card-spec.md', () => {
     expect(made).toMatch(/SHA3-256\("ghost-card-key" \|\| card random \|\| writer nonce\)/);
 
     const open = flat(section(design, 3, 'Opening is one-way'));
-    expect(open).toMatch(/AES-256-CTR and authenticated with AES-CMAC/);
+    expect(open).toMatch(/\*\*in the clear\*\*/);
+    expect(open).toMatch(/No AES is needed and none is used/);
+    expect(open).toMatch(/trusts nothing in the release until it recomputes/);
+    expect(open).toMatch(/LMS-signed statement/);
+    expect(open).not.toMatch(/AES-256-CTR|AES-CMAC|open code/);
 
     const lms = flat(section(text, 3, 'A quantum-safe attestation signature'));
     expect(lms).toMatch(/\*\*height 10\*\*/);
@@ -199,12 +203,36 @@ describe('docs/bearer-card-spec.md', () => {
     expect(states).toMatch(/\*\*Sealed \(fill N\)\*\*/);
     expect(states).toMatch(/What carries over between fills/);
     expect(section(design, 3, 'Refill: filling the card again').length).toBeGreaterThan(200);
-    expect(section(design, 3, 'The open code').length).toBeGreaterThan(200);
+    expect(section(design, 3, 'Bearer: the card is all it takes').length).toBeGreaterThan(200);
     const noSeal = flat(section(design, 3, 'Java Cards need no Seal'));
     expect(noSeal).toMatch(/No Ghost server takes part/);
     expect(noSeal).toMatch(/What the receiver still checks/);
     expect(flat(section(text, 4, 'The one exception: a Ghost Sealed card'))).toMatch(/closed to new fills/);
     expect(flat(section(text, 2, 'Red-team'))).toMatch(/refill a card whose fill was just opened/);
+  });
+
+  it('makes the card a pure bearer object: no open code, and states the trade-off', () => {
+    const design = section(text, 2, 'Design');
+    expect(headings(design, 3)).not.toContain('The open code');
+    const bearer = flat(section(design, 3, 'Bearer: the card is all it takes'));
+    expect(bearer).toMatch(/whoever holds the card can open it/);
+    expect(bearer).toMatch(/There is no open code, PIN or other secret/);
+    expect(bearer).toMatch(/Anyone who gets a tap on the card can empty it/);
+    expect(bearer).toMatch(/seed material crosses the radio in the clear/);
+    expect(bearer).toMatch(/writer knows only the nonce/);
+    expect(bearer).toMatch(/Receivers still \*\*Check\*\* before accepting/);
+
+    const check = flat(section(design, 3, 'Seal check on every tap'));
+    expect(check).toMatch(/"ghost-card-seal-v2"/);
+    expect(check).toMatch(/Whoever holds this card can open it, like cash\./);
+    expect(check).not.toMatch(/Open code wrong/);
+
+    // Nothing anywhere still asks for or describes an open code.
+    expect(text).not.toMatch(/AES-256-CTR|AES-CMAC|ghost-card-seal-v1|ghost-card-code|6982/);
+    expect(text.replace(/There is no open code/g, '')).not.toMatch(/open code/i);
+    const skim = attacks(section(text, 2, 'Red-team')).find((item) => /skim a card in a pocket/.test(item));
+    expect(skim).toBeDefined();
+    expect(flat(after(skim ?? '', '**Answer:**'))).toMatch(/a skimmer within a few centimetres can/);
   });
 
   it('names no ticket, link or build tool', () => {
