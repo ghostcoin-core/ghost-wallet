@@ -1,5 +1,7 @@
-// The app lock: Face ID, or the phone's passcode, through iOS's own prompt.
+// The app lock: Touch ID or Face ID, or the phone's passcode, through iOS's own prompt.
 import * as LocalAuthentication from 'expo-local-authentication';
+
+import { biometricName, type Biometric } from './biometric';
 
 export type UnlockOutcome =
   | { unlocked: true }
@@ -7,28 +9,35 @@ export type UnlockOutcome =
 
 const PROMPT = 'Unlock Ghost Wallet';
 
-/** What to tell the person after a prompt that did not unlock; null when they cancelled. */
-export function unlockMessage(error: LocalAuthentication.LocalAuthenticationError | undefined): string | null {
+/**
+ * What to tell the person after a prompt that did not unlock; null when they
+ * cancelled. `biometric` names the phone's own check.
+ */
+export function unlockMessage(
+  error: LocalAuthentication.LocalAuthenticationError | undefined,
+  biometric: Biometric | null = null,
+): string | null {
+  const name = biometricName(biometric);
   switch (error) {
     case 'user_cancel':
     case 'system_cancel':
     case 'app_cancel':
       return null;
     case 'lockout':
-      return 'Face ID is locked after too many tries. Use your passcode.';
+      return name ? `${name} is locked after too many tries. Use your passcode.` : 'Too many tries. Use your passcode.';
     case 'not_enrolled':
     case 'not_available':
-      return 'Face ID is not set up on this phone. Use your passcode.';
+      return name ? `${name} is not set up on this phone. Use your passcode.` : 'Use your passcode.';
     default:
       return 'Ghost Wallet is still locked. Try again.';
   }
 }
 
 /**
- * Shows the system prompt: Face ID where it is set up, with the passcode as
- * the fallback; the passcode alone where Face ID is not.
+ * Shows the system prompt: Touch ID or Face ID where it is set up, with the
+ * passcode as the fallback; the passcode alone where neither is.
  */
-export async function unlock(): Promise<UnlockOutcome> {
+export async function unlock(biometric: Biometric | null = null): Promise<UnlockOutcome> {
   let result: LocalAuthentication.LocalAuthenticationResult;
   try {
     result = await LocalAuthentication.authenticateAsync({
@@ -47,5 +56,5 @@ export async function unlock(): Promise<UnlockOutcome> {
   if (result.error === 'passcode_not_set') {
     return { unlocked: true };
   }
-  return { unlocked: false, message: unlockMessage(result.error) };
+  return { unlocked: false, message: unlockMessage(result.error, biometric) };
 }

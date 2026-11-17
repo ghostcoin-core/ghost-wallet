@@ -51,3 +51,25 @@ export function leftColumnWidth(window: {
       : (width - insetLeft - insetRight - 2 * padding - FOLD_GAP) / 2;
   return Math.max(0, left);
 }
+
+/** How a screen sits around the fold: one column, or two parts either side of it. */
+export type FoldMode = 'one' | 'sideways' | 'upright';
+
+/**
+ * Folded, or on a phone that does not fold: one column. Open and held
+ * sideways, the fold runs down the screen; open and held upright, across it.
+ */
+export function foldMode(width: number, height: number): FoldMode {
+  if (width < TWO_COLUMN_MIN_WIDTH) {
+    return 'one';
+  }
+  return width > height ? 'sideways' : 'upright';
+}
+
+/**
+ * Held upright, how tall the part above the fold is, so the gap after it sits
+ * on the fold: half the screen, less what is above that part and half the gap.
+ */
+export function topOfFoldHeight(height: number, above: number): number {
+  return Math.max(0, height / 2 - above - FOLD_GAP / 2);
+}

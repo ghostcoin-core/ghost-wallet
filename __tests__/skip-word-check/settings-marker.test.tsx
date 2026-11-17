@@ -137,7 +137,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(screen.queryByTestId('settings-backup-unchecked')).toBeNull();
   });
 
-  it('checks three words after Face ID and then clears the marker', async () => {
+  it('checks three words after the phone has checked it is you and then clears the marker', async () => {
     await backupStatusStore.setChecked(false);
     renderOn(device, CheckWordsScreen);
     expect(askedPositions()).toHaveLength(3);
@@ -148,7 +148,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(screen.getByTestId('check-words-message')).toHaveTextContent(/^These words do not match your backup\./);
     expect(backupStatusStore.unchecked()).toBe(true);
 
-    // Face ID refused: the words are not checked at all.
+    // The check refused: the words are not checked at all.
     mockCore.checkSavedAccountWords.mockClear();
     mockAuthenticate.mockResolvedValueOnce({ ok: false, reason: 'cancelled' });
     typeWords((position) => ` ${mockSavedWords[position - 1].toUpperCase()} `);

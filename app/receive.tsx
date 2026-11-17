@@ -1,33 +1,25 @@
-// Receive: the account's address as text and as a QR code, with copy and
-// share, after docs/mockups/receive.html.
+// Receive: the account's address as a QR code and as text, with copy and
+// share. On the open iPhone Duo the code sits one side of the fold and the
+// address and buttons the other.
 import * as Clipboard from 'expo-clipboard';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Share, StyleSheet, Text, View } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 
+import { FoldPage, useFold } from '../components/fold-page';
 import { colors, monoFont } from '../components/theme';
-import {
-  Button,
-  ButtonRow,
-  Column,
-  IconButton,
-  Logo,
-  NetworkBadge,
-  Panel,
-  Screen,
-  Spacer,
-  textStyles,
-  Title,
-} from '../components/ui';
+import { Button, ButtonRow, Panel, textStyles } from '../components/ui';
 import { accountZeroAddress } from '../lib/account';
-import { useLayout } from '../lib/layout';
 
-const PHONE_QR_SIZE = 240;
+const MIN_QR_SIZE = 120;
+const MAX_QR_SIZE = 280;
+const CARD_PADDING = 16;
+const QR_PADDING = 16;
 
 export default function ReceiveScreen() {
   const router = useRouter();
-  const { twoColumns, width } = useLayout();
+  const fold = useFold();
   const [address] = useState(accountZeroAddress);
   const [copied, setCopied] = useState(false);
 
@@ -39,9 +31,13 @@ export default function ReceiveScreen() {
     return () => clearTimeout(timer);
   }, [copied]);
 
-  // On the Duo open the code fills its half: the window less the side
-  // padding (2 x 32) and the fold gap (56), halved, less the QR's own margin.
-  const qrSize = twoColumns ? Math.floor((width - 64 - 56) / 2) - 32 : PHONE_QR_SIZE;
+  // The code fills the width of its part, less the card's and its own padding.
+  // Held upright it must also fit above the fold.
+  const fits = fold.firstWidth - 2 * (CARD_PADDING + QR_PADDING);
+  const qrSize = Math.max(
+    MIN_QR_SIZE,
+    Math.min(MAX_QR_SIZE, fits, fold.mode === 'upright' ? fold.topHeight - 2 * (CARD_PADDING + QR_PADDING) : fits),
+  );
 
   async function copy() {
     if (!address) {
@@ -62,73 +58,50 @@ export default function ReceiveScreen() {
     }
   }
 
-  return (
-    <Screen
-      testID="receive-screen"
-      wide="split"
-      topBar={
-        <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
-          <Spacer />
-          <NetworkBadge />
-          <Logo />
-        </>
-      }
-    >
-      <Column style={styles.centered}>
-        <Title>Receive GHOST</Title>
-        <Text style={[textStyles.body, styles.centerText]}>
-          Share this address. Only send GHOST on the test network to it.
-        </Text>
-        <View style={styles.qr} testID="receive-qr" accessibilityRole="image" accessibilityLabel="QR code of the address">
-          {address ? (
-            <QRCode value={address} size={qrSize} color={colors.ink} backgroundColor={colors.paper} ecl="M" />
-          ) : (
-            <Text style={textStyles.quiet}>No address in this build</Text>
-          )}
-        </View>
-      </Column>
-      <Column style={twoColumns ? styles.actionPane : undefined}>
-        <Panel style={styles.addressPanel}>
-          <Text style={textStyles.quiet}>Your address</Text>
-          <Text selectable style={styles.address} testID="receive-address">
-            {address ?? 'Address unavailable'}
-          </Text>
-        </Panel>
-        {twoColumns ? (
-          <View style={styles.highlight}>
-            <Text style={styles.highlightText}>Payments to this address show on Home once the node has them.</Text>
-          </View>
-        ) : null}
-        {twoColumns ? <Spacer /> : null}
-        <ButtonRow>
-          <Button label={copied ? 'Copied' : 'Copy'} icon="copy" onPress={copy} disabled={!address} testID="copy-address" />
-          <Button label="Share" icon="share" secondary onPress={share} disabled={!address} testID="share-address" />
-        </ButtonRow>
-      </Column>
-    </Screen>
+  const code = (
+    <View style={styles.card}>
+      <View style={styles.qr} testID="receive-qr" accessibilityRole="image" accessibilityLabel="QR code of the address">
+        {address ? (
+          <QRCode value={address} size={qrSize} color={colors.ink} backgroundColor={colors.paper} ecl="M" />
+        ) : (
+          <Text style={textStyles.quiet}>No address in this build</Text>
+        )}
+      </View>
+    </View>
   );
+
+  const details = (
+    <>
+      <Panel style={styles.addressPanel}>
+        <Text style={textStyles.quiet}>Your address</Text>
+        <Text selectable style={styles.address} testID="receive-address">
+          {address ?? 'Address unavailable'}
+        </Text>
+      </Panel>
+      <Text style={textStyles.quiet}>Anyone can pay you with this code or address. It is safe to share.</Text>
+      <ButtonRow>
+        <Button label={copied ? 'Copied' : 'Copy'} icon="copy" ink onPress={copy} disabled={!address} testID="copy-address" />
+        <Button label="Share" icon="share" secondary onPress={share} disabled={!address} testID="share-address" />
+      </ButtonRow>
+    </>
+  );
+
+  return <FoldPage testID="receive-screen" title="Receive" onBack={() => router.back()} first={code} second={details} />;
 }
 
 const styles = StyleSheet.create({
-  centered: {
-    alignItems: 'center',
-  },
-  centerText: {
-    textAlign: 'center',
+  card: {
+    alignSelf: 'center',
+    padding: CARD_PADDING,
+    borderRadius: 20,
+    backgroundColor: colors.violet,
   },
   qr: {
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 8,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 20,
+    padding: QR_PADDING,
+    borderRadius: 12,
     backgroundColor: colors.paper,
-  },
-  actionPane: {
-    alignSelf: 'stretch',
   },
   addressPanel: {
     padding: 16,
@@ -137,16 +110,6 @@ const styles = StyleSheet.create({
     marginTop: 6,
     color: colors.ink,
     fontFamily: monoFont,
-    fontSize: 15,
-  },
-  highlight: {
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    backgroundColor: colors.violetTint,
-  },
-  highlightText: {
-    color: colors.ink,
     fontSize: 15,
   },
 });

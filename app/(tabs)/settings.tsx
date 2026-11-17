@@ -1,5 +1,5 @@
 // Settings, after docs/mockups/settings.html: the account, the recovery words
-// (behind Face ID), "Backup not checked" when the word check was skipped,
+// (behind the phone's own check), "Backup not checked" when the word check was skipped,
 // app lock, the node, and the app version. Tapping the
 // version seven times opens the bench screen.
 import Constants from 'expo-constants';
@@ -21,6 +21,7 @@ import {
   Title,
 } from '../../components/ui';
 import { accountZeroAddress } from '../../lib/account';
+import { biometricName, useBiometric } from '../../lib/biometric';
 import { authenticate, authFailureMessage } from '../../lib/device-auth';
 import { shortAddress } from '../../lib/home/balance-format';
 import { useBackupUnchecked } from '../../lib/onboarding/backup-status';
@@ -79,6 +80,8 @@ function NodeEditor({ nodeUrl, onDone }: { nodeUrl: string; onDone: () => void }
 
 export default function SettingsScreen() {
   const router = useRouter();
+  const biometric = useBiometric();
+  const checkName = biometric?.enrolled ? biometricName(biometric) : null;
   const settings = useSettings();
   const backupUnchecked = useBackupUnchecked();
   const [address] = useState(accountZeroAddress);
@@ -90,7 +93,7 @@ export default function SettingsScreen() {
     setLockMessage(null);
     const result = await authenticate(on ? 'Turn on app lock' : 'Turn off app lock');
     if (!result.ok) {
-      setLockMessage(authFailureMessage(result.reason));
+      setLockMessage(authFailureMessage(result.reason, biometric));
       return;
     }
     await settingsStore.update({ appLock: on });
@@ -124,7 +127,7 @@ export default function SettingsScreen() {
         <Row
           icon="key"
           title="Recovery words"
-          detail="Shown after Face ID"
+          detail={`Shown after ${checkName ?? 'your passcode'}`}
           opens
           onPress={() => router.push('/recovery-words')}
           testID="settings-recovery-words"
@@ -205,7 +208,7 @@ export default function SettingsScreen() {
           first
           icon="lock"
           title="App lock"
-          detail="Face ID or passcode"
+          detail={checkName ? `${checkName} or passcode` : 'Passcode'}
           end={
             <Switch
               value={settings.appLock}

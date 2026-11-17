@@ -1,37 +1,24 @@
-// Send: an address (pasted or typed), an amount, the fee, a review, then Face
-// ID, after docs/mockups/send.html. Face ID passed, the send is saved through
-// the native core's step sequence and the payment screen takes over: it signs
+// Send: an address (pasted or typed), an amount, the fee, a review, then the
+// phone's own check (Touch ID, Face ID or the passcode). Once that passes, the
+// send is saved through the native core's step sequence and the payment screen takes over: it signs
 // the send in the native core (ML-DSA-44, the words never leave native code)
 // and sends it. With the test node out of reach the send is saved as queued
 // and goes out once the node answers, from the payment screen or from Home.
-// On the iPhone Duo open the form and the review sit side by side, with the
-// addresses sent to last under the form.
+// On the open iPhone Duo the form and the review sit either side of the fold,
+// with the addresses sent to last under the form.
 import * as Clipboard from 'expo-clipboard';
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { FoldPage, useFold } from '../components/fold-page';
 import { colors, monoFont } from '../components/theme';
-import {
-  Button,
-  Column,
-  IconButton,
-  Logo,
-  NetworkBadge,
-  Panel,
-  Row,
-  Screen,
-  SectionTitle,
-  Spacer,
-  TextButton,
-  textStyles,
-  Title,
-} from '../components/ui';
+import { Button, Panel, Row, SectionTitle, TextButton, textStyles } from '../components/ui';
 import { accountZeroAddress } from '../lib/account';
+import { useBiometric, withBiometric } from '../lib/biometric';
 import { authenticate, authFailureMessage } from '../lib/device-auth';
 import { formatGhost, formatWhen, shortAddress } from '../lib/home/balance-format';
 import { useHome, useNow } from '../lib/home/use-home';
-import { useLayout } from '../lib/layout';
 import { failureReason } from '../lib/node/failure-reason';
 import { quoteFee, recentRecipients, sendKit, startSend, type FeeQuote } from '../lib/send/send-payment';
 import { addressMessage, amountMessage, checkAddress, checkAmount, totalWei } from '../lib/send/validation';
@@ -42,7 +29,8 @@ type FeeState = { name: 'asking' } | { name: 'known'; quote: FeeQuote } | { name
 
 export default function SendScreen() {
   const router = useRouter();
-  const { twoColumns } = useLayout();
+  const open = useFold().mode !== 'one';
+  const biometric = useBiometric();
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
   const kit = useMemo(() => sendKit(nodeUrl), [nodeUrl]);
@@ -96,7 +84,7 @@ export default function SendScreen() {
     try {
       const auth = await authenticate(`Send ${formatGhost(amount.wei)} GHOST`);
       if (!auth.ok) {
-        setError(authFailureMessage(auth.reason));
+        setError(authFailureMessage(auth.reason, biometric));
         return;
       }
       const sequence = await startSend(kit, {
@@ -119,40 +107,29 @@ export default function SendScreen() {
   const toProblem = !to.ok && to.problem !== 'empty' ? addressMessage(to.problem) : null;
   const amountProblem = !amount.ok && amount.problem !== 'empty' ? amountMessage(amount.problem, balanceWei) : null;
 
-  return (
-    <Screen
-      testID="send-screen"
-      wide="split"
-      topBar={
-        <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
-          <Spacer />
-          <NetworkBadge />
-          <Logo />
-        </>
-      }
-    >
-      <Column>
-        <Title>Send GHOST</Title>
+  const form = (
+    <>
         <View style={styles.field}>
           <Text style={styles.label}>To</Text>
-          <TextInput
-            accessibilityLabel="To"
-            autoCapitalize="none"
-            autoComplete="off"
-            autoCorrect={false}
-            onChangeText={(text) => {
-              setToText(text);
-              setError(null);
-            }}
-            placeholder="0x…"
-            placeholderTextColor={colors.quiet}
-            spellCheck={false}
-            style={[styles.input, styles.addressInput]}
-            testID="send-to"
-            value={toText}
-          />
-          <TextButton label="Paste" onPress={() => void paste()} testID="send-paste" />
+          <View style={styles.toRow}>
+            <TextInput
+              accessibilityLabel="To"
+              autoCapitalize="none"
+              autoComplete="off"
+              autoCorrect={false}
+              onChangeText={(text) => {
+                setToText(text);
+                setError(null);
+              }}
+              placeholder="0x…"
+              placeholderTextColor={colors.quiet}
+              spellCheck={false}
+              style={[styles.input, styles.addressInput, styles.toInput]}
+              testID="send-to"
+              value={toText}
+            />
+            <TextButton label="Paste" onPress={() => void paste()} testID="send-paste" />
+          </View>
           {toProblem ? (
             <Text accessibilityLiveRegion="polite" style={[textStyles.quiet, styles.problem]} testID="send-to-problem">
               {toProblem}
@@ -186,7 +163,7 @@ export default function SendScreen() {
             </Text>
           ) : null}
         </View>
-        {twoColumns && recent.length > 0 ? (
+        {open && recent.length > 0 ? (
           <>
             <SectionTitle>Recent</SectionTitle>
             <Panel testID="send-recent">
@@ -205,10 +182,13 @@ export default function SendScreen() {
             </Panel>
           </>
         ) : null}
-      </Column>
-      <Column style={twoColumns ? styles.reviewPane : undefined}>
+    </>
+  );
+
+  const review = (
+    <>
         <SectionTitle>Review</SectionTitle>
-        {twoColumns && amount.ok && shownTo ? (
+        {open && amount.ok && shownTo ? (
           <View testID="send-review-hero">
             <Text style={textStyles.quiet}>You send</Text>
             <Text style={styles.hero}>
@@ -248,17 +228,18 @@ export default function SendScreen() {
             Send is not available in this build.
           </Text>
         ) : null}
-        {twoColumns ? <Spacer /> : null}
         <Button
-          label={busy ? 'Sending…' : 'Send with Face ID'}
+          label={busy ? 'Sending…' : withBiometric('Send', biometric)}
+          ink
           icon="lock"
           disabled={!ready}
           onPress={() => void send()}
           testID="send-confirm"
         />
-      </Column>
-    </Screen>
+    </>
   );
+
+  return <FoldPage testID="send-screen" title="Send" onBack={() => router.back()} first={form} second={review} />;
 }
 
 function SummaryRow({ label, first, testID, children }: { label: string; first?: boolean; testID: string; children: string }) {
@@ -310,8 +291,13 @@ const styles = StyleSheet.create({
   problem: {
     color: colors.danger,
   },
-  reviewPane: {
-    alignSelf: 'stretch',
+  toRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  toInput: {
+    flex: 1,
   },
   hero: {
     color: colors.ink,
@@ -334,13 +320,13 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.line,
   },
+  // The label keeps its width; a long value wraps beside it.
   summaryLabel: {
-    flex: 1,
     color: colors.body,
     fontSize: 16,
   },
   summaryValue: {
-    flexShrink: 1,
+    flex: 1,
     color: colors.ink,
     fontFamily: monoFont,
     fontSize: 14,

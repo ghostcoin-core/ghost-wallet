@@ -137,7 +137,7 @@ describe('opening the app', () => {
     expect(screen.getByRole('header', { name: 'Your coins, one among many.' })).toBeOnTheScreen();
   });
 
-  it('opens on the lock when an account is saved, and asks for Face ID', async () => {
+  it('opens on the lock when an account is saved, and asks the phone to check it is you', async () => {
     mockCore.saved = TEST_WORDS;
     mockAuthenticate.mockResolvedValue({ success: false, error: 'user_cancel' });
 

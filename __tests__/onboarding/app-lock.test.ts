@@ -45,8 +45,23 @@ describe('unlock', () => {
 });
 
 describe('unlockMessage', () => {
-  it('points to the passcode when Face ID is locked out or not set up', () => {
+  it('points to the passcode when the phone\'s check is locked out or not set up', () => {
     expect(unlockMessage('lockout')).toContain('Use your passcode');
     expect(unlockMessage('not_enrolled')).toContain('Use your passcode');
+  });
+
+  it('names the check the phone has, and neither when it is not known', () => {
+    const touch = { kind: 'touch', enrolled: true } as const;
+    const face = { kind: 'face', enrolled: true } as const;
+
+    expect(unlockMessage('lockout', touch)).toBe('Touch ID is locked after too many tries. Use your passcode.');
+    expect(unlockMessage('lockout', face)).toBe('Face ID is locked after too many tries. Use your passcode.');
+    expect(unlockMessage('not_enrolled', { kind: 'touch', enrolled: false })).toBe(
+      'Touch ID is not set up on this phone. Use your passcode.',
+    );
+    for (const error of ['lockout', 'not_enrolled'] as const) {
+      expect(unlockMessage(error)).not.toMatch(/Touch ID|Face ID/);
+      expect(unlockMessage(error, { kind: 'none', enrolled: false })).not.toMatch(/Touch ID|Face ID/);
+    }
   });
 });
