@@ -252,7 +252,7 @@ describe('Open', () => {
   it('checks the statement, then has the core recompute the coin from the card’s commit data', async () => {
     const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), ok());
     const result = await openGhostCard(d);
-    expect(result).toMatchObject({ ok: true, amountWei: 5n * 10n ** 18n, fill: 1 });
+    expect(result).toMatchObject({ ok: true, amountWei: 5n * 10n ** 18n, fill: 1, cardId: new Uint8Array(16).fill(0x11) });
     // The tap is sent this tap's challenge and nothing else: the card is all it takes.
     const open = d.calls.find((c) => c.name === 'open')!;
     expect(open.args.length).toBe(2);
@@ -305,8 +305,18 @@ describe('Open', () => {
 describe('Refill', () => {
   it('gives the card’s new blank fill', async () => {
     const d = deps(() => ghostTap({ identify: identify(0, 4) }), ok());
-    expect(await refillGhostCard(d)).toEqual({ ok: true, fill: 4, ms: 2100 });
-    expect(d.calls[0]).toEqual({ name: 'refill', args: [expect.any(String)] });
+    const cardId = new Uint8Array(16).fill(0x11);
+    expect(await refillGhostCard(d, { cardId, fill: 4 })).toEqual({ ok: true, fill: 4, ms: 2100 });
+    // Only the card checked, at its fill, may be refilled: the native flow is told which.
+    expect(d.calls[0]).toEqual({ name: 'refill', args: [expect.any(String), cardId, 4] });
+  });
+
+  it('refuses another card, which the native flow leaves untouched', async () => {
+    const d = deps(() => Promise.reject({ code: 'ERR_GHOST_CARD_OTHER_CARD' }), ok());
+    expect(await refillGhostCard(d, { cardId: new Uint8Array(16).fill(0x22), fill: 4 })).toEqual({
+      ok: false,
+      status: { kind: 'retry', message: 'This is not the card that was checked. Tap the same card again.' },
+    });
   });
 });
 

@@ -270,7 +270,7 @@ export async function fillGhostCard(deps: GhostCardDeps, amountWei: bigint): Pro
 
 export type OpenResult =
   /** The card's Phantom Key is in the native core, checked against the card's coin: Summon now. */
-  | { ok: true; amountWei: bigint | null; fill: number; cardNumber: string; ms: number }
+  | { ok: true; amountWei: bigint | null; cardId: Uint8Array; fill: number; cardNumber: string; ms: number }
   | { ok: false; status: GhostCardStatus | null };
 
 /**
@@ -307,7 +307,14 @@ export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
     }
     const refusal = core.finishJavaCardOpenUnchecked(buffer(card.certificate), deps.chainId, identity.fill);
     return refusal === ''
-      ? { ok: true, amountWei: null, fill: identity.fill, cardNumber: identity.cardNumber, ms: card.ms }
+      ? {
+          ok: true,
+          amountWei: null,
+          cardId: bytes(identity.cardId),
+          fill: identity.fill,
+          cardNumber: identity.cardNumber,
+          ms: card.ms,
+        }
       : { ok: false, status: { kind: 'not-genuine', reason: refusal } };
   }
 
@@ -345,24 +352,37 @@ export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
   if (refusal !== '') {
     return { ok: false, status: { kind: 'not-genuine', reason: refusal } };
   }
-  return { ok: true, amountWei: BigInt(s.amountWei), fill: s.fill, cardNumber: s.cardNumber, ms: card.ms };
+  return {
+    ok: true,
+    amountWei: BigInt(s.amountWei),
+    cardId: bytes(s.cardId),
+    fill: s.fill,
+    cardNumber: s.cardNumber,
+    ms: card.ms,
+  };
 }
 
 export type RefillResult = { ok: true; fill: number; ms: number } | { ok: false; status: GhostCardStatus | null };
 
+/** The card a Refill may touch: the opened one whose coin was seen spent. */
+export type RefillTarget = { cardId: Uint8Array; fill: number };
+
 /**
- * Refills the next card tapped: an opened card goes back to blank, ready for
- * the next Fill. The screens offer it only once the
+ * Refills the next card tapped: the opened card `target`, and no other, goes
+ * back to blank, ready for the next Fill. With no code on the card, its id
+ * and fill are what keep a Refill off another opened card whose coin is
+ * still unspent; the native flow refuses any other card before sending it
+ * anything. The screens offer it only once the
  * chain shows the opened coin's marker spent.
  */
-export async function refillGhostCard(deps: GhostCardDeps): Promise<RefillResult> {
+export async function refillGhostCard(deps: GhostCardDeps, target: RefillTarget): Promise<RefillResult> {
   const { core, nfc } = deps;
   if (!core || !nfc) {
     return { ok: false, status: { kind: 'retry', message: 'This iPhone cannot read Ghost cards in this build.' } };
   }
   let card: CardTap;
   try {
-    card = await tap(() => nfc.javaCardRefill(ALERT.refill));
+    card = await tap(() => nfc.javaCardRefill(ALERT.refill, target.cardId, target.fill));
   } catch (error) {
     return { ok: false, status: statusOfTapFailure(error) };
   }
@@ -370,6 +390,9 @@ export async function refillGhostCard(deps: GhostCardDeps): Promise<RefillResult
     return { ok: false, status: { kind: 'carry-to-claim' } };
   }
   const identity = core.javaCardIdentity(buffer(card.identify));
+  if (!sameBytes(identity.cardId, target.cardId)) {
+    return { ok: false, status: { kind: 'retry', message: 'This is not the card that was checked. Tap the same card again.' } };
+  }
   if (identity.state !== 'blank') {
     return { ok: false, status: { kind: 'retry', message: 'The card was not refilled. Tap it again.' } };
   }

@@ -105,15 +105,16 @@ export default function CheckCardScreen() {
     }
   }
 
-  /** An opened card whose coin is spent: Refill, then fill it again. */
+  /** The opened card just checked, whose coin is spent: Refill it (no other card), then fill it again. */
   async function reuse() {
-    if (busy !== null) {
+    const checked = result?.statement;
+    if (busy !== null || !checked) {
       return;
     }
     setBusy('refill');
     setError(null);
     try {
-      const refilled = await refillGhostCard(deps);
+      const refilled = await refillGhostCard(deps, { cardId: new Uint8Array(checked.cardId), fill: checked.fill });
       if (!refilled.ok) {
         if (refilled.status) {
           setResult({ status: refilled.status, statement: null, ms: null, commitData: null });

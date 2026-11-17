@@ -30,6 +30,10 @@ final class GhostCardNoChecksException: Exception {
   override var reason: String { "The card has too few seal checks left for this." }
 }
 
+final class GhostCardOtherCardException: Exception {
+  override var reason: String { "This is not the card that was checked." }
+}
+
 final class GhostCardFailedException: GenericException<String> {
   override var reason: String { "The card refused a command (\(param))." }
 }
@@ -178,20 +182,24 @@ final class JavaCard {
     }
   }
 
-  /// Refill: an opened card goes back to blank. A Refill that went through
-  /// before the card was lost is not sent again.
-  func refill(alert: String, promise: Promise) {
-    var startFill: UInt32?
+  /// Refill: the opened card `cardId` at `fill` (the one whose coin the app
+  /// saw spent) goes back to blank. Any other card, or this card at another
+  /// fill, is refused before anything is sent to it: with no code, the card
+  /// id and fill are what keep a Refill off a card whose coin is unspent. A
+  /// Refill that went through before the card was lost is not sent again.
+  func refill(alert: String, cardId: Data, fill: UInt32, promise: Promise) {
+    guard cardId.count == 16 else {
+      promise.reject(GhostCardBadInputException())
+      return
+    }
     run(alert: alert, working: "Clearing the card", steps: 4, promise: promise) { link, out in
       let id = try self.identify(link, out)
-      if startFill == nil {
-        guard id.state == 2 else { throw GhostCardStateException(Self.stateName(id.state)) }
-        startFill = id.fill
-      }
+      guard id.cardId == cardId else { throw GhostCardOtherCardException() }
       if id.state == 2 {
+        guard id.fill == fill else { throw GhostCardOtherCardException() }
         // No answer data; asked as a short Le so the command is never header-only.
         _ = try self.send(link, ins: 0x50, p1p2: 0, data: nil, le: 256)
-      } else if !(id.state == 0 && id.fill == startFill) {
+      } else if !(id.state == 0 && id.fill == fill) {
         throw GhostCardStateException(Self.stateName(id.state))
       }
       _ = try self.identify(link, out)

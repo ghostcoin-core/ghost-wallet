@@ -131,7 +131,14 @@ describe.each(DEVICE_NAMES)('on the %s', (device) => {
     const view = renderOn(device, OpenGhostCardScreen);
     expect(sideBySide('open-ghost-card-screen-content')).toBe(open);
     expect(screen.queryByLabelText('Open code')).toBeNull();
-    fake.open.mockResolvedValue({ ok: true, amountWei: 2n * 10n ** 18n, fill: 1, cardNumber: 'AAAA BBBB', ms: 2600 });
+    fake.open.mockResolvedValue({
+      ok: true,
+      amountWei: 2n * 10n ** 18n,
+      cardId: new Uint8Array(16).fill(7),
+      fill: 1,
+      cardNumber: 'AAAA BBBB',
+      ms: 2600,
+    });
     await press('ghost-open-run');
     expect(fake.open.mock.calls[0].length).toBe(1);
     expect(fake.calls).toEqual(['summon']);
@@ -141,7 +148,8 @@ describe.each(DEVICE_NAMES)('on the %s', (device) => {
     fake.refill.mockResolvedValue({ ok: true, fill: 1, ms: 300 });
     await press('ghost-open-refill');
     expect(fake.refill).toHaveBeenCalledTimes(1);
-    expect(fake.refill.mock.calls[0].length).toBe(1);
+    // Only the card just opened, at its fill.
+    expect(fake.refill.mock.calls[0][1]).toEqual({ cardId: new Uint8Array(16).fill(7), fill: 1 });
     await press('ghost-open-fill-next');
     expect(mockRouter.replace).toHaveBeenCalledWith('/fill-ghost-card');
   });

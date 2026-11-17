@@ -62,8 +62,9 @@ public final class GhostNfcModule: Module {
       self.javaCard.open(alert: alert, checkChallenge: checkChallenge, promise: promise)
     }
 
-    AsyncFunction("javaCardRefill") { (alert: String, promise: Promise) in
-      self.javaCard.refill(alert: alert, promise: promise)
+    // Only the opened card `cardId` at `fill`, whose coin was seen spent.
+    AsyncFunction("javaCardRefill") { (alert: String, cardId: Data, fill: UInt32, promise: Promise) in
+      self.javaCard.refill(alert: alert, cardId: cardId, fill: fill, promise: promise)
     }
 
     AsyncFunction("relayCheck") { (sealUrl: String, alert: String, promise: Promise) in

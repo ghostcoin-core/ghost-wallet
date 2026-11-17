@@ -47,7 +47,13 @@ export default function OpenGhostCardScreen() {
   const [busy, setBusy] = useState<'open' | 'summon' | 'refill' | null>(null);
   const [status, setStatus] = useState<GhostCardStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [opened, setOpened] = useState<{ amountWei: bigint | null; fill: number; cardNumber: string; ms: number } | null>(null);
+  const [opened, setOpened] = useState<{
+    amountWei: bigint | null;
+    cardId: Uint8Array;
+    fill: number;
+    cardNumber: string;
+    ms: number;
+  } | null>(null);
   const [sequence, setSequence] = useState<CorePaymentSequence | null>(null);
   const [refilled, setRefilled] = useState<{ fill: number; ms: number } | null>(null);
   const settled = useRef(false);
@@ -91,7 +97,13 @@ export default function OpenGhostCardScreen() {
       setStatus(result.status);
       return;
     }
-    setOpened({ amountWei: result.amountWei, fill: result.fill, cardNumber: result.cardNumber, ms: result.ms });
+    setOpened({
+      amountWei: result.amountWei,
+      cardId: result.cardId,
+      fill: result.fill,
+      cardNumber: result.cardNumber,
+      ms: result.ms,
+    });
     await summon();
   }
 
@@ -113,15 +125,15 @@ export default function OpenGhostCardScreen() {
     }
   }
 
-  /** Empties the card, then goes on to fill it again. */
+  /** Empties the card just opened (no other card), then goes on to fill it again. */
   async function refill() {
-    if (busy !== null) {
+    if (busy !== null || !opened) {
       return;
     }
     setBusy('refill');
     setError(null);
     try {
-      const result = await refillGhostCard(deps);
+      const result = await refillGhostCard(deps, { cardId: opened.cardId, fill: opened.fill });
       if (!result.ok) {
         if (result.status) {
           setStatus(result.status);
