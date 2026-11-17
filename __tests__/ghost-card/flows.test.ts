@@ -277,6 +277,21 @@ describe('Open', () => {
     expect(new Uint8Array(finish.note)).toEqual(new Uint8Array(380).fill(0x42));
   });
 
+  it('summons nothing from a card opened before whose coin is already taken off, and offers it for reuse', async () => {
+    const d = deps(() => ghostTap({ identify: identify(2), opened: true }), ok({ state: 'opened', leaf: undefined }), {
+      status: 'buried',
+      spent: true,
+      leaf: statement().leaf ?? null,
+    });
+    expect(await openGhostCard(d)).toEqual({
+      ok: false,
+      status: { kind: 'opened', fill: 1, cardNumber: 'CEIR CEIR', spent: true },
+      reuse: { cardId: new Uint8Array(16).fill(0x11), fill: 1 },
+    });
+    expect(d.calls.some((c) => c.name === 'finish')).toBe(false);
+    expect(d.calls.filter((c) => c.name === 'forget-release').length).toBe(2);
+  });
+
   it('holds nothing when the core finds the release is not the card’s coin', async () => {
     const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), ok(), undefined, 'open-not-the-coin');
     expect(await openGhostCard(d)).toEqual({

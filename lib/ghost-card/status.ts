@@ -80,7 +80,7 @@ export function ghostStatusDetail(status: GhostCardStatus): string | null {
       return 'Its coin was spent while the card says sealed. The card is broken: please report it.';
     case 'opened':
       return status.spent
-        ? 'Its coins were taken off. Whoever holds the card can fill it again.'
+        ? 'Its coins were already taken off, so there is nothing left to summon. Whoever holds the card can fill it again.'
         : 'Its key was released to whoever opened it.';
     case 'blank':
       return `Card ${status.cardNumber}. ${status.checksLeft} seal checks left. Ready to fill.`;

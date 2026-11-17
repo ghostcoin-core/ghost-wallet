@@ -271,7 +271,8 @@ export async function fillGhostCard(deps: GhostCardDeps, amountWei: bigint): Pro
 export type OpenResult =
   /** The card's Phantom Key is in the native core, checked against the card's coin: Summon now. */
   | { ok: true; amountWei: bigint | null; cardId: Uint8Array; fill: number; cardNumber: string; ms: number }
-  | { ok: false; status: GhostCardStatus | null };
+  /** `reuse` is set for a card opened before whose coin the chain shows taken off: it can only be reused. */
+  | { ok: false; status: GhostCardStatus | null; reuse?: RefillTarget };
 
 /**
  * Opens the next card tapped: the card's Check (and its commit data while
@@ -279,7 +280,8 @@ export type OpenResult =
  * to the native core. The core recomputes the coin from what the card released
  * and holds the key only when it is the coin the verified statement names.
  * For an opened card whose commit data is gone, the coin's salt and note come
- * from its leaf on chain.
+ * from its leaf on chain; when the chain shows that coin already taken off,
+ * nothing is summoned and the card is offered for reuse instead.
  */
 export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
   const { core, nfc } = deps;
@@ -328,12 +330,23 @@ export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
     return { ok: false, status: { kind: 'not-genuine', reason: 'open-refused' } };
   }
   let leaf = s.leaf ?? null;
-  if (!leaf) {
+  if (!leaf || s.state === 'opened') {
+    let chain: CoinOnChain | null = null;
     try {
-      leaf = (await deps.coinOnChain(bytes(s.commitment), bytes(s.marker))).leaf;
+      chain = await deps.coinOnChain(bytes(s.commitment), bytes(s.marker));
     } catch {
-      leaf = null;
+      chain = null;
     }
+    if (s.state === 'opened' && chain?.spent === true) {
+      // Opened before, and its coin already summoned: nothing left to take.
+      core.forgetJavaCardRelease();
+      return {
+        ok: false,
+        status: { kind: 'opened', fill: s.fill, cardNumber: s.cardNumber, spent: true },
+        reuse: { cardId: bytes(s.cardId), fill: s.fill },
+      };
+    }
+    leaf = leaf ?? chain?.leaf ?? null;
   }
   if (!leaf || !leaf.salt) {
     core.forgetJavaCardRelease();
