@@ -7,13 +7,19 @@
 //! cargo run --example card_issuer -- keygen <key file>
 //! cargo run --example card_issuer -- public-key <key file>
 //! cargo run --example card_issuer -- certify <key file> <card id> <LMS public key> <applet hash> <batch>
+//! cargo run --example card_issuer -- verify <certificate file> <chain id>
 //! ```
+//!
+//! `verify` checks a certificate (hex) exactly as the app does for a build on
+//! that chain, against the issuers the app pins.
 //!
 //! The key file holds SK.seed, SK.prf and PK.seed as 96 hex digits. Keep it
 //! off any repository. `certify` prints the certificate's hex.
 
 use ghost_client::slh_dsa::{N, SigningKey};
-use ghost_wallet_core::java_card::{CARD_ID_BYTES, CERT_DOMAIN, LMS_PUBLIC_KEY_BYTES, certificate_body};
+use ghost_wallet_core::java_card::{
+    CARD_ID_BYTES, CERT_DOMAIN, LMS_PUBLIC_KEY_BYTES, certificate_body, check_certificate, pinned_trust,
+};
 use rand::rngs::{StdRng, SysRng};
 use rand::{SeedableRng, TryRng};
 
@@ -69,6 +75,25 @@ fn main() {
             let mut cert = body.to_vec();
             cert.extend_from_slice(&signature[..]);
             println!("{}", hex(&cert));
+        }
+        Some("verify") => {
+            let text = std::fs::read_to_string(&args[1]).expect("read the certificate");
+            let text = text.trim();
+            let cert: Vec<u8> = (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex")).collect();
+            let chain: u64 = args[2].parse().expect("chain id");
+            match check_certificate(&cert, &pinned_trust(chain)) {
+                Ok(card) => println!(
+                    "passes: card {}, batch {}, applet {}, development issuer {}",
+                    hex(&card.card_id),
+                    card.batch,
+                    hex(&card.applet_hash),
+                    card.dev
+                ),
+                Err(refusal) => {
+                    println!("refused: {}", refusal.code());
+                    std::process::exit(1);
+                }
+            }
         }
         _ => {
             eprintln!("usage: card_issuer keygen|public-key|certify ...");
