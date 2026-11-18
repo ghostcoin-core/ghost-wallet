@@ -34,7 +34,17 @@ jest.mock(
 );
 
 const mockPush = jest.fn();
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
+// The screen's focus effect, kept so a test can leave the screen (its cleanup runs on blur).
+let mockLeaveScreen: (() => void) | undefined;
+jest.mock('expo-router', () => ({
+  useRouter: () => ({ push: mockPush, back: jest.fn() }),
+  useFocusEffect: (effect: () => (() => void) | undefined) => {
+    const { useEffect } = jest.requireActual('react');
+    useEffect(() => {
+      mockLeaveScreen = effect() ?? undefined;
+    }, [effect]);
+  },
+}));
 
 jest.mock('expo-clipboard', () => ({ setStringAsync: jest.fn(async () => true) }));
 
@@ -136,6 +146,34 @@ describe('RecoveryWordsScreen', () => {
     expect(screen.getAllByText('amount')).toHaveLength(2);
     expect(screen.getByText('unaware')).toBeOnTheScreen();
     expect(mockSavedAccountWords).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the words when the person leaves for another tab, and asks again on return', async () => {
+    mockAuthenticate.mockResolvedValue({ ok: true });
+    render(<RecoveryWordsScreen />);
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('show-recovery-words'));
+    });
+    expect(screen.getByTestId('recovery-words')).toBeOnTheScreen();
+
+    act(() => mockLeaveScreen?.());
+
+    expect(screen.queryByTestId('recovery-words')).toBeNull();
+    expect(screen.queryByText('abandon')).toBeNull();
+    expect(screen.getByTestId('show-recovery-words')).toBeOnTheScreen();
+  });
+
+  it('shows nothing when the check passes only after the person has left', async () => {
+    let pass: (result: { ok: true }) => void = () => {};
+    mockAuthenticate.mockReturnValue(new Promise((resolve) => (pass = resolve)));
+    render(<RecoveryWordsScreen />);
+    fireEvent.press(screen.getByTestId('show-recovery-words'));
+
+    act(() => mockLeaveScreen?.());
+    await act(async () => pass({ ok: true }));
+
+    expect(screen.queryByTestId('recovery-words')).toBeNull();
+    expect(mockSavedAccountWords).not.toHaveBeenCalled();
   });
 
   it('shows no words when the saved account cannot be read', async () => {
