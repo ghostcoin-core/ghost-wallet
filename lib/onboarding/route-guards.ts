@@ -32,6 +32,8 @@ export const ROUTE_GROUPS = {
   summon: 'wallet',
   'wipe-card': 'wallet',
   'older-cards': 'wallet',
+  'vanish-older-card': 'wallet',
+  'summon-older-card': 'wallet',
   // Ghost Sealed cards: Check, Fill and Open into the wallet. Fill pays from
   // the account and Open claims into it, so they are wallet screens.
   'check-card': 'wallet',

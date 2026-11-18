@@ -72,6 +72,15 @@ function resumeReveal(kit: PaymentKit | null): { sequence: CorePaymentSequence; 
 }
 
 export default function SummonScreen() {
+  return <SummonFlow />;
+}
+
+/**
+ * The Summon steps. A card is opened on Open a card, where it releases its
+ * coin in one tap. `olderCard` is the same screen opened from the older
+ * cards: there an NTAG 424 card this iPhone wrote is read for its key.
+ */
+export function SummonFlow({ olderCard = false }: { olderCard?: boolean }) {
   const router = useRouter();
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
@@ -231,6 +240,8 @@ export default function SummonScreen() {
   const status = proving ? 'proving' : payment?.status;
   const arrived = status ? arrivedText(status, kind) : null;
   const keyNeeded = payment?.needsKey && !key;
+  // A proof to make again needs its key read back: that is an older card, since a Ghost card is opened, not read.
+  const readsKey = olderCard || !!keyNeeded;
 
   // The key goes in the first part: left of the fold or above it on the open
   // iPhone Duo. What was found for it, and the progress, go in the second.
@@ -254,7 +265,7 @@ export default function SummonScreen() {
           </Text>
           {cards ? (
             <View style={styles.cardKey}>
-              <Text style={styles.cardKeyTitle}>The key is on a card</Text>
+              <Text style={styles.cardKeyTitle}>{readsKey ? 'The key is on an NTAG 424 card' : 'The key is on a card'}</Text>
               <Text style={styles.cardKeyBody}>
                 {tapping
                   ? 'Hold the card near the iPhone.'
@@ -264,12 +275,12 @@ export default function SummonScreen() {
                 accessibilityRole="button"
                 accessibilityState={{ disabled: unavailable || tapping }}
                 disabled={unavailable || tapping}
-                onPress={() => void tapCard()}
+                onPress={() => (readsKey ? void tapCard() : router.push('/open-ghost-card'))}
                 style={({ pressed }) => [styles.cardKeyButton, (pressed || unavailable || tapping) && styles.dimmed]}
-                testID="summon-tap-card"
+                testID={readsKey ? 'summon-tap-card' : 'summon-open-card'}
               >
                 <Icon name="tap" />
-                <Text style={styles.cardKeyButtonText}>Read a card</Text>
+                <Text style={styles.cardKeyButtonText}>{readsKey ? 'Read a card' : 'Open a card'}</Text>
               </Pressable>
             </View>
           ) : null}

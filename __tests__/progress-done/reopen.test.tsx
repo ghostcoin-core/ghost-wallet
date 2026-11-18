@@ -3,6 +3,7 @@ import type { ComponentType } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import SummonScreen from '../../app/(tabs)/(home)/summon';
+import VanishOlderCardScreen from '../../app/(tabs)/(cards)/vanish-older-card';
 import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import { encodeDetails } from '../../lib/vanish/payments';
 import { reopenPayment, resetPending } from '../../lib/vanish/pending';
@@ -188,7 +189,8 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   });
 
   it('returns to the card step of a card Vanish when left before the card was written', async () => {
-    const first = renderOn(device);
+    // Started from the older cards; Vanish opened from Home afterwards still returns to its card step.
+    const first = renderOn(device, VanishOlderCardScreen);
     mockCore.forgetPhantomKey.mockClear();
     fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
     mockPut.mockRejectedValueOnce(new CardCancelled());

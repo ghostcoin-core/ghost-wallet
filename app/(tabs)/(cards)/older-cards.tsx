@@ -36,6 +36,20 @@ export default function OlderCardsScreen() {
           testID="older-cards-open"
         />
         <Row
+          icon="key"
+          title="Vanish to a blank NTAG 424 card"
+          opens
+          onPress={() => router.push('/vanish-older-card')}
+          testID="older-cards-vanish"
+        />
+        <Row
+          icon="key"
+          title="Summon from an NTAG 424 card"
+          opens
+          onPress={() => router.push('/summon-older-card')}
+          testID="older-cards-summon"
+        />
+        <Row
           icon="cross"
           title="Wipe an NTAG 424 card"
           opens

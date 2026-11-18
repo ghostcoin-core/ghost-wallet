@@ -6,7 +6,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import VanishScreen from '../../app/(tabs)/(home)/vanish';
+import { VanishFlow } from '../../app/(tabs)/(home)/vanish';
 import { CARD_ONLY_TEXT } from '../../components/vanish-ui';
 import { buildNetwork } from '../../lib/network/build-network';
 import { heldKey, resetPending } from '../../lib/vanish/pending';
@@ -120,7 +120,8 @@ jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, wri
 jest.mock('../../lib/home/read-account', () => ({ readAccountZero: () => new Promise(() => {}) }));
 jest.mock('../../lib/home/history', () => ({ scanHistory: async () => [] }));
 const mockBack = jest.fn();
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: mockBack, replace: jest.fn() }) }));
+const mockPush = jest.fn();
+jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: mockBack, replace: jest.fn() }) }));
 
 const mockWindow = { width: 393, height: 852, scale: 3, fontScale: 1 };
 jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({ __esModule: true, default: () => mockWindow }));
@@ -132,13 +133,14 @@ const DEVICES = {
 } as const;
 type Device = keyof typeof DEVICES;
 
-function renderOn(device: Device) {
+/** The Vanish screen: as the older cards open it (the key written to an NTAG 424 card), or as Home does. */
+function renderOn(device: Device, olderCard = true) {
   const { width, height } = DEVICES[device];
   mockWindow.width = width;
   mockWindow.height = height;
   return render(
     <SafeAreaProvider initialMetrics={{ frame: { x: 0, y: 0, width, height }, insets: { top: 47, left: 0, right: 0, bottom: 34 } }}>
-      <VanishScreen />
+      <VanishFlow olderCard={olderCard} />
     </SafeAreaProvider>,
   );
 }
@@ -228,7 +230,7 @@ beforeEach(() => {
 
 describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   it('offers the card first, and the words second, on the amount step', async () => {
-    renderOn(device);
+    renderOn(device, false);
     await typeAmount();
     // Two choices, the card first and already chosen, and one button.
     const choices = screen.getAllByTestId(/^vanish-choose-(card|words)$/);
@@ -236,12 +238,28 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(choices[0]).toHaveTextContent(/On a card/);
     expect(choices[1]).toHaveTextContent(/24 words/);
     expect(choices.map((choice) => choice.props.accessibilityState.selected)).toEqual([true, false]);
-    expect(screen.getAllByTestId(/^vanish-make-(card|key)$/).map((button) => button.props.testID)).toEqual(['vanish-make-card']);
+    expect(screen.getAllByTestId(/^vanish-(fill-card|make-key)$/).map((button) => button.props.testID)).toEqual(['vanish-fill-card']);
 
     fireEvent.press(choices[1]);
 
-    expect(screen.getAllByTestId(/^vanish-make-(card|key)$/).map((button) => button.props.testID)).toEqual(['vanish-make-key']);
+    expect(screen.getAllByTestId(/^vanish-(fill-card|make-key)$/).map((button) => button.props.testID)).toEqual(['vanish-make-key']);
     expect(screen.getByTestId('vanish-choose-words').props.accessibilityState).toEqual({ selected: true });
+  });
+
+  it('a card chosen from Home goes to Fill a card with the amount: no key is made on this phone, no card is written', async () => {
+    renderOn(device, false);
+    await typeAmount();
+    expect(screen.queryByTestId('vanish-make-card')).toBeNull();
+    expect(renderedText()).not.toMatch(/NTAG/);
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('vanish-fill-card'));
+    });
+    expect(mockPush).toHaveBeenCalledTimes(1);
+    expect(mockPush.mock.calls[0][0].pathname).toBe('/fill-ghost-card');
+    expect(mockPush.mock.calls[0][0].params.amount).toBe(screen.getByTestId('vanish-amount').props.value);
+    expect(mockCore.prepareCardVanish).not.toHaveBeenCalled();
+    expect(mockCore.prepareVanish).not.toHaveBeenCalled();
+    expect(mockPut).not.toHaveBeenCalled();
   });
 
   it('offers only the words when this phone cannot read cards', async () => {
@@ -405,7 +423,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   });
 
   it('keeps the words Vanish as it was', async () => {
-    renderOn(device);
+    renderOn(device, false);
     await typeAmount();
     // Where the phone reads cards, the words are a choice made before Continue.
     const wordsChoice = screen.queryByTestId('vanish-choose-words');
