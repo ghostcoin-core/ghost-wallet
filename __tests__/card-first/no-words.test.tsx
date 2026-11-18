@@ -120,7 +120,7 @@ jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, wri
 jest.mock('../../lib/home/read-account', () => ({ readAccountZero: () => new Promise(() => {}) }));
 jest.mock('../../lib/home/history', () => ({ scanHistory: async () => [] }));
 const mockBack = jest.fn();
-jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: mockBack, replace: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: mockBack, replace: jest.fn() }) }));
 
 const mockWindow = { width: 393, height: 852, scale: 3, fontScale: 1 };
 jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({ __esModule: true, default: () => mockWindow }));

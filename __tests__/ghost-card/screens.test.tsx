@@ -69,7 +69,7 @@ jest.mock('../../modules/ghost-nfc', () => ({
   cardsSupported: () => true,
 }));
 const mockRouter = { push: jest.fn(), back: jest.fn(), replace: jest.fn() };
-jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => mockRouter }));
+jest.mock('expo-router', () => ({ useRouter: () => mockRouter }));
 jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({
   __esModule: true,
   default: () => require('../sealed-card/screen-kit').windowSize,

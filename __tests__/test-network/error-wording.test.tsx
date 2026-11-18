@@ -79,7 +79,7 @@ jest.mock('../../lib/vanish/actions', () => ({
   startReveal: jest.fn(),
 }));
 jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, write: async () => {} }) }));
-jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
 
 function renderScreen(Screen: ComponentType) {
   return render(

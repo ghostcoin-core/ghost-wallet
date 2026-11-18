@@ -186,7 +186,7 @@ describe('the faucet endpoint in scripts/test-chain.sh', () => {
 
 // Home on the test network: the button, the faucet and the balance after it.
 const mockPush = jest.fn();
-jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
 jest.mock(
   '../../modules/ghost-core/src/index',
   () => ({ savedAccountZeroAddress: () => '0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd' }),

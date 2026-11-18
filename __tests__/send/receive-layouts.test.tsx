@@ -8,7 +8,7 @@ import { FOLD_GAP } from '../../lib/layout';
 const ADDRESS = '0x00000000000000000000000000000000000000aa';
 
 jest.mock('../../lib/account', () => ({ accountZeroAddress: () => ADDRESS }));
-jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useRouter: () => ({ back: jest.fn() }) }));
 jest.mock('expo-clipboard', () => ({ setStringAsync: jest.fn() }));
 jest.mock('react-native-qrcode-svg', () => {
   const { View } = jest.requireActual('react-native');

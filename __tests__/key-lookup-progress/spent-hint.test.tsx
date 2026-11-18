@@ -33,7 +33,7 @@ jest.mock('../../modules/ghost-nfc', () => ({
 }));
 
 jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, write: async () => {} }) }));
-jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
 
 const HINT_TEXT = 'Not checked: these coins may have been summoned already.';
 
