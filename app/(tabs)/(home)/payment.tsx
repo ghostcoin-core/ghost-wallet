@@ -8,18 +8,18 @@ import { useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { SendProgress } from '../components/send-ui';
-import { colors, monoFont } from '../components/theme';
-import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, TextButton, textStyles } from '../components/ui';
-import { formatGhost, formatWhen, shortAddress } from '../lib/home/balance-format';
-import { useNow } from '../lib/home/use-home';
-import { useLayout } from '../lib/layout';
-import { isFinalSend, sendHeadline, sendStatusDetail } from '../lib/send/payment-status';
-import { sendDetailsOf, sendKit, type SendKit } from '../lib/send/send-payment';
-import { useSendPayment } from '../lib/send/use-send-payment';
-import { useSettings } from '../lib/settings/settings';
-import { newestShared, openShared, takeReopened } from '../lib/vanish/pending';
-import type { CorePaymentSequence } from '../modules/ghost-core';
+import { SendProgress } from '../../../components/send-ui';
+import { colors, monoFont } from '../../../components/theme';
+import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, TextButton, textStyles } from '../../../components/ui';
+import { formatGhost, formatWhen, shortAddress } from '../../../lib/home/balance-format';
+import { useNow } from '../../../lib/home/use-home';
+import { useLayout } from '../../../lib/layout';
+import { isFinalSend, sendHeadline, sendStatusDetail } from '../../../lib/send/payment-status';
+import { sendDetailsOf, sendKit, type SendKit } from '../../../lib/send/send-payment';
+import { useSendPayment } from '../../../lib/send/use-send-payment';
+import { useSettings } from '../../../lib/settings/settings';
+import { newestShared, openShared, takeReopened } from '../../../lib/vanish/pending';
+import type { CorePaymentSequence } from '../../../modules/ghost-core';
 
 /** The send Home or the Send screen asked for, or else the newest one. */
 function resumeSend(kit: SendKit | null): CorePaymentSequence | null {

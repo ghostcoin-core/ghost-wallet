@@ -6,9 +6,9 @@
 // or shows a code: the card is a bearer object.
 import { act, fireEvent, screen } from '@testing-library/react-native';
 
-import CheckCardScreen from '../../app/check-card';
-import FillGhostCardScreen from '../../app/fill-ghost-card';
-import OpenGhostCardScreen from '../../app/open-ghost-card';
+import CheckCardScreen from '../../app/(tabs)/(cards)/check-card';
+import FillGhostCardScreen from '../../app/(tabs)/(cards)/fill-ghost-card';
+import OpenGhostCardScreen from '../../app/(tabs)/(cards)/open-ghost-card';
 import { DEVICE_NAMES, renderOn, sideBySide } from '../sealed-card/screen-kit';
 
 const fake = {

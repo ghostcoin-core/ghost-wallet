@@ -7,8 +7,8 @@
 // once it is sent.
 import { act, fireEvent, screen } from '@testing-library/react-native';
 
-import FillCardScreen from '../../app/fill-card';
-import OpenCardScreen from '../../app/open-card';
+import FillCardScreen from '../../app/(tabs)/(cards)/fill-card';
+import OpenCardScreen from '../../app/(tabs)/(cards)/open-card';
 import { pinRule, triesText } from '../../lib/seal/pin';
 import { GHOST, resetWorld, type World } from './fake-seal';
 import { DEVICE_NAMES, fakeKit, renderOn } from './screen-kit';

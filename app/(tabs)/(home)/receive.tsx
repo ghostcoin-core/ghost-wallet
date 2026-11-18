@@ -2,15 +2,14 @@
 // share. On the open iPhone Duo the code sits one side of the fold and the
 // address and buttons the other.
 import * as Clipboard from 'expo-clipboard';
-import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Share, StyleSheet, Text, View } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
 
-import { FoldPage, useFold } from '../components/fold-page';
-import { colors, monoFont } from '../components/theme';
-import { Button, ButtonRow, Panel, textStyles } from '../components/ui';
-import { accountZeroAddress } from '../lib/account';
+import { FoldPage, useFold } from '../../../components/fold-page';
+import { colors, monoFont } from '../../../components/theme';
+import { Button, ButtonRow, Panel, textStyles } from '../../../components/ui';
+import { accountZeroAddress } from '../../../lib/account';
 
 const MIN_QR_SIZE = 120;
 const MAX_QR_SIZE = 280;
@@ -18,7 +17,6 @@ const CARD_PADDING = 16;
 const QR_PADDING = 16;
 
 export default function ReceiveScreen() {
-  const router = useRouter();
   const fold = useFold();
   const [address] = useState(accountZeroAddress);
   const [copied, setCopied] = useState(false);
@@ -86,7 +84,7 @@ export default function ReceiveScreen() {
     </>
   );
 
-  return <FoldPage testID="receive-screen" title="Receive" onBack={() => router.back()} first={code} second={details} />;
+  return <FoldPage testID="receive-screen" title="Receive" first={code} second={details} />;
 }
 
 const styles = StyleSheet.create({

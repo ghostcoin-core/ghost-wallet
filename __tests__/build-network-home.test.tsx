@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react-native';
 
-import HomeScreen from '../app/(tabs)/home';
+import HomeScreen from '../app/(tabs)/(home)/home';
 import { buildNetwork } from '../lib/network/build-network';
 
 jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));

@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import CardsScreen from '../../app/(tabs)/cards';
+import CardsScreen from '../../app/(tabs)/(cards)/cards';
 import { FOLD_GAP } from '../../lib/layout';
 
 jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn() }) }));

@@ -2,10 +2,10 @@ import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
 import { Share } from 'react-native';
 
-import HomeScreen from '../app/(tabs)/home';
-import ReceiveScreen from '../app/receive';
-import RecoveryWordsScreen from '../app/recovery-words';
-import SettingsScreen from '../app/(tabs)/settings';
+import HomeScreen from '../app/(tabs)/(home)/home';
+import ReceiveScreen from '../app/(tabs)/(home)/receive';
+import RecoveryWordsScreen from '../app/(tabs)/(settings)/recovery-words';
+import SettingsScreen from '../app/(tabs)/(settings)/settings';
 import { TEST_WORDS } from '../modules/ghost-core/test-words';
 
 // Account 0 (rescue-key scheme 0x0003) of Ghost's counting-bytes test seed,

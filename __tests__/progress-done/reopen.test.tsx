@@ -2,8 +2,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import type { ComponentType } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import SummonScreen from '../../app/summon';
-import VanishScreen from '../../app/vanish';
+import SummonScreen from '../../app/(tabs)/(home)/summon';
+import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import { encodeDetails } from '../../lib/vanish/payments';
 import { reopenPayment, resetPending } from '../../lib/vanish/pending';
 import { CardCancelled } from '../../modules/ghost-nfc';
@@ -131,10 +131,8 @@ function typeCheckWords() {
   }
 }
 
-/** Leaves with Back, as the person would, and closes the screen. */
+/** Leaves with the system's Back, which closes the screen. */
 function leave(view: ReturnType<typeof render>) {
-  fireEvent.press(screen.getByTestId('back'));
-  expect(mockBack).toHaveBeenCalled();
   view.unmount();
 }
 

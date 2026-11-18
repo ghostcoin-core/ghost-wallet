@@ -1,7 +1,6 @@
 // 4. Import (docs/mockups/import.html): 24 boxes, or all 24 words pasted into
 // one. The native core says which words are in the word list, checks the
 // whole phrase and saves it to the Keychain.
-import { useRouter } from 'expo-router';
 import { useRef, useState } from 'react';
 import { StyleSheet, Text, View, type TextInputInstance } from 'react-native';
 
@@ -31,7 +30,6 @@ function knownWord(word: string): boolean {
 }
 
 export default function ImportScreen() {
-  const router = useRouter();
   const session = useSession();
   const twoColumn = useScreenLayout() === 'two-column';
   const [fields, setFields] = useState(emptyFields);
@@ -78,7 +76,7 @@ export default function ImportScreen() {
     <Screen
       footer={<Button disabled={!status.ready} label="Open my account" onPress={open} testID="import-open" />}
       label="Enter your 24 words"
-      onBack={() => router.back()}
+      topBar
       testID="import-screen"
       wide
     >

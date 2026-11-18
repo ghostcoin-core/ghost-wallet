@@ -9,24 +9,24 @@ import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { GhostCardStatusPanel } from '../components/ghost-card-ui';
-import { CardBusy } from '../components/seal-ui';
-import { colors, monoFont } from '../components/theme';
-import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { PaymentExit, PaymentProgress } from '../components/vanish-ui';
-import { accountZeroAddress } from '../lib/account';
-import { ghostCardDeps } from '../lib/ghost-card/deps';
-import { fillGhostCard } from '../lib/ghost-card/flows';
-import type { GhostCardStatus } from '../lib/ghost-card/status';
-import { failureReason } from '../lib/node/failure-reason';
-import { ghostText } from '../lib/seal/card-status';
-import { useSettings } from '../lib/settings/settings';
-import { minimumVanish, signVanishAgain, startSealedCardVanish } from '../lib/vanish/actions';
-import { parseGhostAmount } from '../lib/vanish/amount';
-import { paymentsChanged, shared } from '../lib/vanish/pending';
-import { screenDone } from '../lib/vanish/status-mapping';
-import { paymentKit, usePayment } from '../lib/vanish/use-payment';
-import type { CorePaymentSequence } from '../modules/ghost-core';
+import { GhostCardStatusPanel } from '../../../components/ghost-card-ui';
+import { CardBusy } from '../../../components/seal-ui';
+import { colors, monoFont } from '../../../components/theme';
+import { Button, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
+import { PaymentExit, PaymentProgress } from '../../../components/vanish-ui';
+import { accountZeroAddress } from '../../../lib/account';
+import { ghostCardDeps } from '../../../lib/ghost-card/deps';
+import { fillGhostCard } from '../../../lib/ghost-card/flows';
+import type { GhostCardStatus } from '../../../lib/ghost-card/status';
+import { failureReason } from '../../../lib/node/failure-reason';
+import { ghostText } from '../../../lib/seal/card-status';
+import { useSettings } from '../../../lib/settings/settings';
+import { minimumVanish, signVanishAgain, startSealedCardVanish } from '../../../lib/vanish/actions';
+import { parseGhostAmount } from '../../../lib/vanish/amount';
+import { paymentsChanged, shared } from '../../../lib/vanish/pending';
+import { screenDone } from '../../../lib/vanish/status-mapping';
+import { paymentKit, usePayment } from '../../../lib/vanish/use-payment';
+import type { CorePaymentSequence } from '../../../modules/ghost-core';
 
 /** Below this many seal checks the writer is told the card is near its end. */
 const LOW_CHECKS = 64;
@@ -117,7 +117,6 @@ export default function FillGhostCardScreen() {
       wide="columns"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />

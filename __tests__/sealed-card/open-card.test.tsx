@@ -6,8 +6,8 @@
 // once, and the phone key is wiped only once that Claim settles.
 import { act, fireEvent, screen } from '@testing-library/react-native';
 
-import CheckCardScreen from '../../app/check-card';
-import OpenCardScreen from '../../app/open-card';
+import CheckCardScreen from '../../app/(tabs)/(cards)/check-card';
+import OpenCardScreen from '../../app/(tabs)/(cards)/open-card';
 import { GHOST, hexOf, resetWorld, type World } from './fake-seal';
 import { ACCOUNT, DEVICE_NAMES, fakeKit, isRed, renderOn, sideBySide } from './screen-kit';
 

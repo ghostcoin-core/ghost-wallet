@@ -2,8 +2,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import type { ComponentType } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import SummonScreen from '../../app/summon';
-import VanishScreen from '../../app/vanish';
+import SummonScreen from '../../app/(tabs)/(home)/summon';
+import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import { PaymentProgress } from '../../components/vanish-ui';
 import { failureReason } from '../../lib/node/failure-reason';
 import { fromNode, rpcBatch, type FetchLike } from '../../lib/node/rpc';

@@ -1,8 +1,8 @@
 // The older NTAG 424 cards: fill one, open one into the wallet, or wipe one.
 import { useRouter } from 'expo-router';
 
-import { colors } from '../components/theme';
-import { IconButton, NetworkBadge, Panel, Row, Screen, Spacer, Title } from '../components/ui';
+import { colors } from '../../../components/theme';
+import { NetworkBadge, Panel, Row, Screen, Spacer, Title } from '../../../components/ui';
 
 export default function OlderCardsScreen() {
   const router = useRouter();
@@ -13,7 +13,6 @@ export default function OlderCardsScreen() {
       background="mist"
       topBar={
         <>
-          <IconButton icon="back" label="Back" background={colors.mist} onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge background={colors.paper} />
         </>

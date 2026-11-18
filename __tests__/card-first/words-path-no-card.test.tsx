@@ -6,7 +6,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import VanishScreen from '../../app/vanish';
+import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import { buildNetwork } from '../../lib/network/build-network';
 import { heldKey, holdVanish, resetPending } from '../../lib/vanish/pending';
 
@@ -195,7 +195,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     await reachCheck();
     const held = heldKey();
     expect(held).toEqual(expect.objectContaining({ step: 'check' }));
-    fireEvent.press(screen.getByTestId('back'));
+    // Leaving with the system's Back closes the screen.
     first.unmount();
     // A words key left at a card step by an older screen: it is not card-only.
     holdVanish({ id: held!.id, step: 'card', words: [], positions: [3, 9, 17], checked: false });

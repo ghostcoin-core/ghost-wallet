@@ -3,7 +3,6 @@
 // all three match, saves the account to the Keychain. The person may tick
 // "Skip the check" instead (unticked every time): the core then saves the
 // account unchecked, and Settings says the backup is not checked.
-import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
@@ -24,7 +23,6 @@ function checkMessage(wrong: number[]): string {
 }
 
 export default function CheckScreen() {
-  const router = useRouter();
   const session = useSession();
   const twoColumn = useScreenLayout() === 'two-column';
   const [positions] = useState(() => pickCheckPositions());
@@ -175,7 +173,7 @@ export default function CheckScreen() {
     <Screen
       footer={twoColumn ? undefined : confirmButton}
       label="Check your backup words"
-      onBack={() => router.back()}
+      topBar
       testID="check-screen"
       wide
     >

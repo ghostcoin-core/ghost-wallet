@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react-native';
 
-import CardsScreen from '../../app/(tabs)/cards';
-import OlderCardsScreen from '../../app/older-cards';
+import CardsScreen from '../../app/(tabs)/(cards)/cards';
+import OlderCardsScreen from '../../app/(tabs)/(cards)/older-cards';
 
 const mockPush = jest.fn();
 const mockBack = jest.fn();
@@ -57,11 +57,10 @@ describe('Older cards', () => {
     expect(mockPush.mock.calls).toEqual([[route]]);
   });
 
-  it('goes back', () => {
+  it('draws no Back button of its own: the system bar has it', () => {
     render(<OlderCardsScreen />);
 
-    fireEvent.press(screen.getByTestId('back'));
-
-    expect(mockBack).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('back')).toBeNull();
+    expect(screen.queryByLabelText('Back')).toBeNull();
   });
 });

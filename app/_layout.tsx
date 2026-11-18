@@ -3,6 +3,7 @@ import { Stack, usePathname, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 
+import { pushedScreenOptions } from '../components/stack-options';
 import { colors } from '../components/theme';
 import { leftOnClosedScreen, openGroups } from '../lib/onboarding/route-guards';
 import { SessionProvider, useSession } from '../lib/session';
@@ -29,29 +30,15 @@ function GuardedStack() {
     <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.paper } }}>
       <Stack.Protected guard={open.onboarding}>
         <Stack.Screen name="index" />
-        <Stack.Screen name="backup" />
-        <Stack.Screen name="check" />
-        <Stack.Screen name="import" />
+        <Stack.Screen name="backup" options={pushedScreenOptions} />
+        <Stack.Screen name="check" options={pushedScreenOptions} />
+        <Stack.Screen name="import" options={pushedScreenOptions} />
       </Stack.Protected>
       <Stack.Protected guard={open.lock}>
         <Stack.Screen name="lock" options={{ gestureEnabled: false }} />
       </Stack.Protected>
       <Stack.Protected guard={open.wallet}>
         <Stack.Screen name="(tabs)" options={{ gestureEnabled: false }} />
-        <Stack.Screen name="send" />
-        <Stack.Screen name="payment" />
-        <Stack.Screen name="receive" />
-        <Stack.Screen name="recovery-words" />
-        <Stack.Screen name="check-words" />
-        <Stack.Screen name="vanish" />
-        <Stack.Screen name="summon" />
-        <Stack.Screen name="wipe-card" />
-        <Stack.Screen name="older-cards" />
-        <Stack.Screen name="check-card" />
-        <Stack.Screen name="fill-card" />
-        <Stack.Screen name="open-card" />
-        <Stack.Screen name="fill-ghost-card" />
-        <Stack.Screen name="open-ghost-card" />
       </Stack.Protected>
       <Stack.Protected guard={open.developer}>
         <Stack.Screen name="bench" options={{ contentStyle: { backgroundColor: '#0A0A12' } }} />

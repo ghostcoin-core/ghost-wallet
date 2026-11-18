@@ -4,15 +4,17 @@ import { act, fireEvent, renderRouter, screen, waitFor } from 'expo-router/testi
 import BackupScreen from '../../app/backup';
 import BenchScreen from '../../app/bench';
 import CheckScreen from '../../app/check';
-import CheckWordsScreen from '../../app/check-words';
+import CheckWordsScreen from '../../app/(tabs)/(settings)/check-words';
+import HomeTab from '../../app/(tabs)/(home)/_layout';
+import SettingsTab from '../../app/(tabs)/(settings)/_layout';
 import TabsLayout from '../../app/(tabs)/_layout';
-import HomeScreen from '../../app/(tabs)/home';
+import HomeScreen from '../../app/(tabs)/(home)/home';
 import ImportScreen from '../../app/import';
 import WelcomeScreen from '../../app/index';
 import LockScreen from '../../app/lock';
-import ReceiveScreen from '../../app/receive';
-import RecoveryWordsScreen from '../../app/recovery-words';
-import SettingsScreen from '../../app/(tabs)/settings';
+import ReceiveScreen from '../../app/(tabs)/(home)/receive';
+import RecoveryWordsScreen from '../../app/(tabs)/(settings)/recovery-words';
+import SettingsScreen from '../../app/(tabs)/(settings)/settings';
 import RootLayout from '../../app/_layout';
 import { TEST_WORDS } from '../../modules/ghost-core/test-words';
 
@@ -94,11 +96,13 @@ const APP = {
   import: ImportScreen,
   lock: LockScreen,
   '(tabs)/_layout': TabsLayout,
-  '(tabs)/home': HomeScreen,
-  receive: ReceiveScreen,
-  '(tabs)/settings': SettingsScreen,
-  'recovery-words': RecoveryWordsScreen,
-  'check-words': CheckWordsScreen,
+  '(tabs)/(home)/_layout': HomeTab,
+  '(tabs)/(home)/home': HomeScreen,
+  '(tabs)/(home)/receive': ReceiveScreen,
+  '(tabs)/(settings)/_layout': SettingsTab,
+  '(tabs)/(settings)/settings': SettingsScreen,
+  '(tabs)/(settings)/recovery-words': RecoveryWordsScreen,
+  '(tabs)/(settings)/check-words': CheckWordsScreen,
   bench: BenchScreen,
 };
 
@@ -259,7 +263,8 @@ describe('create, back up, check, home', () => {
     await screen.findByTestId('backup-screen');
     expect(mockCore.held).not.toBeNull();
 
-    fireEvent.press(screen.getByTestId('back-button'));
+    // The system's Back, which the navigation bar draws.
+    act(() => router.back());
 
     expect(await screen.findByTestId('welcome-screen')).toBeOnTheScreen();
     await waitFor(() => expect(mockCore.held).toBeNull());

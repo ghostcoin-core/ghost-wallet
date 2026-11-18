@@ -5,7 +5,7 @@
 // "Can't verify this card" in red with no amount.
 import { act, fireEvent, screen } from '@testing-library/react-native';
 
-import CheckCardScreen from '../../app/check-card';
+import CheckCardScreen from '../../app/(tabs)/(cards)/check-card';
 import { GHOST, resetWorld, type World } from './fake-seal';
 import { DEVICE_NAMES, isRed, renderOn, sideBySide } from './screen-kit';
 

@@ -11,24 +11,24 @@ import { useRouter } from 'expo-router';
 import { useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
-import { GhostCardStatusPanel } from '../components/ghost-card-ui';
-import { CardBusy, CardStatusPanel } from '../components/seal-ui';
-import { colors } from '../components/theme';
-import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { PaymentExit, PaymentProgress } from '../components/vanish-ui';
-import { accountZeroAddress } from '../lib/account';
-import { ghostCardDeps } from '../lib/ghost-card/deps';
-import { checkGhostCard, refillGhostCard, type CheckResult } from '../lib/ghost-card/flows';
-import type { CardStatus } from '../lib/seal/card-status';
-import { checkCard, confirmFill, sealDeps } from '../lib/seal/flows';
-import { failureReason } from '../lib/node/failure-reason';
-import { useSettings } from '../lib/settings/settings';
-import { signVanishAgain, startSealedCardVanish } from '../lib/vanish/actions';
-import { paymentsChanged, shared } from '../lib/vanish/pending';
-import { screenDone } from '../lib/vanish/status-mapping';
-import { paymentKit, usePayment } from '../lib/vanish/use-payment';
-import type { CorePaymentSequence } from '../modules/ghost-core';
-import { cardsSupported } from '../modules/ghost-nfc';
+import { GhostCardStatusPanel } from '../../../components/ghost-card-ui';
+import { CardBusy, CardStatusPanel } from '../../../components/seal-ui';
+import { colors } from '../../../components/theme';
+import { Button, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
+import { PaymentExit, PaymentProgress } from '../../../components/vanish-ui';
+import { accountZeroAddress } from '../../../lib/account';
+import { ghostCardDeps } from '../../../lib/ghost-card/deps';
+import { checkGhostCard, refillGhostCard, type CheckResult } from '../../../lib/ghost-card/flows';
+import type { CardStatus } from '../../../lib/seal/card-status';
+import { checkCard, confirmFill, sealDeps } from '../../../lib/seal/flows';
+import { failureReason } from '../../../lib/node/failure-reason';
+import { useSettings } from '../../../lib/settings/settings';
+import { signVanishAgain, startSealedCardVanish } from '../../../lib/vanish/actions';
+import { paymentsChanged, shared } from '../../../lib/vanish/pending';
+import { screenDone } from '../../../lib/vanish/status-mapping';
+import { paymentKit, usePayment } from '../../../lib/vanish/use-payment';
+import type { CorePaymentSequence } from '../../../modules/ghost-core';
+import { cardsSupported } from '../../../modules/ghost-nfc';
 
 export default function CheckCardScreen() {
   const router = useRouter();
@@ -152,7 +152,6 @@ export default function CheckCardScreen() {
       wide="columns"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />

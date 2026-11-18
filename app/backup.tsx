@@ -59,7 +59,7 @@ export default function BackupScreen() {
         />
       }
       label="Backup words"
-      onBack={() => router.back()}
+      topBar
       testID="backup-screen"
       wide
     >

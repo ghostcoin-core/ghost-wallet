@@ -11,22 +11,22 @@ import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
-import { GhostCardStatusPanel } from '../components/ghost-card-ui';
-import { CardBusy } from '../components/seal-ui';
-import { colors } from '../components/theme';
-import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { CoinsBack, PaymentExit, PaymentProgress } from '../components/vanish-ui';
-import { accountZeroAddress } from '../lib/account';
-import { ghostCardDeps } from '../lib/ghost-card/deps';
-import { openGhostCard, refillGhostCard, type RefillTarget } from '../lib/ghost-card/flows';
-import type { GhostCardStatus } from '../lib/ghost-card/status';
-import { ghostText } from '../lib/seal/card-status';
-import { useSettings } from '../lib/settings/settings';
-import { CARD_KEY, proveRevealAgain, startReveal } from '../lib/vanish/actions';
-import { paymentsChanged, shared } from '../lib/vanish/pending';
-import { arrivedText, notSentReason, screenDone } from '../lib/vanish/status-mapping';
-import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
-import type { CorePaymentSequence } from '../modules/ghost-core';
+import { GhostCardStatusPanel } from '../../../components/ghost-card-ui';
+import { CardBusy } from '../../../components/seal-ui';
+import { colors } from '../../../components/theme';
+import { Button, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
+import { CoinsBack, PaymentExit, PaymentProgress } from '../../../components/vanish-ui';
+import { accountZeroAddress } from '../../../lib/account';
+import { ghostCardDeps } from '../../../lib/ghost-card/deps';
+import { openGhostCard, refillGhostCard, type RefillTarget } from '../../../lib/ghost-card/flows';
+import type { GhostCardStatus } from '../../../lib/ghost-card/status';
+import { ghostText } from '../../../lib/seal/card-status';
+import { useSettings } from '../../../lib/settings/settings';
+import { CARD_KEY, proveRevealAgain, startReveal } from '../../../lib/vanish/actions';
+import { paymentsChanged, shared } from '../../../lib/vanish/pending';
+import { arrivedText, notSentReason, screenDone } from '../../../lib/vanish/status-mapping';
+import { paymentKit, usePayment, type PaymentKit } from '../../../lib/vanish/use-payment';
+import type { CorePaymentSequence } from '../../../modules/ghost-core';
 
 function forgetCardKey(kit: PaymentKit | null) {
   try {
@@ -161,7 +161,6 @@ export default function OpenGhostCardScreen() {
       wide="columns"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />

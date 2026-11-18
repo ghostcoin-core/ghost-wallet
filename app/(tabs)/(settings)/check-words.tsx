@@ -7,14 +7,14 @@ import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { colors, monoFont } from '../components/theme';
-import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { WordField } from '../components/word-field';
-import { useBiometric, withBiometric } from '../lib/biometric';
-import { authenticate, authFailureMessage } from '../lib/device-auth';
-import { backupStatusStore } from '../lib/onboarding/backup-status';
-import { allTyped, normaliseWord, pickCheckPositions } from '../lib/onboarding/word-check';
-import { checkSavedAccountWords } from '../modules/ghost-core';
+import { colors, monoFont } from '../../../components/theme';
+import { Button, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
+import { WordField } from '../../../components/word-field';
+import { useBiometric, withBiometric } from '../../../lib/biometric';
+import { authenticate, authFailureMessage } from '../../../lib/device-auth';
+import { backupStatusStore } from '../../../lib/onboarding/backup-status';
+import { allTyped, normaliseWord, pickCheckPositions } from '../../../lib/onboarding/word-check';
+import { checkSavedAccountWords } from '../../../modules/ghost-core';
 
 export default function CheckWordsScreen() {
   const router = useRouter();
@@ -62,7 +62,6 @@ export default function CheckWordsScreen() {
       wide="columns"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />

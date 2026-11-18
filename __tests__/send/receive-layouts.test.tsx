@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import ReceiveScreen from '../../app/receive';
+import ReceiveScreen from '../../app/(tabs)/(home)/receive';
 import { FOLD_GAP } from '../../lib/layout';
 
 const ADDRESS = '0x00000000000000000000000000000000000000aa';

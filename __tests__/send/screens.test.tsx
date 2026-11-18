@@ -3,8 +3,8 @@ import type { ComponentType } from 'react';
 import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import PaymentScreen from '../../app/payment';
-import SendScreen from '../../app/send';
+import PaymentScreen from '../../app/(tabs)/(home)/payment';
+import SendScreen from '../../app/(tabs)/(home)/send';
 import type { SendStatus } from '../../lib/send/payment-status';
 import { encodeDetails, type SendDetails } from '../../lib/vanish/payments';
 import { reopenPayment, resetPending } from '../../lib/vanish/pending';
