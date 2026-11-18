@@ -11,8 +11,8 @@
 // already, the screen says so quietly but still offers Summon. Once the payment is in a block the coins show as in the account and
 // Done shows; settling goes on and Activity shows Settled later. Before that
 // the person may leave, and Home lists it as pending.
-import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { colors, monoFont } from '../../../components/theme';
@@ -108,6 +108,37 @@ export default function SummonScreen() {
     [kit],
   );
   const payment = usePayment(kit, sequence, rebuild, true);
+
+  // The tab bar stays on this screen, so it can be left without closing it.
+  // A key typed or read from a card, and what was found for it, are forgotten
+  // on leaving, as they were when leaving closed the screen: coming back asks
+  // for the key again. A Summon already under way shows its progress, not the
+  // key, and is left alone.
+  const entering = sequence === null && !proving;
+  const enteringNow = useRef(entering);
+  useEffect(() => {
+    enteringNow.current = entering;
+  }, [entering]);
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        if (!enteringNow.current) {
+          return;
+        }
+        forgetCardKey(kit);
+        lookupRun.current += 1;
+        setFromCard(false);
+        setTapping(false);
+        setKeyText('');
+        setClaimText('');
+        setClaiming(false);
+        setLookingUp(null);
+        setLookupFailure(null);
+        setLookup(null);
+        setError(null);
+      };
+    }, [kit]),
+  );
 
   // What the spent markers hint about the coins found: unchecked, never waited
   // on, and never a reason to hold Summon or Claim back.

@@ -22,7 +22,7 @@ jest.mock(
   { virtual: true },
 );
 
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
 
 // The window size of the device under test.
 const mockWindow = { width: 393, height: 852, scale: 3, fontScale: 1 };

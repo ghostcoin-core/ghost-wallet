@@ -35,7 +35,17 @@ jest.mock('../../modules/ghost-nfc', () => ({
 }));
 
 jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, write: async () => {} }) }));
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
+// The screen's focus effect, kept so a test can leave the screen (its cleanup runs on blur).
+let mockLeaveScreen: (() => void) | undefined;
+jest.mock('expo-router', () => ({
+  useRouter: () => ({ push: jest.fn(), back: jest.fn() }),
+  useFocusEffect: (effect: () => (() => void) | undefined) => {
+    const { useEffect } = jest.requireActual('react');
+    useEffect(() => {
+      mockLeaveScreen = effect() ?? undefined;
+    }, [effect]);
+  },
+}));
 
 /** A lookup that stays open until the test settles it. */
 function pendingLookup() {
@@ -167,4 +177,32 @@ it('drops a lookup still on its way when the key is changed', async () => {
   expect(screen.queryByTestId('key-lookup-progress')).toBeNull();
   await act(async () => lookup.resolve(FOUND));
   expect(screen.queryByTestId('summon-amount')).toBeNull();
+});
+
+describe('leaving Summon for another tab', () => {
+  it('forgets a typed key and what was found for it, so coming back asks again', async () => {
+    const lookup = pendingLookup();
+    renderSummon();
+    await typeAndFind();
+    await act(async () => lookup.resolve(FOUND));
+    expect(screen.getByTestId('summon-amount')).toBeOnTheScreen();
+
+    act(() => mockLeaveScreen?.());
+
+    expect(screen.getByTestId('summon-key').props.value).toBe('');
+    expect(screen.queryByTestId('summon-amount')).toBeNull();
+  });
+
+  it('shows nothing for a lookup that answers after the person has left', async () => {
+    const lookup = pendingLookup();
+    renderSummon();
+    await typeAndFind();
+
+    act(() => mockLeaveScreen?.());
+    await act(async () => lookup.resolve(FOUND));
+
+    expect(screen.getByTestId('summon-key').props.value).toBe('');
+    expect(screen.queryByTestId('summon-amount')).toBeNull();
+    expect(screen.queryByTestId('key-lookup-progress')).toBeNull();
+  });
 });
