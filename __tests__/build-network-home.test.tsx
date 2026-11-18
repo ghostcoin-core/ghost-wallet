@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react-native';
 import HomeScreen from '../app/(tabs)/(home)/home';
 import { buildNetwork } from '../lib/network/build-network';
 
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
 jest.mock(
   '../modules/ghost-core/src/index',
   () => ({ savedAccountZeroAddress: () => '0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd' }),

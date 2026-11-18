@@ -70,7 +70,7 @@ jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, wri
 // The Vanish screen's balance is not known here.
 jest.mock('../../lib/home/read-account', () => ({ readAccountZero: () => new Promise(() => {}) }));
 const mockBack = jest.fn();
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: mockBack }) }));
+jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: mockBack }) }));
 
 const mockWindow = { width: 393, height: 852, scale: 3, fontScale: 1 };
 jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({ __esModule: true, default: () => mockWindow }));

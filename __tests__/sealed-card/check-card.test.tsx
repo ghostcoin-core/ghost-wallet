@@ -45,7 +45,7 @@ jest.mock('../../lib/storage', () => ({
     },
   }),
 }));
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
 jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({
   __esModule: true,
   default: () => require('./screen-kit').windowSize,

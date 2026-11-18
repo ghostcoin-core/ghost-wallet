@@ -7,7 +7,7 @@ const ADDRESS = '0xe5fbe4d8256744ec6fd55f2ce5bdfae7cbf355fd';
 const GHOST = 10n ** 18n;
 
 const mockPush = jest.fn();
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
 
 const mockAccountZeroAddress = jest.fn((): string => ADDRESS);
 jest.mock(

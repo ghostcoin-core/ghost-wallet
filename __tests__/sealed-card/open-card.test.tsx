@@ -65,7 +65,7 @@ jest.mock('../../lib/vanish/actions', () => ({
   startReveal: (...args: unknown[]) => mockStartReveal(...args),
   proveRevealAgain: () => async () => ({ signed: new ArrayBuffer(1) }),
 }));
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
 jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({
   __esModule: true,
   default: () => require('./screen-kit').windowSize,

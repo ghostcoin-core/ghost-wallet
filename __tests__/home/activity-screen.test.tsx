@@ -63,7 +63,7 @@ let mockHistory: () => Promise<ActivityItem[]>;
 jest.mock('../../lib/home/history', () => ({ scanHistory: () => mockHistory() }));
 
 jest.mock('../../lib/node/test-network', () => ({ useTestNetwork: () => false }));
-jest.mock('expo-router', () => ({ useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: jest.fn(), back: jest.fn() }) }));
 
 function send(id: string, step: number, at: number, hash: number): MockPayment {
   return {
