@@ -15,8 +15,8 @@ export default function HomeTab() {
       <Stack.Screen name="send" options={onMist} />
       <Stack.Screen name="receive" options={onMist} />
       <Stack.Screen name="payment" />
-      <Stack.Screen name="vanish" />
-      <Stack.Screen name="summon" />
+      <Stack.Screen name="vanish" options={onMist} />
+      <Stack.Screen name="summon" options={onMist} />
     </Stack>
   );
 }

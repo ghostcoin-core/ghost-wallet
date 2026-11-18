@@ -13,10 +13,12 @@
 // the person may leave, and Home lists it as pending.
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { FoldPage } from '../../../components/fold-page';
+import { Icon } from '../../../components/icons';
 import { colors, monoFont } from '../../../components/theme';
-import { Button, ButtonRow, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
+import { Button, ButtonRow, Panel, textStyles } from '../../../components/ui';
 import { CoinsBack, KeyLookupProgress, PaymentExit, PaymentProgress } from '../../../components/vanish-ui';
 import { WordField } from '../../../components/word-field';
 import { accountZeroAddress } from '../../../lib/account';
@@ -230,20 +232,10 @@ export default function SummonScreen() {
   const arrived = status ? arrivedText(status, kind) : null;
   const keyNeeded = payment?.needsKey && !key;
 
-  return (
-    <Screen
-      testID="summon-screen"
-      wide="columns"
-      topBar={
-        <>
-          <Spacer />
-          <NetworkBadge />
-          <Logo />
-        </>
-      }
-    >
-      <Column>
-        <Title>Summon</Title>
+  // The key goes in the first part: left of the fold or above it on the open
+  // iPhone Duo. What was found for it, and the progress, go in the second.
+  const keyPart = (
+    <>
         {(!sequence || keyNeeded) && fromCard ? (
           <Panel style={styles.form} testID="summon-card-key">
             <Text style={textStyles.quiet}>Phantom Key</Text>
@@ -253,13 +245,35 @@ export default function SummonScreen() {
             ) : null}
           </Panel>
         ) : null}
-        {(!sequence || keyNeeded) && !fromCard ? (
-          <>
-            <Text style={textStyles.body}>
-              {keyNeeded
-                ? 'The fee changed while the app was closed. Type the Phantom Key again, or tap its card, to make a new proof.'
-                : 'Type or paste a Phantom Key: 24 words, or its digits. Its coins come back to your account.'}
-            </Text>
+      {(!sequence || keyNeeded) && !fromCard ? (
+        <>
+          <Text style={textStyles.body}>
+            {keyNeeded
+              ? 'The fee changed while the app was closed. Type the Phantom Key again, or read its card, to make a new proof.'
+              : 'Bring vanished coins back into your account, with the Phantom Key that holds them.'}
+          </Text>
+          {cards ? (
+            <View style={styles.cardKey}>
+              <Text style={styles.cardKeyTitle}>The key is on a card</Text>
+              <Text style={styles.cardKeyBody}>
+                {tapping
+                  ? 'Hold the card near the iPhone.'
+                  : 'Press the button, then hold the card to the back of your phone.'}
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: unavailable || tapping }}
+                disabled={unavailable || tapping}
+                onPress={() => void tapCard()}
+                style={({ pressed }) => [styles.cardKeyButton, (pressed || unavailable || tapping) && styles.dimmed]}
+                testID="summon-tap-card"
+              >
+                <Icon name="tap" />
+                <Text style={styles.cardKeyButtonText}>Read a card</Text>
+              </Pressable>
+            </View>
+          ) : null}
+          <Text style={textStyles.quiet}>{cards ? 'Or the key is 24 words, or its digits' : 'The key: 24 words, or its digits'}</Text>
             <Panel style={styles.form}>
               <Text style={textStyles.quiet}>Phantom Key</Text>
               <WordField
@@ -281,21 +295,18 @@ export default function SummonScreen() {
                 {rule.message}
               </Text>
             ) : null}
-            {!sequence ? (
-              <Button label="Find its coins" disabled={!rule.accept || unavailable || (lookingUp !== null && lookupFailure === null)} onPress={() => void find()} testID="summon-find" />
-            ) : null}
-            {cards ? (
-              <Button
-                label={tapping ? 'Hold the card near the iPhone' : 'Tap a card'}
-                icon="key"
-                secondary
-                disabled={unavailable || tapping}
-                onPress={() => void tapCard()}
-                testID="summon-tap-card"
-              />
-            ) : null}
-          </>
-        ) : null}
+          {!sequence ? (
+            <Button
+              label="Find its coins"
+              secondary={cards}
+              ink={!cards}
+              disabled={!rule.accept || unavailable || (lookingUp !== null && lookupFailure === null)}
+              onPress={() => void find()}
+              testID="summon-find"
+            />
+          ) : null}
+        </>
+      ) : null}
         {error ? (
           <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="summon-error">
             {error}
@@ -306,25 +317,27 @@ export default function SummonScreen() {
             Summon is not available in this build.
           </Text>
         ) : null}
-      </Column>
-      <Column>
-        {status ? (
+    </>
+  );
+
+  const resultPart = status ? (
           <>
             <PaymentProgress status={status} kind={kind} step={payment?.step} error={payment?.error} />
             {arrived ? <CoinsBack text={arrived} /> : null}
             <PaymentExit final={screenDone(status)} onLeave={() => router.back()} testPrefix="summon" />
           </>
-        ) : lookingUp ? (
+  ) : lookingUp ? (
           <KeyLookupProgress failure={lookupFailure} onRetry={() => void find(lookingUp)} />
-        ) : lookup ? (
-          <Panel style={styles.form} testID="summon-lookup">
-            {lookup.status === 'found' ? (
-              <>
-                <Text style={textStyles.quiet}>This key holds</Text>
-                <Text style={styles.amount} testID="summon-amount">
-                  {formatGhost(lookup.amountWei)} GHOST
-                </Text>
-                <Text style={textStyles.quiet}>Fee {formatGhost(lookup.feeWei)} GHOST</Text>
+  ) : lookup ? (
+    lookup.status === 'found' ? (
+      <View style={styles.found} testID="summon-lookup">
+        <View style={styles.holds}>
+          <Text style={styles.holdsLabel}>This key holds</Text>
+          <Text style={styles.holdsAmount} testID="summon-amount">
+            {formatGhost(lookup.amountWei)} GHOST
+          </Text>
+          <Text style={styles.holdsLabel}>Fee {formatGhost(lookup.feeWei)} GHOST</Text>
+        </View>
                 {maybeSpent ? (
                   <Text accessibilityLiveRegion="polite" style={textStyles.quiet} testID="summon-spent-hint">
                     Not checked: these coins may have been summoned already.
@@ -351,18 +364,20 @@ export default function SummonScreen() {
                 ) : null}
                 <Button
                   label={claiming ? 'Claim' : `Summon ${formatGhost(most > 0n ? most : 0n)} GHOST`}
+                  ink
                   disabled={!canReveal}
                   onPress={reveal}
                   testID="summon-reveal"
                 />
-              </>
-            ) : (
-              <Text style={textStyles.body} testID="summon-lookup-message">
-                {lookupMessage(lookup.status)}
-              </Text>
-            )}
-          </Panel>
-        ) : (
+      </View>
+    ) : (
+      <Panel style={styles.form} testID="summon-lookup">
+        <Text style={textStyles.body} testID="summon-lookup-message">
+          {lookupMessage(lookup.status)}
+        </Text>
+      </Panel>
+    )
+  ) : (
           <Panel style={styles.form}>
             <Text style={textStyles.quiet}>How it works</Text>
             <Text style={textStyles.body}>
@@ -377,13 +392,65 @@ export default function SummonScreen() {
               </Text>
             ) : null}
           </Panel>
-        )}
-      </Column>
-    </Screen>
   );
+
+  return <FoldPage testID="summon-screen" title="Summon" first={keyPart} second={resultPart} />;
 }
 
 const styles = StyleSheet.create({
+  cardKey: {
+    padding: 20,
+    borderRadius: 20,
+    backgroundColor: colors.violet,
+  },
+  cardKeyTitle: {
+    color: colors.paper,
+    fontSize: 20,
+    fontWeight: '600',
+  },
+  cardKeyBody: {
+    marginTop: 6,
+    color: colors.violetTint,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  cardKeyButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    minHeight: 52,
+    marginTop: 20,
+    borderRadius: 14,
+    backgroundColor: colors.paper,
+  },
+  cardKeyButtonText: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  dimmed: {
+    opacity: 0.6,
+  },
+  found: {
+    gap: 12,
+  },
+  holds: {
+    gap: 4,
+    padding: 20,
+    borderRadius: 20,
+    backgroundColor: colors.violet,
+  },
+  holdsLabel: {
+    color: colors.violetTint,
+    fontSize: 14,
+  },
+  holdsAmount: {
+    color: colors.paper,
+    fontFamily: monoFont,
+    fontSize: 28,
+    fontWeight: '500',
+  },
   form: {
     gap: 8,
     padding: 16,

@@ -103,6 +103,11 @@ describe('a failed Vanish', () => {
     await act(async () => {});
 
     fireEvent.changeText(screen.getByTestId('vanish-amount'), '1');
+    // Where the phone reads cards, the words are a choice made before Continue.
+    const wordsChoice = screen.queryByTestId('vanish-choose-words');
+    if (wordsChoice) {
+      fireEvent.press(wordsChoice);
+    }
     await act(async () => {
       fireEvent.press(screen.getByTestId('vanish-make-key'));
     });

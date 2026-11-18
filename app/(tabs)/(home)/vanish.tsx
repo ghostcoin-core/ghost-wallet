@@ -21,22 +21,13 @@
 // down (or, a card Vanish, on its card) keeps the key: opening the Vanish again
 // returns there.
 import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { FoldPage } from '../../../components/fold-page';
+import { Icon } from '../../../components/icons';
 import { colors, monoFont } from '../../../components/theme';
-import {
-  Button,
-  Column,
-  Logo,
-  NetworkBadge,
-  Panel,
-  Screen,
-  Spacer,
-  TextButton,
-  textStyles,
-  Title,
-} from '../../../components/ui';
+import { Button, Panel, TextButton, textStyles } from '../../../components/ui';
 import { SkipCheckBox } from '../../../components/skip-check';
 import { CardOnlyNotice, PaymentExit, PaymentProgress, PhantomKeyWords } from '../../../components/vanish-ui';
 import { WordField } from '../../../components/word-field';
@@ -159,6 +150,8 @@ function resumedPhase(resumed: ReturnType<typeof resumeVanish>): Phase {
 export default function VanishScreen() {
   const router = useRouter();
   const { twoColumns } = useLayout();
+  // Where a new key goes when the phone reads cards: a card, unless the person picks words.
+  const [toCard, setToCard] = useState(true);
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
   const kit = useMemo(() => paymentKit(nodeUrl), [nodeUrl]);
@@ -390,27 +383,19 @@ export default function VanishScreen() {
   const canCancel = phase.name === 'sending' && payment?.cancellable === true && kit !== null && asSendKit(kit) !== null;
   const cancelSent = phase.name === 'sending' && payment?.status === 'sent' && cancelWaiting(sequence);
 
-  return (
-    <Screen
-      testID="vanish-screen"
-      wide="columns"
-      topBar={
-        <>
-          <Spacer />
-          <NetworkBadge />
-          <Logo />
-        </>
-      }
-    >
-      <Column>
-        <Title>Vanish</Title>
-        {phase.name === 'amount' ? (
-          <>
-            <Text style={textStyles.body}>
-              {cards
-                ? 'Move GHOST from your account into a new Phantom Key. Put the key on a blank card, or write it down, before anything is sent.'
-                : 'Move GHOST from your account into a new Phantom Key. You will write the key down before anything is sent.'}
-            </Text>
+  // What each step shows, in two parts: the first sits left of the fold or
+  // above it on the open iPhone Duo, the second right of it or below it.
+  let first: ReactNode = null;
+  let second: ReactNode = null;
+
+  if (phase.name === 'amount') {
+    first = (
+      <>
+        <Text style={textStyles.body}>
+          {cards
+            ? 'Move GHOST from your account into a new Phantom Key. Put the key on a blank card, or write it down, before anything is sent.'
+            : 'Move GHOST from your account into a new Phantom Key. You will write the key down before anything is sent.'}
+        </Text>
             <Panel style={styles.form}>
               <Text style={textStyles.quiet}>Amount</Text>
               <View style={styles.amountRow}>
@@ -437,52 +422,72 @@ export default function VanishScreen() {
                 </Text>
               ) : null}
             </Panel>
-            {cards ? (
-              <>
-                <Button
-                  label="Put on a card"
-                  icon="key"
-                  disabled={!canMake}
-                  onPress={() => void makeKey(true)}
-                  testID="vanish-make-card"
-                />
-                <Button
-                  label="Write down 24 words"
-                  secondary
-                  disabled={!canMake}
-                  onPress={() => void makeKey()}
-                  testID="vanish-make-key"
-                />
-              </>
-            ) : (
-              <Button
-                label="Make a Phantom Key"
-                icon="key"
-                disabled={!canMake}
-                onPress={() => void makeKey()}
-                testID="vanish-make-key"
-              />
-            )}
-          </>
-        ) : null}
-        {phase.name === 'save' ? (
+      </>
+    );
+    second = (
+      <>
+        {cards ? (
           <>
-            <Text style={textStyles.body}>
-              Write these 24 words down, in order, on paper. They are the only way to summon this GHOST. Anyone with them
-              can take it. If you lose them, no one can get it back. This phone does not keep them.
-            </Text>
-            <PhantomKeyWords words={phase.words} twoColumns={twoColumns} />
-            <Button
-              label="I wrote it down"
-              onPress={() => keyStep({ name: 'check', words: phase.words, positions: pickCheckPositions() })}
-              testID="vanish-saved"
+            <Text style={textStyles.quiet}>Where the key goes</Text>
+            <KeyChoice
+              title="On a card"
+              detail="Like cash. The card is the only copy."
+              selected={toCard}
+              onPress={() => setToCard(true)}
+              testID="vanish-choose-card"
             />
-            <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" />
+            <KeyChoice
+              title="24 words"
+              detail="You write them on paper."
+              selected={!toCard}
+              onPress={() => setToCard(false)}
+              testID="vanish-choose-words"
+            />
+            <Button
+              label="Continue"
+              ink
+              disabled={!canMake}
+              onPress={() => void (toCard ? makeKey(true) : makeKey())}
+              testID={toCard ? 'vanish-make-card' : 'vanish-make-key'}
+            />
           </>
-        ) : null}
-        {phase.name === 'check' ? (
-          <>
-            <Text style={textStyles.body}>Type these three words from the key you wrote down.</Text>
+        ) : (
+          <Button
+            label="Make a Phantom Key"
+            icon="key"
+            ink
+            disabled={!canMake}
+            onPress={() => void makeKey()}
+            testID="vanish-make-key"
+          />
+        )}
+      </>
+    );
+  } else if (phase.name === 'save') {
+    first = (
+      <>
+        <Text style={textStyles.body}>
+          Write these 24 words down, in order, on paper. They are the only way to summon this GHOST. Anyone with them
+          can take it. If you lose them, no one can get it back. This phone does not keep them.
+        </Text>
+            <PhantomKeyWords words={phase.words} twoColumns={twoColumns} />
+      </>
+    );
+    second = (
+      <>
+        <Button
+          label="I wrote it down"
+          ink
+          onPress={() => keyStep({ name: 'check', words: phase.words, positions: pickCheckPositions() })}
+          testID="vanish-saved"
+        />
+        <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" />
+      </>
+    );
+  } else if (phase.name === 'check') {
+    first = (
+      <>
+        <Text style={textStyles.body}>Type these three words from the key you wrote down.</Text>
             <Panel style={styles.form}>
               {phase.positions.map((position) => (
                 <View key={position} style={styles.checkRow}>
@@ -497,6 +502,10 @@ export default function VanishScreen() {
                 </View>
               ))}
             </Panel>
+      </>
+    );
+    second = (
+      <>
             <SkipCheckBox
               checked={skip}
               onChange={(checked) => {
@@ -508,6 +517,7 @@ export default function VanishScreen() {
             <Button
               label={vanishAmount !== null ? `Vanish ${formatGhost(vanishAmount)} GHOST` : 'Vanish'}
               disabled={!skip && phase.positions.some((position) => (typed[position] ?? '').trim() === '')}
+              ink
               onPress={confirm}
               testID="vanish-send"
             />
@@ -519,30 +529,56 @@ export default function VanishScreen() {
                 testID="vanish-show-again"
               />
             ) : null}
-            <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" />
-          </>
+        <TextButton label="Cancel the Vanish" onPress={cancel} testID="vanish-cancel" />
+      </>
+    );
+  } else if (phase.name === 'card') {
+    first = (
+      <View style={styles.cardStep}>
+        <Text style={styles.cardStepTitle}>Put the key on a card</Text>
+        <Text style={styles.cardStepBody} testID="vanish-card-hold">
+          {writing
+            ? 'Hold a blank NTAG 424 DNA card near the top of the iPhone until it says the key is on the card.'
+            : 'No card holds this key yet. Nothing has been sent.'}
+        </Text>
+        {!writing ? (
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => void writeCard()}
+            style={({ pressed }) => [styles.cardStepButton, pressed && styles.pressed]}
+            testID="vanish-card-retry"
+          >
+            <Icon name="tap" />
+            <Text style={styles.cardStepButtonText}>Try again with a blank card</Text>
+          </Pressable>
         ) : null}
-        {phase.name === 'card' ? (
-          <>
-            <CardOnlyNotice />
-            <Text style={textStyles.body} testID="vanish-card-hold">
-              {writing
-                ? 'Hold a blank NTAG 424 DNA card near the top of the iPhone until it says the key is on the card.'
-                : 'No card holds this key yet. Nothing has been sent.'}
-            </Text>
-            {!writing ? (
-              <>
-                <Button
-                  label="Try again with a blank card"
-                  icon="key"
-                  onPress={() => void writeCard()}
-                  testID="vanish-card-retry"
-                />
-                <TextButton label="Cancel this Vanish" onPress={cancel} testID="vanish-cancel" />
-              </>
-            ) : null}
-          </>
-        ) : null}
+      </View>
+    );
+    second = (
+      <>
+        <CardOnlyNotice />
+        {!writing ? <TextButton label="Cancel this Vanish" onPress={cancel} testID="vanish-cancel" /> : null}
+      </>
+    );
+  } else if (payment) {
+    first = (
+          <PaymentProgress
+            status={payment.status}
+            kind="vanish"
+            step={payment.step}
+            error={payment.stopped ? null : payment.error}
+          />
+    );
+  }
+
+  return (
+    <FoldPage
+      testID="vanish-screen"
+      title="Vanish"
+      first={first}
+      second={
+        <>
+          {second}
         {error ? (
           <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="vanish-error">
             {error}
@@ -553,33 +589,6 @@ export default function VanishScreen() {
             Vanish is not available in this build.
           </Text>
         ) : null}
-      </Column>
-      <Column>
-        {phase.name === 'sending' && payment ? (
-          <PaymentProgress
-            status={payment.status}
-            kind="vanish"
-            step={payment.step}
-            error={payment.stopped ? null : payment.error}
-          />
-        ) : (
-          <Panel style={styles.form}>
-            <Text style={textStyles.quiet}>How it works</Text>
-            <Text style={textStyles.body}>
-              The key is made on this phone and shown once. The Vanish is signed with your account and sent only after
-              you have checked three of its words, or chosen to skip the check. Summon it back any time by typing the
-              key.
-            </Text>
-            {cards ? (
-              <Text style={textStyles.quiet} testID="vanish-card-note">
-                Put on a card, the key goes straight to a blank NTAG 424 DNA card and no words are shown: the card is
-                the only copy, and whoever holds it holds the GHOST. The Vanish is sent only once the card holds the
-                key. The card must pass NXP&apos;s genuineness check, gets its own random keys kept in this
-                iPhone&apos;s Keychain, and can be read only on this iPhone.
-              </Text>
-            ) : null}
-          </Panel>
-        )}
         {phase.name === 'sending' && payment?.stopped && payment.discardable ? (
           <>
             <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="vanish-stopped">
@@ -622,12 +631,132 @@ export default function VanishScreen() {
             <PaymentExit final={payment ? screenDone(payment.status) : false} onLeave={() => router.back()} testPrefix="vanish" />
           </>
         ) : null}
-      </Column>
-    </Screen>
+          {phase.name !== 'sending' ? (
+          <Panel style={styles.form}>
+            <Text style={textStyles.quiet}>How it works</Text>
+            <Text style={textStyles.body}>
+              The key is made on this phone and shown once. The Vanish is signed with your account and sent only after
+              you have checked three of its words, or chosen to skip the check. Summon it back any time by typing the
+              key.
+            </Text>
+            {cards ? (
+              <Text style={textStyles.quiet} testID="vanish-card-note">
+                Put on a card, the key goes straight to a blank NTAG 424 DNA card and no words are shown: the card is
+                the only copy, and whoever holds it holds the GHOST. The Vanish is sent only once the card holds the
+                key. The card must pass NXP&apos;s genuineness check, gets its own random keys kept in this
+                iPhone&apos;s Keychain, and can be read only on this iPhone.
+              </Text>
+            ) : null}
+          </Panel>
+          ) : null}
+        </>
+      }
+    />
+  );
+}
+
+/** One of the two places a new key can go: a radio button drawn as a tile. */
+function KeyChoice({
+  title,
+  detail,
+  selected,
+  onPress,
+  testID,
+}: {
+  title: string;
+  detail: string;
+  selected: boolean;
+  onPress: () => void;
+  testID: string;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="radio"
+      accessibilityState={{ selected }}
+      onPress={onPress}
+      style={[styles.choice, selected && styles.choiceSelected]}
+      testID={testID}
+    >
+      <View style={[styles.radio, selected && styles.radioSelected]} />
+      <View style={styles.choiceText}>
+        <Text style={styles.choiceTitle}>{title}</Text>
+        <Text style={textStyles.quiet}>{detail}</Text>
+      </View>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
+  choice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 14,
+    backgroundColor: colors.paper,
+  },
+  choiceSelected: {
+    borderWidth: 2,
+    borderColor: colors.violet,
+    padding: 13,
+  },
+  radio: {
+    width: 20,
+    height: 20,
+    marginTop: 1,
+    borderWidth: 2,
+    borderColor: colors.quiet,
+    borderRadius: 10,
+  },
+  radioSelected: {
+    borderWidth: 6,
+    borderColor: colors.violet,
+  },
+  choiceText: {
+    flex: 1,
+    gap: 2,
+  },
+  choiceTitle: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  cardStep: {
+    padding: 20,
+    borderRadius: 20,
+    backgroundColor: colors.violet,
+  },
+  cardStepTitle: {
+    color: colors.paper,
+    fontSize: 20,
+    fontWeight: '600',
+  },
+  cardStepBody: {
+    marginTop: 6,
+    color: colors.violetTint,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  cardStepButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    minHeight: 52,
+    marginTop: 20,
+    borderRadius: 14,
+    backgroundColor: colors.paper,
+  },
+  cardStepButtonText: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  pressed: {
+    opacity: 0.6,
+  },
   form: {
     gap: 8,
     padding: 16,

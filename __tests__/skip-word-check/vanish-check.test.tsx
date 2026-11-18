@@ -107,6 +107,11 @@ function renderOn(device: Device) {
 
 async function reachCheck() {
   fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
+  // Where the phone reads cards, the words are a choice made before Continue.
+  const wordsChoice = screen.queryByTestId('vanish-choose-words');
+  if (wordsChoice) {
+    fireEvent.press(wordsChoice);
+  }
   await act(async () => {
     fireEvent.press(screen.getByTestId('vanish-make-key'));
   });

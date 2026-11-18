@@ -93,7 +93,12 @@ function renderOn(device: Device, Screen: ComponentType) {
   );
 }
 
+/** Whether the screen is split in two parts around the open Duo's fold. */
 function sideBySide(testID: string): boolean {
+  if (screen.queryByTestId(testID.replace(/-content$/, '-parts')) !== null) {
+    return true;
+  }
+  // A screen not yet on the fold-aware page sets its columns side by side itself.
   return StyleSheet.flatten(screen.getByTestId(testID).props.contentContainerStyle).flexDirection === 'row';
 }
 
