@@ -19,6 +19,8 @@ export default function CardsTab() {
       <Stack.Screen name="fill-card" />
       <Stack.Screen name="open-card" />
       <Stack.Screen name="wipe-card" />
+      <Stack.Screen name="vanish-older-card" options={onMist} />
+      <Stack.Screen name="summon-older-card" options={onMist} />
     </Stack>
   );
 }

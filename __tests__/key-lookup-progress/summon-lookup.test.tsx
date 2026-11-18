@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import SummonScreen from '../../app/(tabs)/(home)/summon';
+import SummonScreen from '../../app/(tabs)/(cards)/summon-older-card';
 
 const mockKeyWords = Array.from({ length: 24 }, (_, i) => ['abandon', 'ability', 'able', 'about'][i % 4]);
 

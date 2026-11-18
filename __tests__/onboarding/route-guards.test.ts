@@ -71,7 +71,9 @@ describe('route guards', () => {
       'send',
       'settings',
       'summon',
+      'summon-older-card',
       'vanish',
+      'vanish-older-card',
       'wipe-card',
     ]);
   });

@@ -5,7 +5,7 @@
 // that commit data before anything is paid. Then the usual Vanish pays the
 // amount into it. No words and no key are ever on this phone, and no Seal or
 // Ghost server takes part. The card is a bearer object: no code goes with it.
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
@@ -39,7 +39,9 @@ export default function FillGhostCardScreen() {
   const deps = useMemo(() => ghostCardDeps(kit), [kit]);
   const cards = deps.nfc !== null && deps.core !== null;
 
-  const [amountText, setAmountText] = useState('');
+  // Vanish hands over the amount typed there; it is still checked here like any typed amount.
+  const { amount: asked } = useLocalSearchParams<{ amount?: string }>();
+  const [amountText, setAmountText] = useState(typeof asked === 'string' ? asked : '');
   const [minimum, setMinimum] = useState<bigint | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

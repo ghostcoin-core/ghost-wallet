@@ -148,6 +148,15 @@ function resumedPhase(resumed: ReturnType<typeof resumeVanish>): Phase {
 }
 
 export default function VanishScreen() {
+  return <VanishFlow />;
+}
+
+/**
+ * The Vanish steps. A card Vanish started here goes to Fill a card, where the
+ * card makes its own key. `olderCard` is the same screen opened from the older
+ * cards: there the key is made on this phone and written to an NTAG 424 card.
+ */
+export function VanishFlow({ olderCard = false }: { olderCard?: boolean }) {
   const router = useRouter();
   const { twoColumns } = useLayout();
   // Where a new key goes when the phone reads cards: a card, unless the person picks words.
@@ -426,7 +435,20 @@ export default function VanishScreen() {
     );
     second = (
       <>
-        {cards ? (
+        {cards && olderCard ? (
+          <>
+            <Text style={textStyles.quiet} testID="vanish-older-card-text">
+              The key goes on a blank NTAG 424 card. No words are shown.
+            </Text>
+            <Button
+              label="Continue"
+              ink
+              disabled={!canMake}
+              onPress={() => void makeKey(true)}
+              testID="vanish-make-card"
+            />
+          </>
+        ) : cards ? (
           <>
             <Text style={textStyles.quiet}>Where the key goes</Text>
             <KeyChoice
@@ -447,8 +469,10 @@ export default function VanishScreen() {
               label="Continue"
               ink
               disabled={!canMake}
-              onPress={() => void (toCard ? makeKey(true) : makeKey())}
-              testID={toCard ? 'vanish-make-card' : 'vanish-make-key'}
+              onPress={() =>
+                toCard ? router.push({ pathname: '/fill-ghost-card', params: { amount: amountText } }) : void makeKey()
+              }
+              testID={toCard ? 'vanish-fill-card' : 'vanish-make-key'}
             />
           </>
         ) : (
@@ -639,7 +663,13 @@ export default function VanishScreen() {
               you have checked three of its words, or chosen to skip the check. Summon it back any time by typing the
               key.
             </Text>
-            {cards ? (
+            {cards && !olderCard ? (
+              <Text style={textStyles.quiet} testID="vanish-card-note">
+                Put on a card, the card makes the key itself and no words are shown: the card is the only copy, and
+                whoever holds it holds the GHOST. The card is checked as genuine before anything is paid.
+              </Text>
+            ) : null}
+            {cards && olderCard ? (
               <Text style={textStyles.quiet} testID="vanish-card-note">
                 Put on a card, the key goes straight to a blank NTAG 424 DNA card and no words are shown: the card is
                 the only copy, and whoever holds it holds the GHOST. The Vanish is sent only once the card holds the

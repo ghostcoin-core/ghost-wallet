@@ -3,7 +3,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import type { ComponentType } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import SummonScreen from '../../app/(tabs)/(home)/summon';
+import SummonOlderCardScreen from '../../app/(tabs)/(cards)/summon-older-card';
+import VanishOlderCardScreen from '../../app/(tabs)/(cards)/vanish-older-card';
 import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import WipeCardScreen from '../../app/(tabs)/(cards)/wipe-card';
 import { CardError } from '../../modules/ghost-nfc/card';
@@ -121,7 +122,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   const open = device === 'iPhone Duo open';
 
   it('puts a card-only key on a card from the amount step while the core still holds it, then sends', async () => {
-    renderOn(device, VanishScreen);
+    renderOn(device, VanishOlderCardScreen);
     expect(sideBySide('vanish-screen-content')).toBe(open);
     let finishWrite: () => void = () => {};
     mockPut.mockReturnValue(new Promise<void>((resolve) => (finishWrite = resolve)));
@@ -147,7 +148,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   });
 
   it('shows why a card was refused, sends nothing, and offers another blank card, never words', async () => {
-    renderOn(device, VanishScreen);
+    renderOn(device, VanishOlderCardScreen);
     mockPut.mockRejectedValue(new CardError('not-genuine'));
     await putOnCard();
     expect(screen.getByTestId('vanish-error')).toHaveTextContent(/NXP genuineness check/);
@@ -160,7 +161,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   });
 
   it('summons from a tapped card without the key reaching the screen, and forgets it on leaving', async () => {
-    const view = renderOn(device, SummonScreen);
+    const view = renderOn(device, SummonOlderCardScreen);
     expect(sideBySide('summon-screen-content')).toBe(open);
     await act(async () => {
       fireEvent.press(screen.getByTestId('summon-tap-card'));
@@ -175,7 +176,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   });
 
   it('says a card from another phone cannot be read here', async () => {
-    renderOn(device, SummonScreen);
+    renderOn(device, SummonOlderCardScreen);
     mockRead.mockRejectedValue(new CardError('other-phone'));
     await act(async () => {
       fireEvent.press(screen.getByTestId('summon-tap-card'));
