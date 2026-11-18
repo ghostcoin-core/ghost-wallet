@@ -2,10 +2,13 @@
 import { Stack } from 'expo-router';
 
 import { onMist, pushedScreenOptions, tabRootOptions } from '../../../components/stack-options';
+import { useCloseOnLeavingTab } from '../../../components/tab-stack';
 
 export const unstable_settings = { anchor: 'cards' };
 
 export default function CardsTab() {
+  useCloseOnLeavingTab('(cards)');
+
   return (
     <Stack screenOptions={pushedScreenOptions}>
       <Stack.Screen name="cards" options={tabRootOptions} />
