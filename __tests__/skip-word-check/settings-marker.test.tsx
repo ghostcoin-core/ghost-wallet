@@ -30,7 +30,7 @@ jest.mock('../../lib/storage', () => ({
 
 const mockPush = jest.fn();
 const mockBack = jest.fn();
-jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: mockPush, back: mockBack }) }));
+jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: mockBack }) }));
 
 const mockAuthenticate = jest.fn();
 jest.mock('../../lib/device-auth', () => ({

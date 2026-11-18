@@ -43,7 +43,7 @@ const mockRequireNativeModule = jest.fn((name: string) => {
 });
 
 const mockPush = jest.fn();
-jest.mock('expo-router', () => ({ useFocusEffect: () => {}, useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
+jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
 
 jest.mock('expo', () => ({
   requireNativeModule: (name: string) => mockRequireNativeModule(name),
