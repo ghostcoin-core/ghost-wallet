@@ -1,6 +1,8 @@
 // The account's recovery words, shown only after Touch ID or Face ID (or the passcode),
-// and hidden again as soon as the app leaves the screen.
-import { useEffect, useState } from 'react';
+// and hidden again as soon as the app leaves the screen or the person leaves
+// it for another tab or screen: coming back always asks again.
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet, Text, View } from 'react-native';
 import { savedAccountWords } from 'ghost-core';
 
@@ -14,18 +16,38 @@ export default function RecoveryWordsScreen() {
   const [words, setWords] = useState<string[] | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
+  // Counts each time the screen asks or is left, so an answer that comes
+  // back after the person has left shows nothing.
+  const asked = useRef(0);
+
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
+        asked.current += 1;
         setWords(null);
       }
     });
     return () => subscription.remove();
   }, []);
 
+  // The tab bar stays on this screen, so it can be left without closing it.
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        asked.current += 1;
+        setWords(null);
+        setMessage(null);
+      };
+    }, []),
+  );
+
   async function show() {
     setMessage(null);
+    const mine = ++asked.current;
     const result = await authenticate('Show your recovery words');
+    if (asked.current !== mine) {
+      return;
+    }
     if (!result.ok) {
       setMessage(authFailureMessage(result.reason, biometric));
       return;
