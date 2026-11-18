@@ -11,19 +11,19 @@ import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { FoldPage, useFold } from '../components/fold-page';
-import { colors, monoFont } from '../components/theme';
-import { Button, Panel, Row, SectionTitle, TextButton, textStyles } from '../components/ui';
-import { accountZeroAddress } from '../lib/account';
-import { useBiometric, withBiometric } from '../lib/biometric';
-import { authenticate, authFailureMessage } from '../lib/device-auth';
-import { formatGhost, formatWhen, shortAddress } from '../lib/home/balance-format';
-import { useHome, useNow } from '../lib/home/use-home';
-import { failureReason } from '../lib/node/failure-reason';
-import { quoteFee, recentRecipients, sendKit, startSend, type FeeQuote } from '../lib/send/send-payment';
-import { addressMessage, amountMessage, checkAddress, checkAmount, totalWei } from '../lib/send/validation';
-import { useSettings } from '../lib/settings/settings';
-import { reopenPayment } from '../lib/vanish/pending';
+import { FoldPage, useFold } from '../../../components/fold-page';
+import { colors, monoFont } from '../../../components/theme';
+import { Button, Panel, Row, SectionTitle, TextButton, textStyles } from '../../../components/ui';
+import { accountZeroAddress } from '../../../lib/account';
+import { useBiometric, withBiometric } from '../../../lib/biometric';
+import { authenticate, authFailureMessage } from '../../../lib/device-auth';
+import { formatGhost, formatWhen, shortAddress } from '../../../lib/home/balance-format';
+import { useHome, useNow } from '../../../lib/home/use-home';
+import { failureReason } from '../../../lib/node/failure-reason';
+import { quoteFee, recentRecipients, sendKit, startSend, type FeeQuote } from '../../../lib/send/send-payment';
+import { addressMessage, amountMessage, checkAddress, checkAmount, totalWei } from '../../../lib/send/validation';
+import { useSettings } from '../../../lib/settings/settings';
+import { reopenPayment } from '../../../lib/vanish/pending';
 
 type FeeState = { name: 'asking' } | { name: 'known'; quote: FeeQuote } | { name: 'unknown'; reason: string };
 
@@ -250,7 +250,7 @@ export default function SendScreen() {
     </>
   );
 
-  return <FoldPage testID="send-screen" title="Send" onBack={() => router.back()} first={form} second={review} />;
+  return <FoldPage testID="send-screen" title="Send" first={form} second={review} />;
 }
 
 function SummaryRow({ label, first, testID, children }: { label: string; first?: boolean; testID: string; children: string }) {

@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import VanishScreen from '../../app/vanish';
+import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import { SKIP_CHECK_LABEL } from '../../components/skip-check';
 import { backupStatusStore } from '../../lib/onboarding/backup-status';
 import { encodeDetails } from '../../lib/vanish/payments';
@@ -191,7 +191,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     const first = renderOn(device);
     await reachCheck();
     fireEvent.press(screen.getByTestId('vanish-skip-check'));
-    fireEvent.press(screen.getByTestId('back'));
+    // Leaving with the system's Back closes the screen.
     first.unmount();
 
     renderOn(device);

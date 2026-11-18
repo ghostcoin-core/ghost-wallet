@@ -3,9 +3,9 @@ import type { ComponentType } from 'react';
 import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import SummonScreen from '../../app/summon';
-import VanishScreen from '../../app/vanish';
-import WipeCardScreen from '../../app/wipe-card';
+import SummonScreen from '../../app/(tabs)/(home)/summon';
+import VanishScreen from '../../app/(tabs)/(home)/vanish';
+import WipeCardScreen from '../../app/(tabs)/(cards)/wipe-card';
 import { CardError } from '../../modules/ghost-nfc/card';
 
 const mockKeyWords = Array.from({ length: 24 }, (_, i) => ['abandon', 'ability', 'able', 'about'][i % 4]);

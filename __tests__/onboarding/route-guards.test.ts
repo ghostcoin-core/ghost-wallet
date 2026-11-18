@@ -94,11 +94,16 @@ describe('route guards', () => {
 
   it('gives every screen in app/ a group, so none is left unguarded', () => {
     const appDir = path.join(__dirname, '..', '..', 'app');
-    // The tab screens sit in their own folder, which adds nothing to the route.
-    const screens = [appDir, path.join(appDir, '(tabs)')]
-      .flatMap((dir) => fs.readdirSync(dir))
-      .filter((file) => file.endsWith('.tsx') && !file.startsWith('_'))
-      .map((file) => file.replace(/\.tsx$/, ''));
+    // Folders in brackets (the tabs, and each tab's own screens) add nothing to the route.
+    const listScreens = (dir: string): string[] =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        if (entry.isDirectory()) {
+          expect(entry.name).toMatch(/^\(.+\)$/);
+          return listScreens(path.join(dir, entry.name));
+        }
+        return entry.name.endsWith('.tsx') && !entry.name.startsWith('_') ? [entry.name.replace(/\.tsx$/, '')] : [];
+      });
+    const screens = listScreens(appDir);
 
     expect([...ROUTES].sort()).toEqual(screens.sort());
   });

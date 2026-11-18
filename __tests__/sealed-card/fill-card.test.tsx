@@ -6,7 +6,7 @@
 // shows words or a key.
 import { act, fireEvent, screen } from '@testing-library/react-native';
 
-import FillCardScreen from '../../app/fill-card';
+import FillCardScreen from '../../app/(tabs)/(cards)/fill-card';
 import { decodeDetails } from '../../lib/vanish/payments';
 import { GHOST, hexOf, resetWorld, type World } from './fake-seal';
 import { ACCOUNT, DEVICE_NAMES, fakeKit, isRed, renderOn, sideBySide } from './screen-kit';

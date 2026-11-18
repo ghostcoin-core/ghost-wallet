@@ -8,21 +8,21 @@ import { useContext, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context';
 
-import { ActivityList } from '../../components/activity-list';
-import { useFold } from '../../components/fold-page';
-import { NewsCards } from '../../components/news-cards';
-import { colors, monoFont } from '../../components/theme';
-import { Button, ButtonRow, IconButton, NetworkBadge, SectionTitle, Spacer, textStyles, Title } from '../../components/ui';
-import { accountZeroAddress } from '../../lib/account';
-import { formatGhost } from '../../lib/home/balance-format';
-import { balanceStatus } from '../../lib/home/cache-refresh';
-import { SAMPLE_NEWS } from '../../lib/home/news';
-import { useFaucet } from '../../lib/home/use-faucet';
-import { useHome, useNow } from '../../lib/home/use-home';
-import { FOLD_GAP, leftColumnWidth, useLayout } from '../../lib/layout';
-import { buildNetwork, offersTestGhost } from '../../lib/network/build-network';
-import { useTestNetwork } from '../../lib/node/test-network';
-import { useSettings } from '../../lib/settings/settings';
+import { ActivityList } from '../../../components/activity-list';
+import { useFold } from '../../../components/fold-page';
+import { NewsCards } from '../../../components/news-cards';
+import { colors, monoFont } from '../../../components/theme';
+import { Button, ButtonRow, IconButton, NetworkBadge, SectionTitle, Spacer, textStyles, Title } from '../../../components/ui';
+import { accountZeroAddress } from '../../../lib/account';
+import { formatGhost } from '../../../lib/home/balance-format';
+import { balanceStatus } from '../../../lib/home/cache-refresh';
+import { SAMPLE_NEWS } from '../../../lib/home/news';
+import { useFaucet } from '../../../lib/home/use-faucet';
+import { useHome, useNow } from '../../../lib/home/use-home';
+import { FOLD_GAP, leftColumnWidth, useLayout } from '../../../lib/layout';
+import { buildNetwork, offersTestGhost } from '../../../lib/network/build-network';
+import { useTestNetwork } from '../../../lib/node/test-network';
+import { useSettings } from '../../../lib/settings/settings';
 
 const NO_INSETS = { left: 0, right: 0 };
 

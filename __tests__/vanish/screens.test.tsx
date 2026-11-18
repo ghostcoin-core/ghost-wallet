@@ -3,8 +3,8 @@ import type { ComponentType } from 'react';
 import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import SummonScreen from '../../app/summon';
-import VanishScreen from '../../app/vanish';
+import SummonScreen from '../../app/(tabs)/(home)/summon';
+import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import { PHANTOM_KEY_LABEL } from '../../components/vanish-ui';
 import { NOT_FOUND_MESSAGE } from '../../lib/vanish/status-mapping';
 import { RECOVERY_WORDS_IN_KEY_FIELD } from '../../lib/vanish/word-validation';

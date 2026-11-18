@@ -98,21 +98,6 @@ export function AppIcon() {
   );
 }
 
-export function BackButton({ onPress }: { onPress(): void }) {
-  return (
-    <Pressable
-      accessibilityLabel="Back"
-      accessibilityRole="button"
-      hitSlop={4}
-      onPress={onPress}
-      style={styles.iconButton}
-      testID="back-button"
-    >
-      <View style={styles.chevron} />
-    </Pressable>
-  );
-}
-
 export function Highlight({ children }: { children: ReactNode }) {
   return (
     <View style={styles.highlight}>

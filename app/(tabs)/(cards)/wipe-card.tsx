@@ -2,16 +2,14 @@
 // (its file plain and empty, its keys the factory keys), and this iPhone
 // forgets the card's keys. The Phantom Key's coins stay with the key: its
 // words still Summon them.
-import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
-import { colors } from '../components/theme';
-import { Button, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { CardCancelled, cardsSupported, wipePhantomKeyCard } from '../modules/ghost-nfc';
+import { colors } from '../../../components/theme';
+import { Button, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
+import { CardCancelled, cardsSupported, wipePhantomKeyCard } from '../../../modules/ghost-nfc';
 
 export default function WipeCardScreen() {
-  const router = useRouter();
   const [cards] = useState(cardsSupported);
   const [wiping, setWiping] = useState(false);
   const [wiped, setWiped] = useState(false);
@@ -39,7 +37,6 @@ export default function WipeCardScreen() {
       wide="columns"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />

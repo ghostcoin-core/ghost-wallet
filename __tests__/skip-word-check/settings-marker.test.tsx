@@ -2,8 +2,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import type { ComponentType } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import CheckWordsScreen from '../../app/check-words';
-import SettingsScreen from '../../app/(tabs)/settings';
+import CheckWordsScreen from '../../app/(tabs)/(settings)/check-words';
+import SettingsScreen from '../../app/(tabs)/(settings)/settings';
 import { backupStatusStore, createBackupStatusStore, parseBackupStatus } from '../../lib/onboarding/backup-status';
 
 // Plain test words stand in for the saved account.

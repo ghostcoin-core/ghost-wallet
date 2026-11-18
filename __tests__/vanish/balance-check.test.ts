@@ -2,7 +2,7 @@ import { act, fireEvent, render, renderHook, screen } from '@testing-library/rea
 import { createElement } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import VanishScreen from '../../app/vanish';
+import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import { formatGhost } from '../../lib/home/balance-format';
 import { MOVE_PENDING_EVERY_MS, usePendingPayments } from '../../lib/home/use-pending';
 import { buildNetwork } from '../../lib/network/build-network';

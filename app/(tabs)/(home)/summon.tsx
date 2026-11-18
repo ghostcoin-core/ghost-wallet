@@ -15,20 +15,20 @@ import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { colors, monoFont } from '../components/theme';
-import { Button, ButtonRow, Column, IconButton, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { CoinsBack, KeyLookupProgress, PaymentExit, PaymentProgress } from '../components/vanish-ui';
-import { WordField } from '../components/word-field';
-import { accountZeroAddress } from '../lib/account';
-import { formatGhost } from '../lib/home/balance-format';
-import { failureReason } from '../lib/node/failure-reason';
-import { useSettings } from '../lib/settings/settings';
-import { CARD_KEY, lookUpKey, proveRevealAgain, startReveal, type KeyLookup, type KeySource } from '../lib/vanish/actions';
-import { parseGhostAmount } from '../lib/vanish/amount';
-import type { SpentHint } from '../lib/vanish/coin-pages';
-import { keyFieldRule } from '../lib/vanish/field-rules';
-import { decodeDetails } from '../lib/vanish/payments';
-import { newestShared, openShared, paymentsChanged, shared, takeReopened } from '../lib/vanish/pending';
+import { colors, monoFont } from '../../../components/theme';
+import { Button, ButtonRow, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
+import { CoinsBack, KeyLookupProgress, PaymentExit, PaymentProgress } from '../../../components/vanish-ui';
+import { WordField } from '../../../components/word-field';
+import { accountZeroAddress } from '../../../lib/account';
+import { formatGhost } from '../../../lib/home/balance-format';
+import { failureReason } from '../../../lib/node/failure-reason';
+import { useSettings } from '../../../lib/settings/settings';
+import { CARD_KEY, lookUpKey, proveRevealAgain, startReveal, type KeyLookup, type KeySource } from '../../../lib/vanish/actions';
+import { parseGhostAmount } from '../../../lib/vanish/amount';
+import type { SpentHint } from '../../../lib/vanish/coin-pages';
+import { keyFieldRule } from '../../../lib/vanish/field-rules';
+import { decodeDetails } from '../../../lib/vanish/payments';
+import { newestShared, openShared, paymentsChanged, shared, takeReopened } from '../../../lib/vanish/pending';
 import {
   arrivedText,
   isFinal,
@@ -37,11 +37,11 @@ import {
   screenDone,
   statusOfStep,
   type RevealKind,
-} from '../lib/vanish/status-mapping';
-import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
-import { normaliseKeyText, parseWordsCheck } from '../lib/vanish/word-validation';
-import { checkKeyWords, type CorePaymentSequence } from '../modules/ghost-core';
-import { CardCancelled, cardsSupported, readPhantomKeyFromCard } from '../modules/ghost-nfc';
+} from '../../../lib/vanish/status-mapping';
+import { paymentKit, usePayment, type PaymentKit } from '../../../lib/vanish/use-payment';
+import { normaliseKeyText, parseWordsCheck } from '../../../lib/vanish/word-validation';
+import { checkKeyWords, type CorePaymentSequence } from '../../../modules/ghost-core';
+import { CardCancelled, cardsSupported, readPhantomKeyFromCard } from '../../../modules/ghost-nfc';
 
 function checkWords(text: string) {
   return parseWordsCheck(checkKeyWords(text));
@@ -236,7 +236,6 @@ export default function SummonScreen() {
       wide="columns"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />

@@ -24,11 +24,10 @@ import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { colors, monoFont } from '../components/theme';
+import { colors, monoFont } from '../../../components/theme';
 import {
   Button,
   Column,
-  IconButton,
   Logo,
   NetworkBadge,
   Panel,
@@ -37,21 +36,21 @@ import {
   TextButton,
   textStyles,
   Title,
-} from '../components/ui';
-import { SkipCheckBox } from '../components/skip-check';
-import { CardOnlyNotice, PaymentExit, PaymentProgress, PhantomKeyWords } from '../components/vanish-ui';
-import { WordField } from '../components/word-field';
-import { accountZeroAddress } from '../lib/account';
-import { formatGhost } from '../lib/home/balance-format';
-import { useHome } from '../lib/home/use-home';
-import { useLayout } from '../lib/layout';
-import { failureReason } from '../lib/node/failure-reason';
-import { pickCheckPositions } from '../lib/onboarding/word-check';
-import { asSendKit, cancelStuck } from '../lib/send/send-payment';
-import { amountMessage } from '../lib/send/validation';
-import { useSettings } from '../lib/settings/settings';
-import { minimumVanish, signVanishAgain, startCardVanish, startVanish, vanishFee } from '../lib/vanish/actions';
-import { coversVanish, parseGhostAmount } from '../lib/vanish/amount';
+} from '../../../components/ui';
+import { SkipCheckBox } from '../../../components/skip-check';
+import { CardOnlyNotice, PaymentExit, PaymentProgress, PhantomKeyWords } from '../../../components/vanish-ui';
+import { WordField } from '../../../components/word-field';
+import { accountZeroAddress } from '../../../lib/account';
+import { formatGhost } from '../../../lib/home/balance-format';
+import { useHome } from '../../../lib/home/use-home';
+import { useLayout } from '../../../lib/layout';
+import { failureReason } from '../../../lib/node/failure-reason';
+import { pickCheckPositions } from '../../../lib/onboarding/word-check';
+import { asSendKit, cancelStuck } from '../../../lib/send/send-payment';
+import { amountMessage } from '../../../lib/send/validation';
+import { useSettings } from '../../../lib/settings/settings';
+import { minimumVanish, signVanishAgain, startCardVanish, startVanish, vanishFee } from '../../../lib/vanish/actions';
+import { coversVanish, parseGhostAmount } from '../../../lib/vanish/amount';
 import {
   cancelWaiting,
   discardVanish,
@@ -67,11 +66,11 @@ import {
   stoppedVanish,
   takeReopened,
   type HeldVanish,
-} from '../lib/vanish/pending';
-import { CANCEL_SENT_TEXT, isFinal, notSentReason, screenDone, statusOfStep, stepName } from '../lib/vanish/status-mapping';
-import { paymentKit, usePayment, type PaymentKit } from '../lib/vanish/use-payment';
-import type { CorePaymentSequence } from '../modules/ghost-core';
-import { CardCancelled, CardError, cardsSupported, putPhantomKeyOnCard } from '../modules/ghost-nfc';
+} from '../../../lib/vanish/pending';
+import { CANCEL_SENT_TEXT, isFinal, notSentReason, screenDone, statusOfStep, stepName } from '../../../lib/vanish/status-mapping';
+import { paymentKit, usePayment, type PaymentKit } from '../../../lib/vanish/use-payment';
+import type { CorePaymentSequence } from '../../../modules/ghost-core';
+import { CardCancelled, CardError, cardsSupported, putPhantomKeyOnCard } from '../../../modules/ghost-nfc';
 
 /**
  * Why a card was not written. A card Vanish has no words to fall back on, so
@@ -397,7 +396,6 @@ export default function VanishScreen() {
       wide="columns"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />

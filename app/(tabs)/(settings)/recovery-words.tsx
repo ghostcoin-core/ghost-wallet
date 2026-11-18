@@ -1,17 +1,15 @@
 // The account's recovery words, shown only after Touch ID or Face ID (or the passcode),
 // and hidden again as soon as the app leaves the screen.
-import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { AppState, StyleSheet, Text, View } from 'react-native';
 import { savedAccountWords } from 'ghost-core';
 
-import { colors, monoFont } from '../components/theme';
-import { Button, ButtonRow, IconButton, Logo, NetworkBadge, Screen, Spacer, textStyles, Title } from '../components/ui';
-import { useBiometric, withBiometric } from '../lib/biometric';
-import { authenticate, authFailureMessage } from '../lib/device-auth';
+import { colors, monoFont } from '../../../components/theme';
+import { Button, ButtonRow, Logo, NetworkBadge, Screen, Spacer, textStyles, Title } from '../../../components/ui';
+import { useBiometric, withBiometric } from '../../../lib/biometric';
+import { authenticate, authFailureMessage } from '../../../lib/device-auth';
 
 export default function RecoveryWordsScreen() {
-  const router = useRouter();
   const biometric = useBiometric();
   const [words, setWords] = useState<string[] | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -44,7 +42,6 @@ export default function RecoveryWordsScreen() {
       testID="recovery-words-screen"
       topBar={
         <>
-          <IconButton icon="back" label="Back" onPress={() => router.back()} testID="back" />
           <Spacer />
           <NetworkBadge />
           <Logo />

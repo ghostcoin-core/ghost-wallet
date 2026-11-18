@@ -6,11 +6,11 @@ import { useContext } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaInsetsContext, SafeAreaView } from 'react-native-safe-area-context';
 
-import { useFold } from '../../components/fold-page';
-import { Icon } from '../../components/icons';
-import { colors } from '../../components/theme';
-import { NetworkBadge, Panel, Row, Title } from '../../components/ui';
-import { FOLD_GAP, leftColumnWidth, useLayout } from '../../lib/layout';
+import { useFold } from '../../../components/fold-page';
+import { Icon } from '../../../components/icons';
+import { colors } from '../../../components/theme';
+import { NetworkBadge, Panel, Row, Title } from '../../../components/ui';
+import { FOLD_GAP, leftColumnWidth, useLayout } from '../../../lib/layout';
 
 type Note = { id: string; title: string; body: string };
 

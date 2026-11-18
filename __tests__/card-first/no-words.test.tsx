@@ -6,7 +6,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import VanishScreen from '../../app/vanish';
+import VanishScreen from '../../app/(tabs)/(home)/vanish';
 import { CARD_ONLY_TEXT } from '../../components/vanish-ui';
 import { buildNetwork } from '../../lib/network/build-network';
 import { heldKey, resetPending } from '../../lib/vanish/pending';
@@ -360,7 +360,7 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     const first = renderOn(device);
     mockPut.mockRejectedValueOnce(new CardCancelled());
     await putOnCard();
-    fireEvent.press(screen.getByTestId('back'));
+    // Leaving with the system's Back closes the screen.
     first.unmount();
 
     renderOn(device);

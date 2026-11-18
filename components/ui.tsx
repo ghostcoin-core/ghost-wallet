@@ -5,6 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useLayout } from '../lib/layout';
 import { Icon, type IconName } from './icons';
+import { useSystemBarHeight } from './system-bar';
 import { colors, monoFont } from './theme';
 
 // The kit's primary logo, for light backgrounds.
@@ -30,10 +31,16 @@ type ScreenProps = {
  */
 export function Screen({ testID, background = 'paper', topBar, children, wide }: ScreenProps) {
   const { twoColumns } = useLayout();
+  const bar = useSystemBarHeight();
   const pageColor = background === 'mist' ? colors.mist : colors.paper;
   const split = twoColumns && wide !== undefined;
   return (
-    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.page, { backgroundColor: pageColor }]} testID={testID}>
+    <SafeAreaView
+      // Under the system's bar the top safe area is already taken.
+      edges={bar > 0 ? ['left', 'right'] : ['top', 'left', 'right']}
+      style={[styles.page, { backgroundColor: pageColor }]}
+      testID={testID}
+    >
       <View style={styles.topBar}>{topBar}</View>
       <ScrollView
         style={styles.scroll}

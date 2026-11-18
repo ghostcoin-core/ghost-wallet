@@ -13,9 +13,9 @@
 // for cards homed elsewhere.
 import { act, fireEvent, screen } from '@testing-library/react-native';
 
-import CheckCardScreen from '../../app/check-card';
-import FillCardScreen from '../../app/fill-card';
-import OpenCardScreen from '../../app/open-card';
+import CheckCardScreen from '../../app/(tabs)/(cards)/check-card';
+import FillCardScreen from '../../app/(tabs)/(cards)/fill-card';
+import OpenCardScreen from '../../app/(tabs)/(cards)/open-card';
 import { RELAY_PROBLEMS } from '../../modules/ghost-nfc/relay';
 import { GHOST, HOME_VECTORS, hexOf, resetWorld, THREE_REGIONS, UID_HEX, type World } from './fake-seal';
 import { DEVICE_NAMES, fakeKit, isRed, renderOn } from './screen-kit';
