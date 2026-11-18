@@ -129,6 +129,11 @@ function renderOn(device: Device) {
 async function reachCheck() {
   await act(async () => {});
   fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
+  // Where the phone reads cards, the words are a choice made before Continue.
+  const wordsChoice = screen.queryByTestId('vanish-choose-words');
+  if (wordsChoice) {
+    fireEvent.press(wordsChoice);
+  }
   await act(async () => {
     fireEvent.press(screen.getByTestId('vanish-make-key'));
   });
@@ -162,7 +167,10 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   it('offers the card on the amount step, as the card-only Vanish', async () => {
     renderOn(device);
     await act(async () => {});
-    expect(screen.getByTestId('vanish-make-card')).toHaveTextContent('Put on a card');
+    // The card is the choice already made, and Continue makes the card-only key.
+    expect(screen.getByTestId('vanish-choose-card').props.accessibilityState).toEqual({ selected: true });
+    expect(screen.getByTestId('vanish-choose-card')).toHaveTextContent(/On a card/);
+    expect(screen.getByTestId('vanish-make-card')).toHaveTextContent('Continue');
   });
 
   it('renders no card button on the check step, and never writes a card', async () => {

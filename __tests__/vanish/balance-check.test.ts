@@ -192,6 +192,11 @@ describe('the Vanish screen', () => {
     fireEvent.changeText(screen.getByTestId('vanish-amount'), typed);
     expect(screen.getByTestId('vanish-not-enough')).toHaveTextContent(NOT_ENOUGH, { exact: true });
     expect(screen.getByTestId('vanish-make-key')).toBeDisabled();
+    // Where the phone reads cards, the words are a choice made before Continue.
+    const wordsChoice = screen.queryByTestId('vanish-choose-words');
+    if (wordsChoice) {
+      fireEvent.press(wordsChoice);
+    }
     await act(async () => {
       fireEvent.press(screen.getByTestId('vanish-make-key'));
     });
@@ -210,6 +215,11 @@ describe('the Vanish screen', () => {
 
     fireEvent.changeText(screen.getByTestId('vanish-amount'), formatWei(BALANCE - FEE));
     expect(screen.queryByTestId('vanish-not-enough')).toBeNull();
+    // Where the phone reads cards, the words are a choice made before Continue.
+    const wordsChoice = screen.queryByTestId('vanish-choose-words');
+    if (wordsChoice) {
+      fireEvent.press(wordsChoice);
+    }
     await act(async () => {
       fireEvent.press(screen.getByTestId('vanish-make-key'));
     });
@@ -224,6 +234,11 @@ describe('the Vanish screen', () => {
 
     fireEvent.changeText(screen.getByTestId('vanish-amount'), '9');
     expect(screen.queryByTestId('vanish-not-enough')).toBeNull();
+    // Where the phone reads cards, the words are a choice made before Continue.
+    const wordsChoice = screen.queryByTestId('vanish-choose-words');
+    if (wordsChoice) {
+      fireEvent.press(wordsChoice);
+    }
     await act(async () => {
       fireEvent.press(screen.getByTestId('vanish-make-key'));
     });

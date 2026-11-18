@@ -398,6 +398,11 @@ describe('the Vanish screen of a Vanish the check refused', () => {
     await renderVanish();
     expect(screen.queryByTestId('vanish-stopped')).toBeNull();
     fireEvent.changeText(screen.getByTestId('vanish-amount'), '1');
+    // Where the phone reads cards, the words are a choice made before Continue.
+    const wordsChoice = screen.queryByTestId('vanish-choose-words');
+    if (wordsChoice) {
+      fireEvent.press(wordsChoice);
+    }
     await act(async () => {
       fireEvent.press(screen.getByTestId('vanish-make-key'));
     });

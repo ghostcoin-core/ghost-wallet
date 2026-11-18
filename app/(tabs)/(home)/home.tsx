@@ -64,7 +64,7 @@ export default function HomeScreen() {
           <Spacer />
           <IconButton
             icon="tap"
-            label="Tap a card"
+            label="Check a card"
             onPress={() => router.push('/check-card')}
             testID="open-check-card"
           />

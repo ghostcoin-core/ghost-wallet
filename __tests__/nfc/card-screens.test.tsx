@@ -1,6 +1,6 @@
+import { StyleSheet } from 'react-native';
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import type { ComponentType } from 'react';
-import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import SummonScreen from '../../app/(tabs)/(home)/summon';
@@ -75,12 +75,22 @@ function renderOn(device: Device, Screen: ComponentType) {
   );
 }
 
+/** Whether the screen is split in two parts around the open Duo's fold. */
 function sideBySide(testID: string): boolean {
+  if (screen.queryByTestId(testID.replace(/-content$/, '-parts')) !== null) {
+    return true;
+  }
+  // A screen not yet on the fold-aware page sets its columns side by side itself.
   return StyleSheet.flatten(screen.getByTestId(testID).props.contentContainerStyle).flexDirection === 'row';
 }
 
 async function reachCheck() {
   fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
+  // Where the phone reads cards, the words are a choice made before Continue.
+  const wordsChoice = screen.queryByTestId('vanish-choose-words');
+  if (wordsChoice) {
+    fireEvent.press(wordsChoice);
+  }
   await act(async () => {
     fireEvent.press(screen.getByTestId('vanish-make-key'));
   });

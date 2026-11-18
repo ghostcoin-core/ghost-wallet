@@ -1,6 +1,6 @@
+import { StyleSheet } from 'react-native';
 import { act, fireEvent, render, screen, within } from '@testing-library/react-native';
 import type { ComponentType } from 'react';
-import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import SummonScreen from '../../app/(tabs)/(home)/summon';
@@ -87,9 +87,13 @@ function renderOn(device: Device, Screen: ComponentType) {
   );
 }
 
+/** Whether the screen is split in two parts around the open Duo's fold. */
 function sideBySide(testID: string): boolean {
-  const content = screen.getByTestId(testID);
-  return StyleSheet.flatten(content.props.contentContainerStyle).flexDirection === 'row';
+  if (screen.queryByTestId(testID.replace(/-content$/, '-parts')) !== null) {
+    return true;
+  }
+  // A screen not yet on the fold-aware page sets its columns side by side itself.
+  return StyleSheet.flatten(screen.getByTestId(testID).props.contentContainerStyle).flexDirection === 'row';
 }
 
 beforeEach(() => {
@@ -100,6 +104,11 @@ beforeEach(() => {
 /** Makes a key, checks its three words and sends the Vanish: the screen shows its progress. */
 async function vanishSent() {
   fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
+  // Where the phone reads cards, the words are a choice made before Continue.
+  const wordsChoice = screen.queryByTestId('vanish-choose-words');
+  if (wordsChoice) {
+    fireEvent.press(wordsChoice);
+  }
   await act(async () => {
     fireEvent.press(screen.getByTestId('vanish-make-key'));
   });
@@ -161,6 +170,11 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(sideBySide('vanish-screen-content')).toBe(open);
 
     fireEvent.changeText(screen.getByTestId('vanish-amount'), '1.5');
+    // Where the phone reads cards, the words are a choice made before Continue.
+    const wordsChoice = screen.queryByTestId('vanish-choose-words');
+    if (wordsChoice) {
+      fireEvent.press(wordsChoice);
+    }
     await act(async () => {
       fireEvent.press(screen.getByTestId('vanish-make-key'));
     });

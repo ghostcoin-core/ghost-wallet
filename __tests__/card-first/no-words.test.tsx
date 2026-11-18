@@ -230,12 +230,18 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   it('offers the card first, and the words second, on the amount step', async () => {
     renderOn(device);
     await typeAmount();
-    const card = screen.getByTestId('vanish-make-card');
-    const words = screen.getByTestId('vanish-make-key');
-    expect(card).toHaveTextContent('Put on a card');
-    expect(words).toHaveTextContent('Write down 24 words');
-    const ids = screen.getAllByTestId(/^vanish-make-(card|key)$/).map((button) => button.props.testID);
-    expect(ids).toEqual(['vanish-make-card', 'vanish-make-key']);
+    // Two choices, the card first and already chosen, and one button.
+    const choices = screen.getAllByTestId(/^vanish-choose-(card|words)$/);
+    expect(choices.map((choice) => choice.props.testID)).toEqual(['vanish-choose-card', 'vanish-choose-words']);
+    expect(choices[0]).toHaveTextContent(/On a card/);
+    expect(choices[1]).toHaveTextContent(/24 words/);
+    expect(choices.map((choice) => choice.props.accessibilityState.selected)).toEqual([true, false]);
+    expect(screen.getAllByTestId(/^vanish-make-(card|key)$/).map((button) => button.props.testID)).toEqual(['vanish-make-card']);
+
+    fireEvent.press(choices[1]);
+
+    expect(screen.getAllByTestId(/^vanish-make-(card|key)$/).map((button) => button.props.testID)).toEqual(['vanish-make-key']);
+    expect(screen.getByTestId('vanish-choose-words').props.accessibilityState).toEqual({ selected: true });
   });
 
   it('offers only the words when this phone cannot read cards', async () => {
@@ -401,6 +407,11 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   it('keeps the words Vanish as it was', async () => {
     renderOn(device);
     await typeAmount();
+    // Where the phone reads cards, the words are a choice made before Continue.
+    const wordsChoice = screen.queryByTestId('vanish-choose-words');
+    if (wordsChoice) {
+      fireEvent.press(wordsChoice);
+    }
     await act(async () => {
       fireEvent.press(screen.getByTestId('vanish-make-key'));
     });
