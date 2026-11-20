@@ -1,4 +1,4 @@
-// A Ghost Java card (card-applet/), as JavaScript sees it: four native flows
+// A Ghost Java card (card-applet/), as JavaScript sees it: five native flows
 // (ios/JavaCard.swift), each one tap. The card's commands and answers stay
 // in native code; each flow resolves with public parts only, as hex: the
 // card's Identify, its certificate, a seal statement and its signature, the
@@ -26,6 +26,26 @@ export type GhostCardNative = {
   javaCardOpen(alert: string, checkChallenge: Uint8Array): Promise<NativeTap>;
   /** Refills only the opened card `cardId` (16 bytes) at `fill`; any other card is refused untouched. */
   javaCardRefill(alert: string, cardId: Uint8Array, fill: number): Promise<NativeTap>;
+  /**
+   * In one hold: clears the opened card `cardId` at `fill` (or takes it blank
+   * at `fill`), then Make with `make` and a Check over `challenge`, as
+   * javaCardFill. Any other card is refused untouched.
+   */
+  javaCardRemake(alert: string, cardId: Uint8Array, fill: number, make: Uint8Array, challenge: Uint8Array): Promise<NativeTap>;
+};
+
+/**
+ * An opened card's key, kept in the Keychain while its coin's Summon settles
+ * (ios/CardKeyKeychain.swift), under the coin's public marker as hex. The key
+ * goes only between the native core and the Keychain.
+ */
+export type CardKeyStore = {
+  /** Keeps the card key the native core holds now; throws when it cannot. */
+  keepCardKey(tag: string): void;
+  /** Gives a kept key back to the native core as its card key; false when none is kept. */
+  restoreCardKey(tag: string): boolean;
+  hasKeptCardKey(tag: string): boolean;
+  forgetKeptCardKey(tag: string): void;
 };
 
 /** What a native flow resolves with: hex strings, numbers and flags. */
@@ -176,10 +196,24 @@ export function readTap(raw: NativeTap): CardTap {
 /** The native flows, or null in a build without them (the simulator, tests). */
 export function ghostCardNative(): GhostCardNative | null {
   const nfc = requireOptionalNativeModule<Partial<GhostCardNative> & { isSupported?(): boolean }>('GhostNfc');
-  if (!nfc || typeof nfc.javaCardCheck !== 'function' || !(nfc.isSupported?.() ?? false)) {
+  if (
+    !nfc ||
+    typeof nfc.javaCardCheck !== 'function' ||
+    typeof nfc.javaCardRemake !== 'function' ||
+    !(nfc.isSupported?.() ?? false)
+  ) {
     return null;
   }
   return nfc as GhostCardNative;
+}
+
+/** The Keychain's opened-card keys, or null in a build without them. */
+export function cardKeyStore(): CardKeyStore | null {
+  const nfc = requireOptionalNativeModule<Partial<CardKeyStore>>('GhostNfc');
+  if (!nfc || typeof nfc.keepCardKey !== 'function' || typeof nfc.restoreCardKey !== 'function') {
+    return null;
+  }
+  return nfc as CardKeyStore;
 }
 
 /** Runs one native flow and reads its result, with failures as `GhostCardError` or `CardCancelled`. */

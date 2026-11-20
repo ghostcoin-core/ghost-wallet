@@ -1,171 +1,112 @@
-// Open a Ghost card into my wallet: tap the card. It is a bearer object, so
-// nothing else is needed. In one tap the card signs a seal statement over
-// this iPhone's challenge, then releases its seed material. The native core
-// checks the card's signature, recomputes the Phantom Key, F, the commitment
-// and the marker, and holds the key only when it makes exactly the card's
-// coin. The app then at once Summons the coin into this account with the
-// usual restart-safe payment. Once that settles and the chain shows the coin
-// spent, the card can be reused: Refill empties it, and Fill gives it a new
-// key.
+// Take GHOST off a Ghost card, like a withdrawal from a bank account: hold
+// the card to see what it holds, say how much to take (or all of it), then
+// hold it again. The card works like a vault (lib/ghost-card/vault.ts): in
+// that one hold it gives up its old key to this phone's Keychain and makes a
+// new key for what is left; what was taken reaches the wallet, and what is
+// left goes back onto the card, in the background. Nothing else is asked:
+// no code, no card states.
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { GhostCardStatusPanel } from '../../../components/ghost-card-ui';
+import { CardBalancePanel } from '../../../components/ghost-card-ui';
 import { CardBusy } from '../../../components/seal-ui';
-import { colors } from '../../../components/theme';
+import { colors, monoFont } from '../../../components/theme';
 import { Button, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
-import { CoinsBack, PaymentExit, PaymentProgress } from '../../../components/vanish-ui';
 import { accountZeroAddress } from '../../../lib/account';
-import { ghostCardDeps } from '../../../lib/ghost-card/deps';
-import { openGhostCard, refillGhostCard, type RefillTarget } from '../../../lib/ghost-card/flows';
-import type { GhostCardStatus } from '../../../lib/ghost-card/status';
+import { checkGhostCard } from '../../../lib/ghost-card/flows';
+import { cardBalance, changeCard, moveChanges, takeProblem, type CardBalance } from '../../../lib/ghost-card/vault';
+import { vaultDeps } from '../../../lib/ghost-card/vault-deps';
+import { useHome } from '../../../lib/home/use-home';
 import { ghostText } from '../../../lib/seal/card-status';
 import { useSettings } from '../../../lib/settings/settings';
-import { CARD_KEY, proveRevealAgain, startReveal } from '../../../lib/vanish/actions';
-import { discardSpentElsewhere, paymentsChanged, shared } from '../../../lib/vanish/pending';
-import { arrivedText, notSentReason, screenDone } from '../../../lib/vanish/status-mapping';
-import { paymentKit, usePayment, type PaymentKit } from '../../../lib/vanish/use-payment';
-import type { CorePaymentSequence } from '../../../modules/ghost-core';
+import { minimumVanish, summonFee, vanishFee } from '../../../lib/vanish/actions';
+import { parseGhostAmount } from '../../../lib/vanish/amount';
+import { paymentKit } from '../../../lib/vanish/use-payment';
 
-function forgetCardKey(kit: PaymentKit | null) {
-  try {
-    kit?.core.forgetCardKey();
-  } catch {
-    // A core without the card calls holds no card key.
-  }
-}
-
-export default function OpenGhostCardScreen() {
+export default function TakeOffCardScreen() {
   const router = useRouter();
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
   const kit = useMemo(() => paymentKit(nodeUrl), [nodeUrl]);
-  const deps = useMemo(() => ghostCardDeps(kit), [kit]);
-  const cards = deps.nfc !== null && deps.core !== null;
+  const vault = useMemo(() => vaultDeps(kit, address), [kit, address]);
+  const cards = vault.card.nfc !== null && vault.card.core !== null && vault.keys !== null;
+  const { view: home } = useHome(nodeUrl, address);
 
-  const [busy, setBusy] = useState<'open' | 'summon' | 'refill' | null>(null);
-  const [status, setStatus] = useState<GhostCardStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [opened, setOpened] = useState<{
-    amountWei: bigint | null;
-    cardId: Uint8Array;
-    fill: number;
-    cardNumber: string;
-    ms: number;
-  } | null>(null);
-  const [sequence, setSequence] = useState<CorePaymentSequence | null>(null);
-  // A card opened before whose coin is already taken off: it can only be reused.
-  const [spentCard, setSpentCard] = useState<RefillTarget | null>(null);
-  const [refilled, setRefilled] = useState<{ fill: number; ms: number } | null>(null);
-  const settled = useRef(false);
-  // With `start`, Summon's Open a card button was the go-ahead: the card read starts at once.
+  // With `start`, Summon's own button was the go-ahead: the card is read at once.
   const { start } = useLocalSearchParams<{ start?: string }>();
-  const autoOpened = useRef(false);
-
-  const rebuild = useMemo(
-    () => (kit && sequence && address ? proveRevealAgain(kit, sequence, CARD_KEY, address) : null),
-    [kit, sequence, address],
-  );
-  const payment = usePayment(kit, sequence, rebuild, true);
-
-  // The card's key leaves the native core with the screen, as on Summon.
-  useEffect(
-    () => () => {
-      forgetCardKey(kit);
-      deps.core?.forgetJavaCardRelease();
-    },
-    [kit, deps],
-  );
+  const started = useRef(false);
+  const [busy, setBusy] = useState<'look' | 'take' | null>(null);
+  const [balance, setBalance] = useState<CardBalance | null>(null);
+  const [amountText, setAmountText] = useState('');
+  const [all, setAll] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [minimum, setMinimum] = useState<bigint | null>(null);
+  const [fees, setFees] = useState<{ summon: bigint; vanish: bigint } | null>(null);
+  const [done, setDone] = useState<{ cardNumber: string; takenWei: bigint; afterWei: bigint } | null>(null);
 
   useEffect(() => {
-    if (payment?.status === 'settled' && !settled.current) {
-      settled.current = true;
-      forgetCardKey(kit);
-    }
-  }, [payment?.status, kit]);
-
-  async function open() {
-    if (busy !== null || !kit || !address) {
+    if (!kit) {
       return;
     }
-    setBusy('open');
+    minimumVanish(kit).then(setMinimum, () => setMinimum(null));
+    Promise.all([summonFee(kit), vanishFee(kit)]).then(([summon, v]) => setFees({ summon, vanish: v }), () => setFees(null));
+  }, [kit]);
+
+  const held = balance?.kind === 'holds' ? balance.amountWei : 0n;
+  const typed = all ? held : parseGhostAmount(amountText);
+  const wallet = home.snapshot ? BigInt(home.snapshot.balanceWei) : null;
+  const problem = balance?.kind === 'holds' ? takeProblem(typed, held, minimum, wallet, fees) : null;
+  const takeOk = balance?.kind === 'holds' && typed !== null && typed > 0n && minimum !== null && problem === null;
+
+  async function look() {
+    if (busy !== null || !cards) {
+      return;
+    }
+    setBusy('look');
     setError(null);
-    setStatus(null);
-    setSpentCard(null);
-    let result;
+    setBalance(null);
+    setAll(false);
+    setAmountText('');
     try {
-      result = await openGhostCard(deps);
+      const checked = await checkGhostCard(vault.card);
+      if (checked) {
+        setBalance(cardBalance(vault, checked));
+      }
     } finally {
       setBusy(null);
     }
-    if (!result.ok) {
-      setStatus(result.status);
-      setSpentCard(result.reuse ?? null);
-      return;
-    }
-    setOpened({
-      amountWei: result.amountWei,
-      cardId: result.cardId,
-      fill: result.fill,
-      cardNumber: result.cardNumber,
-      ms: result.ms,
-    });
-    await summon();
   }
 
   useEffect(() => {
-    if (start === '1' && cards && kit && address && !autoOpened.current) {
-      autoOpened.current = true;
-      void open();
+    if (start === '1' && cards && !started.current) {
+      started.current = true;
+      void look();
     }
-    // Runs once, when the screen opens from Summon.
+    // Runs once, when Summon's button opened this screen.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [start, cards, kit, address]);
+  }, [start, cards]);
 
-  /** Summons the whole coin of the opened card into this wallet's account. */
-  async function summon() {
-    if (!kit || !address) {
+  async function take() {
+    if (!takeOk || typed === null || minimum === null || busy !== null) {
       return;
     }
-    setBusy('summon');
+    setBusy('take');
     setError(null);
     try {
-      const started = await startReveal(kit, CARD_KEY, address, null);
-      setSequence(shared(started));
-      paymentsChanged();
-    } catch (failure) {
-      setError(`The card is open, but its coin could not be summoned yet. ${notSentReason(failure, kit.nodeUrl)}`);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  /** Empties the card just opened, or the spent one just tapped (no other card), then goes on to fill it again. */
-  async function refill() {
-    const target = opened ? { cardId: opened.cardId, fill: opened.fill } : spentCard;
-    if (busy !== null || !target) {
-      return;
-    }
-    setBusy('refill');
-    setError(null);
-    try {
-      const result = await refillGhostCard(deps, target);
+      const takeAll = all || typed === held;
+      const result = await changeCard(vault, { kind: 'take', amountWei: takeAll ? null : typed }, minimum);
       if (!result.ok) {
-        if (result.status) {
-          setStatus(result.status);
-        }
+        setError(result.message);
         return;
       }
-      setRefilled({ fill: result.fill, ms: result.ms });
+      setDone({ cardNumber: result.cardNumber, takenWei: result.beforeWei - result.afterWei, afterWei: result.afterWei });
+      // The rest goes on in the background; started now, not at Home's next move.
+      void moveChanges(vault);
     } finally {
       setBusy(null);
     }
   }
-
-  const paid = payment?.status;
-  const arrived = paid ? arrivedText(paid, 'summon') : null;
-  const done = paid === 'settled';
 
   return (
     <Screen
@@ -180,65 +121,24 @@ export default function OpenGhostCardScreen() {
       }
     >
       <Column>
-        <Title>Open a Ghost card</Title>
-        {!opened ? (
-          <>
-            <Text style={textStyles.body}>
-              Opening releases the card&apos;s key to this iPhone and brings its GHOST into this wallet at once. After that
-              the card says Opened to everyone who checks it. Nothing but the card is needed.
-            </Text>
-            <Button
-              label={busy === 'open' ? 'Hold the card near the iPhone' : 'Tap the card to open it'}
-              icon="receive"
-              disabled={busy !== null || !cards}
-              onPress={() => void open()}
-              testID="ghost-open-run"
-            />
-          </>
-        ) : null}
-        {busy !== null ? (
-          <CardBusy
-            text={
-              busy === 'open'
-                ? 'Checking the card and opening it…'
-                : busy === 'summon'
-                  ? 'Summoning the coin into this wallet…'
-                  : 'Emptying the card for its next fill…'
-            }
-            testID="ghost-open-spinner"
-          />
-        ) : null}
-        {error ? (
-          <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="ghost-open-error">
-            {error}
+        <Title>Take off card</Title>
+        {!done ? (
+          <Text style={textStyles.body}>
+            Move GHOST from your card into your wallet. Take some or all of it; the rest stays on the card.
           </Text>
         ) : null}
-        {opened && !sequence && busy === null ? (
-          <Button label="Summon it now" onPress={() => void summon()} testID="ghost-open-summon-again" />
+        {!balance && !done ? (
+          <Button
+            label={busy === 'look' ? 'Hold the card near the iPhone' : 'Hold your card to see what it holds'}
+            icon="tap"
+            disabled={busy !== null || !cards}
+            onPress={() => void look()}
+            testID="ghost-open-look"
+          />
         ) : null}
-        {(done || spentCard) && !refilled ? (
-          <Panel style={styles.form} testID="ghost-open-reuse">
-            <Text style={textStyles.quiet}>Reuse this card</Text>
-            <Text style={textStyles.body}>
-              Its coin is spent, so the card can be emptied and filled again with a new key.
-            </Text>
-            <Button
-              label={busy === 'refill' ? 'Hold the card near the iPhone' : 'Reuse this card'}
-              icon="key"
-              secondary
-              disabled={busy !== null}
-              onPress={() => void refill()}
-              testID="ghost-open-refill"
-            />
-          </Panel>
-        ) : null}
-        {refilled ? (
-          <Panel style={styles.form} testID="ghost-open-refilled">
-            <Text style={textStyles.body}>
-              The card is blank again (fill {refilled.fill}), ready for its next fill. Tap took {(refilled.ms / 1000).toFixed(1)} s.
-            </Text>
-            <Button label="Fill it now" icon="key" onPress={() => router.replace('/fill-ghost-card')} testID="ghost-open-fill-next" />
-          </Panel>
+        {balance && !done ? <CardBalancePanel balance={balance} testID="ghost-open-balance" /> : null}
+        {balance && balance.kind !== 'holds' && !done ? (
+          <Button label="Try another card" secondary onPress={() => void look()} testID="ghost-open-look-again" />
         ) : null}
         {!cards ? (
           <Text style={textStyles.quiet} testID="ghost-open-unavailable">
@@ -247,43 +147,77 @@ export default function OpenGhostCardScreen() {
         ) : null}
       </Column>
       <Column>
-        {opened ? (
-          <Panel style={styles.form} testID="ghost-open-summary">
-            <Text style={textStyles.quiet}>Card {opened.cardNumber}</Text>
-            <Text style={textStyles.body}>
-              Opened (fill {opened.fill})
-              {opened.amountWei !== null ? `: ${ghostText(opened.amountWei)} GHOST coming to this wallet` : ''}. Tap took{' '}
-              {(opened.ms / 1000).toFixed(1)} s.
-            </Text>
-          </Panel>
-        ) : null}
-        {paid ? (
+        {balance?.kind === 'holds' && !done ? (
           <>
-            <PaymentProgress status={paid} kind="summon" step={payment?.step} error={payment?.error} />
-            {arrived ? <CoinsBack text={arrived} /> : null}
-            {payment?.spentElsewhere ? (
-              <>
-                <Text accessibilityLiveRegion="polite" style={textStyles.body} testID="ghost-open-spent-elsewhere">
-                  These coins were already summoned by another try of this Summon. This one never reached the chain, and
-                  nothing more is sent. Discard it.
-                </Text>
-                <Button
-                  label="Discard"
-                  onPress={() => {
-                    if (kit && sequence) {
-                      discardSpentElsewhere(kit, sequence.record().id);
-                    }
-                    router.back();
+            <Panel style={styles.form}>
+              <Text style={textStyles.quiet}>How much to take off</Text>
+              <View style={styles.amountRow}>
+                <TextInput
+                  accessibilityLabel="Amount in GHOST"
+                  editable={busy === null}
+                  keyboardType="decimal-pad"
+                  onChangeText={(text) => {
+                    setAll(false);
+                    setAmountText(text);
                   }}
-                  testID="ghost-open-discard"
+                  placeholder="0.0"
+                  placeholderTextColor={colors.quiet}
+                  style={styles.amount}
+                  testID="ghost-open-amount"
+                  value={all ? ghostText(held) : amountText}
                 />
-              </>
-            ) : (
-              <PaymentExit final={screenDone(paid)} onLeave={() => router.back()} testPrefix="ghost-open" />
-            )}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: all }}
+                  onPress={() => setAll(true)}
+                  style={({ pressed }) => [styles.all, all && styles.allOn, pressed && styles.pressed]}
+                  testID="ghost-open-all"
+                >
+                  <Text style={[styles.allText, all && styles.allTextOn]}>All</Text>
+                </Pressable>
+              </View>
+              {problem ? (
+                <Text style={[textStyles.body, styles.error]} testID="ghost-open-amount-error">
+                  {problem}
+                </Text>
+              ) : null}
+            </Panel>
+            <Button
+              label={busy === 'take' ? 'Keep holding the card' : `Hold your card to take off ${ghostText(typed ?? 0n)} GHOST`}
+              icon="tap"
+              disabled={busy !== null || !takeOk}
+              onPress={() => void take()}
+              testID="ghost-open-take"
+            />
           </>
-        ) : status ? (
-          <GhostCardStatusPanel status={status} testID="ghost-open-status" />
+        ) : null}
+        {busy !== null ? (
+          <CardBusy
+            text={busy === 'look' ? 'Reading the card…' : 'Keep the card near the top of the iPhone…'}
+            testID="ghost-open-spinner"
+          />
+        ) : null}
+        {error ? (
+          <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="ghost-open-error">
+            {error}
+          </Text>
+        ) : null}
+        {done ? (
+          <>
+            <CardBalancePanel
+              balance={
+                done.afterWei === 0n
+                  ? { kind: 'empty', cardNumber: done.cardNumber }
+                  : { kind: 'holds', cardNumber: done.cardNumber, amountWei: done.afterWei, updating: true }
+              }
+              testID="ghost-open-after"
+            />
+            <Text style={textStyles.body} testID="ghost-open-done">
+              Took off {ghostText(done.takenWei)} GHOST. It reaches your wallet in about a minute, less the network
+              fee. You can put the card away.
+            </Text>
+            <Button label="Done" onPress={() => router.back()} testID="ghost-open-leave" />
+          </>
         ) : null}
       </Column>
     </Screen>
@@ -294,6 +228,41 @@ const styles = StyleSheet.create({
   form: {
     gap: 8,
     padding: 16,
+  },
+  amountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  amount: {
+    flex: 1,
+    minHeight: 44,
+    color: colors.ink,
+    fontFamily: monoFont,
+    fontSize: 22,
+  },
+  all: {
+    minHeight: 36,
+    paddingHorizontal: 14,
+    justifyContent: 'center',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  allOn: {
+    backgroundColor: colors.violet,
+    borderColor: colors.violet,
+  },
+  allText: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  allTextOn: {
+    color: colors.paper,
+  },
+  pressed: {
+    opacity: 0.6,
   },
   error: {
     color: colors.danger,

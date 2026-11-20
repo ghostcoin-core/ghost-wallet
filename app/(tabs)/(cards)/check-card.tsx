@@ -1,33 +1,29 @@
-// Check NFC Chip: tap a card and see what it holds. A Ghost card (the Java
-// Card applet) is checked on this iPhone alone: its certificate against the
-// issuer keys this app pins, its seal statement's signature over this tap's
-// own challenge, the card number, and its coin on chain, buried and unspent.
-// No Seal or Ghost server takes part. A card is shown Sealed only when every
-// check passes; anything else is "not safe to accept".
+// See what a card holds: tap a card and see its one balance. A Ghost card
+// (the Java Card applet) is read on this iPhone alone: its certificate
+// against the issuer keys this app pins, its signature over this tap's own
+// challenge, and its coin on chain. What it holds is shown as one amount
+// (lib/ghost-card/vault.ts): a card whose last change is still going
+// through shows what it will hold, an emptied card shows Empty, and only a
+// fake or broken card is shown as a problem.
 //
-// An NTAG 424 card is told apart in the same tap: it is "Carry to Claim",
-// and a Ghost Sealed card among them can still be checked with its Seal.
+// An NTAG 424 card is told apart in the same tap, and a Ghost Sealed card
+// among them can still be checked with its Seal.
 import { useRouter } from 'expo-router';
 import { useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text } from 'react-native';
+import { Text } from 'react-native';
 
-import { GhostCardStatusPanel } from '../../../components/ghost-card-ui';
+import { CardBalancePanel } from '../../../components/ghost-card-ui';
 import { CardBusy, CardStatusPanel } from '../../../components/seal-ui';
-import { colors } from '../../../components/theme';
-import { Button, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
-import { PaymentExit, PaymentProgress } from '../../../components/vanish-ui';
+import { Button, Column, Logo, NetworkBadge, Screen, Spacer, textStyles, Title } from '../../../components/ui';
 import { accountZeroAddress } from '../../../lib/account';
 import { ghostCardDeps } from '../../../lib/ghost-card/deps';
-import { checkGhostCard, refillGhostCard, type CheckResult } from '../../../lib/ghost-card/flows';
+import { checkGhostCard, type CheckResult } from '../../../lib/ghost-card/flows';
+import { cardBalance } from '../../../lib/ghost-card/vault';
+import { vaultDeps } from '../../../lib/ghost-card/vault-deps';
 import type { CardStatus } from '../../../lib/seal/card-status';
 import { checkCard, confirmFill, sealDeps } from '../../../lib/seal/flows';
-import { failureReason } from '../../../lib/node/failure-reason';
 import { useSettings } from '../../../lib/settings/settings';
-import { signVanishAgain, startSealedCardVanish } from '../../../lib/vanish/actions';
-import { paymentsChanged, shared } from '../../../lib/vanish/pending';
-import { screenDone } from '../../../lib/vanish/status-mapping';
-import { paymentKit, usePayment } from '../../../lib/vanish/use-payment';
-import type { CorePaymentSequence } from '../../../modules/ghost-core';
+import { paymentKit } from '../../../lib/vanish/use-payment';
 import { cardsSupported } from '../../../modules/ghost-nfc';
 
 export default function CheckCardScreen() {
@@ -36,20 +32,17 @@ export default function CheckCardScreen() {
   const [address] = useState(accountZeroAddress);
   const kit = useMemo(() => paymentKit(nodeUrl), [nodeUrl]);
   const deps = useMemo(() => ghostCardDeps(kit), [kit]);
+  const vault = useMemo(() => vaultDeps(kit, address), [kit, address]);
   const [seal] = useState(sealDeps);
   const [cards] = useState(cardsSupported);
   const ghostCards = deps.nfc !== null && deps.core !== null;
-  const [busy, setBusy] = useState<'check' | 'seal' | 'refill' | 'pay' | null>(null);
+  const [busy, setBusy] = useState<'check' | 'seal' | null>(null);
   const [result, setResult] = useState<CheckResult | null>(null);
   const [sealStatus, setSealStatus] = useState<CardStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [sequence, setSequence] = useState<CorePaymentSequence | null>(null);
   const run = useRef(0);
 
   const status = result?.status ?? null;
-
-  const rebuild = useMemo(() => (kit && sequence ? signVanishAgain(kit, sequence) : null), [kit, sequence]);
-  const payment = usePayment(kit, sequence, rebuild, false);
+  const balance = result && status?.kind !== 'carry-to-claim' ? cardBalance(vault, result) : null;
 
   /**
    * A Check of the next card tapped; an earlier answer is never shown for it.
@@ -68,7 +61,6 @@ export default function CheckCardScreen() {
     setBusy('check');
     setResult(null);
     setSealStatus(null);
-    setError(null);
     let checked: CheckResult | null = null;
     try {
       checked = await checkGhostCard(deps);
@@ -105,47 +97,6 @@ export default function CheckCardScreen() {
     }
   }
 
-  /** The opened card just checked, whose coin is spent: Refill it (no other card), then fill it again. */
-  async function reuse() {
-    const checked = result?.statement;
-    if (busy !== null || !checked) {
-      return;
-    }
-    setBusy('refill');
-    setError(null);
-    try {
-      const refilled = await refillGhostCard(deps, { cardId: new Uint8Array(checked.cardId), fill: checked.fill });
-      if (!refilled.ok) {
-        if (refilled.status) {
-          setResult({ status: refilled.status, statement: null, ms: null, commitData: null });
-        }
-        return;
-      }
-      router.replace('/fill-ghost-card');
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  /** A sealed card whose Vanish never reached the chain: pay it from this account. */
-  async function pay() {
-    const statement = result?.statement;
-    if (!kit || !address || !statement || !result?.commitData || busy !== null) {
-      return;
-    }
-    setBusy('pay');
-    setError(null);
-    try {
-      const started = await startSealedCardVanish(kit, address, BigInt(statement.amountWei), result.commitData);
-      setSequence(shared(started.sequence));
-      paymentsChanged();
-    } catch (failure) {
-      setError(`The payment could not start. ${failureReason(failure, kit.nodeUrl)}`);
-    } finally {
-      setBusy(null);
-    }
-  }
-
   return (
     <Screen
       testID="check-card-screen"
@@ -159,14 +110,13 @@ export default function CheckCardScreen() {
       }
     >
       <Column>
-        <Title>Check NFC Chip</Title>
+        <Title>What&apos;s on this card</Title>
         <Text style={textStyles.body}>
-          Tap a Ghost card to see what it holds. This iPhone checks the card&apos;s own signature over a fresh challenge,
-          and its coin on the chain.
+          Hold a Ghost card to the iPhone to see how much GHOST it holds.
         </Text>
         <Button
-          label={busy === 'check' ? 'Hold the card near the iPhone' : 'Check NFC Chip'}
-          icon="check"
+          label={busy === 'check' ? 'Hold the card near the iPhone' : 'Hold your card to see what it holds'}
+          icon="tap"
           disabled={busy !== null || !cards}
           onPress={() => void check()}
           testID="check-card-run"
@@ -174,21 +124,10 @@ export default function CheckCardScreen() {
         {busy !== null ? (
           <CardBusy
             text={
-              busy === 'check'
-                ? 'Checking the card…'
-                : busy === 'seal'
-                  ? 'Checking the card with the Seal…'
-                  : busy === 'refill'
-                    ? 'Emptying the card for its next fill…'
-                    : 'Starting the payment…'
+              busy === 'check' ? 'Reading the card…' : 'Checking the card with the Seal…'
             }
             testID="check-card-spinner"
           />
-        ) : null}
-        {error ? (
-          <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="check-card-error">
-            {error}
-          </Text>
         ) : null}
         {!cards ? (
           <Text style={textStyles.quiet} testID="check-card-unavailable">
@@ -199,8 +138,8 @@ export default function CheckCardScreen() {
       <Column>
         {sealStatus ? (
           <CardStatusPanel status={sealStatus} testID="check-card-status" />
-        ) : status ? (
-          <GhostCardStatusPanel status={status} testID="check-card-status" />
+        ) : balance ? (
+          <CardBalancePanel balance={balance} testID="check-card-status" />
         ) : null}
         {status?.kind === 'carry-to-claim' && !sealStatus && busy === null ? (
           <Button
@@ -221,69 +160,20 @@ export default function CheckCardScreen() {
             testID="check-card-confirm"
           />
         ) : null}
-        {status?.kind === 'blank' ? (
-          <Button label="Fill this card" icon="key" onPress={() => router.push('/fill-ghost-card')} testID="check-card-fill" />
+        {balance && balance.kind !== 'problem' && busy === null ? (
+          <Button label="Add to this card" icon="send" onPress={() => router.push('/fill-ghost-card')} testID="check-card-fill" />
         ) : null}
-        {status?.kind === 'sealed' || status?.kind === 'no-checks' ? (
+        {balance?.kind === 'holds' && busy === null ? (
           <Button
-            label="Open it into my wallet"
+            label="Take some off"
             icon="receive"
             secondary
             onPress={() => router.push('/open-ghost-card')}
             testID="check-card-open"
           />
         ) : null}
-        {status?.kind === 'opened' && status.spent === true ? (
-          <Panel style={styles.form} testID="check-card-reuse">
-            <Text style={textStyles.quiet}>Reuse this card</Text>
-            <Text style={textStyles.body}>
-              Its coin was taken off, so the card can be emptied and filled again with a new key.
-            </Text>
-            <Button
-              label={busy === 'refill' ? 'Hold the card near the iPhone' : 'Reuse this card'}
-              icon="key"
-              secondary
-              disabled={busy !== null}
-              onPress={() => void reuse()}
-              testID="check-card-refill"
-            />
-          </Panel>
-        ) : null}
-        {status?.kind === 'not-on-chain' && result?.commitData && !sequence ? (
-          <Button
-            label="Pay its Vanish from my account"
-            icon="key"
-            secondary
-            disabled={busy !== null || !kit || !address}
-            onPress={() => void pay()}
-            testID="check-card-pay"
-          />
-        ) : null}
-        {sequence && payment ? (
-          <>
-            <PaymentProgress status={payment.status} kind="vanish" step={payment.step} error={payment.error} />
-            <PaymentExit final={screenDone(payment.status)} onLeave={() => router.back()} testPrefix="check-card" />
-          </>
-        ) : null}
-        <Panel style={styles.form}>
-          <Text style={textStyles.quiet}>What a Check proves</Text>
-          <Text style={textStyles.body}>
-            The card signs its state over this iPhone&apos;s own random challenge, with a key certified by the card&apos;s
-            issuer. A card shown Sealed holds its GHOST on the chain and was never opened. Check that the card number
-            matches the one printed on the card, and check again just before you accept it.
-          </Text>
-        </Panel>
       </Column>
     </Screen>
   );
 }
 
-const styles = StyleSheet.create({
-  form: {
-    gap: 8,
-    padding: 16,
-  },
-  error: {
-    color: colors.danger,
-  },
-});

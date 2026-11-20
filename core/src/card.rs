@@ -95,6 +95,35 @@ pub unsafe extern "C" fn ghost_wallet_card_hold_key(words: *const u8, length: us
     0
 }
 
+/// Copies the words of the card key held now (UTF-8, no terminator) into
+/// `out`, and returns how many bytes were written, or [`CARD_NO_KEY`],
+/// [`CARD_TOO_SMALL`] or [`CARD_NULL`]. The key stays held. Only the card
+/// module calls this, to keep an opened Ghost card's key in the Keychain
+/// before the card is given a new key, until the opened coin's Summon
+/// settles; it gives the key back with [`ghost_wallet_card_hold_key`].
+///
+/// # Safety
+///
+/// `out` must be valid for writes of `capacity` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ghost_wallet_card_copy_held_key(out: *mut u8, capacity: usize) -> isize {
+    if out.is_null() {
+        return CARD_NULL;
+    }
+    let held = card_key();
+    let Some(words) = held.as_ref() else {
+        return CARD_NO_KEY;
+    };
+    let bytes = words.as_bytes();
+    if bytes.len() > capacity {
+        return CARD_TOO_SMALL;
+    }
+    // SAFETY: the caller guarantees `out` holds `capacity` bytes, and
+    // `bytes.len() <= capacity`.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+    bytes.len() as isize
+}
+
 /// Holds `text` as the card key when it is a Phantom Key; wipes it otherwise.
 pub fn hold_card_words(text: String) -> bool {
     if classify_words(&text).verdict != "phantom-key" {

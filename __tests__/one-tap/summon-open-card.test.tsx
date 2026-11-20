@@ -1,4 +1,4 @@
-// Summon's Open a card is the go-ahead: Open a card starts the card read at
+// Summon's Take off a card is the go-ahead: it starts the card read at
 // once, so the next thing to do is hold the card to the phone.
 import { act, fireEvent, render, screen } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -31,7 +31,7 @@ jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, wri
 const mockPush = jest.fn();
 jest.mock('expo-router', () => ({ useRouter: () => ({ push: mockPush, back: jest.fn() }) }));
 
-it('Open a card goes straight to the card read', async () => {
+it('Take off a card goes straight to the card read', async () => {
   render(
     <SafeAreaProvider
       initialMetrics={{ frame: { x: 0, y: 0, width: 393, height: 852 }, insets: { top: 47, left: 0, right: 0, bottom: 34 } }}
@@ -39,7 +39,7 @@ it('Open a card goes straight to the card read', async () => {
       <SummonScreen />
     </SafeAreaProvider>,
   );
-  expect(screen.getByTestId('summon-open-card')).toHaveTextContent('Open a card');
+  expect(screen.getByTestId('summon-open-card')).toHaveTextContent('Take off a card');
   await act(async () => {
     fireEvent.press(screen.getByTestId('summon-open-card'));
   });

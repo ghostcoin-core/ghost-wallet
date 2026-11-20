@@ -130,7 +130,7 @@ describe('HomeScreen', () => {
 
     fireEvent.press(screen.getByTestId('open-check-card'));
 
-    expect(screen.getByLabelText('Check a card')).toBeOnTheScreen();
+    expect(screen.getByLabelText('See what a card holds')).toBeOnTheScreen();
     expect(mockPush.mock.calls).toEqual([['/check-card']]);
     // The balance is not held back by a card.
     expect(screen.getByTestId('balance-amount')).toBeOnTheScreen();

@@ -265,7 +265,7 @@ export function SummonFlow({ olderCard = false }: { olderCard?: boolean }) {
           </Text>
           {cards ? (
             <View style={styles.cardKey}>
-              <Text style={styles.cardKeyTitle}>{readsKey ? 'The key is on an NTAG 424 card' : 'The key is on a card'}</Text>
+              <Text style={styles.cardKeyTitle}>{readsKey ? 'The key is on an NTAG 424 card' : 'Take GHOST off your card'}</Text>
               <Text style={styles.cardKeyBody}>
                 {tapping
                   ? 'Hold the card near the iPhone.'
@@ -280,7 +280,7 @@ export function SummonFlow({ olderCard = false }: { olderCard?: boolean }) {
                 testID={readsKey ? 'summon-tap-card' : 'summon-open-card'}
               >
                 <Icon name="tap" />
-                <Text style={styles.cardKeyButtonText}>{readsKey ? 'Read a card' : 'Open a card'}</Text>
+                <Text style={styles.cardKeyButtonText}>{readsKey ? 'Read a card' : 'Take off a card'}</Text>
               </Pressable>
             </View>
           ) : null}
@@ -416,9 +416,7 @@ export function SummonFlow({ olderCard = false }: { olderCard?: boolean }) {
             </Text>
             {cards ? (
               <Text style={textStyles.quiet} testID="summon-card-note">
-                A Phantom Key card from Vanish keeps its keys in the Keychain of the iPhone that wrote it; elsewhere,
-                type the key&apos;s words instead. A Ghost Sealed card works on any iPhone: open it into your wallet
-                from Settings, Cards.
+                A Ghost card works on any iPhone: take any amount off it, and the rest stays on the card.
               </Text>
             ) : null}
           </Panel>

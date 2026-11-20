@@ -124,19 +124,7 @@ final class JavaCard {
       }
       if made == nil {
         if id.state == 0 && id.fill == startFill {
-          let first = try self.send(link, ins: 0x20, p1p2: 0, data: input, le: 466)
-          guard first.count >= 36 else { throw CardStatus(ins: 0x20, sw: 0x6F00) }
-          var answer = first
-          // The rest of the commit data, if the card cut the answer.
-          var have = first.count - 36
-          while have < Self.commitDataBytes {
-            let part = try self.send(
-              link, ins: 0x22, p1p2: UInt16(have), data: nil, le: min(Self.maxAnswer, Self.commitDataBytes - have))
-            guard !part.isEmpty else { throw CardStatus(ins: 0x22, sw: 0x6F00) }
-            answer.append(part)
-            have += part.count
-          }
-          made = answer
+          made = try self.sendMake(link, input)
         } else if id.state == 1, let start = startFill, id.fill == start &+ 1 {
           // The Make went through and its answer was lost: the card is
           // sealed at the next fill. Its commit data is read back; the
@@ -152,9 +140,50 @@ final class JavaCard {
     }
   }
 
+  /// Remake: gives the card `cardId` a new key for a new balance in one
+  /// hold. The card must be opened at `fill` (its key already released to
+  /// this phone, checked, and kept in the Keychain) or blank at `fill`; it is
+  /// cleared (Refill), then Make runs with `input` as in `fill`, then the
+  /// certificate and a Check over `challenge`. Any other card, or this card
+  /// at another fill or sealed, is refused before anything is sent to it. A
+  /// Refill or Make that went through before the card was lost is not sent
+  /// again: a blank card at `fill` skips the Refill, and a card sealed at
+  /// the next fill has its commit data read back.
+  func remake(alert: String, cardId: Data, fill: UInt32, make input: Data, challenge: Data, promise: Promise) {
+    guard cardId.count == 16, input.count == 52, challenge.count == 32 else {
+      promise.reject(GhostCardBadInputException())
+      return
+    }
+    var made: Data?
+    run(alert: alert, working: "Writing the new balance", steps: 18, promise: promise) { link, out in
+      var id = try self.identify(link, out)
+      guard id.cardId == cardId else { throw GhostCardOtherCardException() }
+      if made == nil {
+        if id.state == 2 {
+          guard id.fill == fill else { throw GhostCardOtherCardException() }
+          // No answer data; asked as a short Le so the command is never header-only.
+          _ = try self.send(link, ins: 0x50, p1p2: 0, data: nil, le: 256)
+          id = try self.identify(link, out)
+        }
+        if id.state == 0 && id.fill == fill {
+          made = try self.sendMake(link, input)
+        } else if id.state == 1 && id.fill == fill &+ 1 {
+          // The Make went through and its answer was lost.
+          let data = try self.readParts(link, ins: 0x22, total: Self.commitDataBytes)
+          made = Self.u32(id.fill) + Data(count: 32) + data
+        } else {
+          throw GhostCardStateException(Self.stateName(id.state))
+        }
+      }
+      out["make"] = made
+      try self.readCheck(link, out, identity: try self.identify(link, out), challenge: challenge)
+    }
+  }
+
   /// Open: the certificate, a Check over `checkChallenge`, the commit data
   /// while the card is still sealed, then Open, which needs nothing but the
-  /// card. The answer goes to the native core only.
+  /// card. The answer goes to the native core only. A blank card answers its
+  /// Identify only, with `opened` false, and uses no check.
   func open(alert: String, checkChallenge: Data, promise: Promise) {
     guard checkChallenge.count == 32 else {
       promise.reject(GhostCardBadInputException())
@@ -163,6 +192,12 @@ final class JavaCard {
     var commitData: Data?
     run(alert: alert, working: "Opening the card", steps: 16, promise: promise) { link, out in
       let id = try self.identify(link, out)
+      // A blank card holds nothing to open: its Identify alone goes back, so
+      // adding to an empty card goes on to Make in the same hold.
+      if id.state == 0 {
+        out["opened"] = false
+        return
+      }
       guard id.state == 1 || id.state == 2 else { throw GhostCardStateException(Self.stateName(id.state)) }
       if id.checksLeft > 0 {
         try self.readCheck(link, out, identity: id, challenge: checkChallenge)
@@ -249,6 +284,23 @@ final class JavaCard {
     out["statement"] = statement
     out["signature"] = signature
     out["checkMs"] = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+  }
+
+  /// Make with `input`: the fill, the commitment and all 430 bytes of commit data.
+  private func sendMake(_ link: Link, _ input: Data) throws -> Data {
+    let first = try send(link, ins: 0x20, p1p2: 0, data: input, le: 466)
+    guard first.count >= 36 else { throw CardStatus(ins: 0x20, sw: 0x6F00) }
+    var answer = first
+    // The rest of the commit data, if the card cut the answer.
+    var have = first.count - 36
+    while have < Self.commitDataBytes {
+      let part = try send(
+        link, ins: 0x22, p1p2: UInt16(have), data: nil, le: min(Self.maxAnswer, Self.commitDataBytes - have))
+      guard !part.isEmpty else { throw CardStatus(ins: 0x22, sw: 0x6F00) }
+      answer.append(part)
+      have += part.count
+    }
+    return answer
   }
 
   private func readParts(_ link: Link, ins: UInt8, total: Int) throws -> Data {

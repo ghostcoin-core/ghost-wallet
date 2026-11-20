@@ -1,100 +1,79 @@
-// Fill a Ghost card: pick an amount, then tap a blank Ghost card.
-// The card makes the Phantom Key itself and hands back only the coin's
-// public commit data; in the same tap it signs a seal statement over this
-// iPhone's challenge, and the native core checks it says Sealed with exactly
-// that commit data before anything is paid. Then the usual Vanish pays the
-// amount into it. No words and no key are ever on this phone, and no Seal or
-// Ghost server takes part. The card is a bearer object: no code goes with it.
+// Add to a Ghost card: pick an amount, then hold the card to the iPhone. The
+// card works like a vault: whatever it held, it now holds that plus the
+// amount. Empty or not, it is the same one hold (lib/ghost-card/vault.ts):
+// the card gives up its old key to this phone's Keychain, makes a new key
+// for the new total and signs that it holds it; the old coin comes home and
+// the new total goes onto the card in the background. No words, no code and
+// no card states: the card holds one balance.
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { GhostCardStatusPanel } from '../../../components/ghost-card-ui';
+import { CardBalancePanel } from '../../../components/ghost-card-ui';
 import { CardBusy } from '../../../components/seal-ui';
 import { colors, monoFont } from '../../../components/theme';
 import { Button, Column, Logo, NetworkBadge, Panel, Screen, Spacer, textStyles, Title } from '../../../components/ui';
-import { PaymentExit, PaymentProgress } from '../../../components/vanish-ui';
 import { accountZeroAddress } from '../../../lib/account';
-import { ghostCardDeps } from '../../../lib/ghost-card/deps';
-import { fillGhostCard } from '../../../lib/ghost-card/flows';
-import type { GhostCardStatus } from '../../../lib/ghost-card/status';
-import { failureReason } from '../../../lib/node/failure-reason';
+import { changeCard, moveChanges } from '../../../lib/ghost-card/vault';
+import { vaultDeps } from '../../../lib/ghost-card/vault-deps';
+import { formatGhost } from '../../../lib/home/balance-format';
+import { useHome } from '../../../lib/home/use-home';
 import { ghostText } from '../../../lib/seal/card-status';
 import { useSettings } from '../../../lib/settings/settings';
-import { minimumVanish, signVanishAgain, startSealedCardVanish } from '../../../lib/vanish/actions';
-import { parseGhostAmount } from '../../../lib/vanish/amount';
-import { paymentsChanged, shared } from '../../../lib/vanish/pending';
-import { screenDone } from '../../../lib/vanish/status-mapping';
-import { paymentKit, usePayment } from '../../../lib/vanish/use-payment';
-import type { CorePaymentSequence } from '../../../modules/ghost-core';
+import { minimumVanish, summonFee, vanishFee } from '../../../lib/vanish/actions';
+import { coversVanish, parseGhostAmount } from '../../../lib/vanish/amount';
+import { paymentKit } from '../../../lib/vanish/use-payment';
 
-/** Below this many seal checks the writer is told the card is near its end. */
-const LOW_CHECKS = 64;
-
-export default function FillGhostCardScreen() {
+export default function AddToCardScreen() {
   const router = useRouter();
   const { nodeUrl } = useSettings();
   const [address] = useState(accountZeroAddress);
   const kit = useMemo(() => paymentKit(nodeUrl), [nodeUrl]);
-  const deps = useMemo(() => ghostCardDeps(kit), [kit]);
-  const cards = deps.nfc !== null && deps.core !== null;
+  const vault = useMemo(() => vaultDeps(kit, address), [kit, address]);
+  const cards = vault.card.nfc !== null && vault.card.core !== null && vault.keys !== null;
 
   // Vanish hands over the amount typed there; it is still checked here like any typed amount.
-  // With `start`, Vanish's own button was the go-ahead: the card read starts at once.
+  // With `start`, Vanish's own button was the go-ahead: the hold starts at once.
   const { amount: asked, start } = useLocalSearchParams<{ amount?: string; start?: string }>();
   const started = useRef(false);
   const [amountText, setAmountText] = useState(typeof asked === 'string' ? asked : '');
   const [minimum, setMinimum] = useState<bigint | null>(null);
+  // The Vanish of the new total and the Summon of what the card held.
+  const [fees, setFees] = useState<bigint | null>(null);
+  const { view: home } = useHome(nodeUrl, address);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<GhostCardStatus | null>(null);
-  const [sequence, setSequence] = useState<CorePaymentSequence | null>(null);
-  const [filled, setFilled] = useState<{
-    cardNumber: string;
-    fill: number;
-    amountWei: bigint;
-    checksLeft: number;
-    ms: number;
-    commitData: Uint8Array;
-  } | null>(null);
+  const [done, setDone] = useState<{ cardNumber: string; afterWei: bigint; addedWei: bigint } | null>(null);
 
   useEffect(() => {
     if (!kit) {
       return;
     }
     minimumVanish(kit).then(setMinimum, () => setMinimum(null));
+    Promise.all([vanishFee(kit), summonFee(kit)]).then(([v, s]) => setFees(v + s), () => setFees(null));
   }, [kit]);
 
-  const rebuild = useMemo(() => (kit && sequence ? signVanishAgain(kit, sequence) : null), [kit, sequence]);
-  const payment = usePayment(kit, sequence, rebuild, false);
-
   const amount = parseGhostAmount(amountText);
+  const balance = home.snapshot ? BigInt(home.snapshot.balanceWei) : null;
   const tooSmall = amount !== null && minimum !== null && amount < minimum;
-  const amountOk = !!kit && !!address && cards && amount !== null && amount > 0n && !tooSmall;
+  const tooMuch = amount !== null && !coversVanish(amount, balance, fees);
+  const amountOk = !!kit && !!address && cards && amount !== null && amount > 0n && minimum !== null && !tooSmall && !tooMuch;
 
-  async function fill() {
-    if (!kit || !address || amount === null || !amountOk || busy) {
+  async function add() {
+    if (!amountOk || amount === null || minimum === null || busy) {
       return;
     }
     setBusy(true);
     setError(null);
-    setStatus(null);
     try {
-      const result = await fillGhostCard(deps, amount);
+      const result = await changeCard(vault, { kind: 'add', amountWei: amount }, minimum);
       if (!result.ok) {
-        setStatus(result.status);
+        setError(result.message);
         return;
       }
-      const made = {
-        cardNumber: result.cardNumber,
-        fill: result.fill,
-        amountWei: result.amountWei,
-        checksLeft: result.checksLeft,
-        ms: result.ms,
-        commitData: result.commitData,
-      };
-      setFilled(made);
-      await pay(made.amountWei, made.commitData);
+      setDone({ cardNumber: result.cardNumber, afterWei: result.afterWei, addedWei: amount });
+      // The rest goes on in the background; started now, not at Home's next move.
+      void moveChanges(vault);
     } finally {
       setBusy(false);
     }
@@ -103,26 +82,11 @@ export default function FillGhostCardScreen() {
   useEffect(() => {
     if (start === '1' && amountOk && !started.current) {
       started.current = true;
-      void fill();
+      void add();
     }
     // Runs once, as soon as the handed-over amount is ready to go.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [start, amountOk]);
-
-  /** The Vanish into the card's commit data; the same bytes every time, so it is never paid twice. */
-  async function pay(amountWei: bigint, commitData: Uint8Array) {
-    if (!kit || !address) {
-      return;
-    }
-    setError(null);
-    try {
-      const started = await startSealedCardVanish(kit, address, amountWei, commitData);
-      setSequence(shared(started.sequence));
-      paymentsChanged();
-    } catch (failure) {
-      setError(`The card is sealed, but the payment could not start. ${failureReason(failure, kit.nodeUrl)}`);
-    }
-  }
 
   return (
     <Screen
@@ -137,15 +101,15 @@ export default function FillGhostCardScreen() {
       }
     >
       <Column>
-        <Title>Fill a Ghost card</Title>
-        {!filled ? (
+        <Title>Add to card</Title>
+        {!done ? (
           <>
             <Text style={textStyles.body}>
-              The card makes its own key: no words are shown, and whoever holds the card holds the GHOST. A lost or
-              broken card is lost GHOST, like cash.
+              Move GHOST from your wallet onto your card. It adds to what the card already holds. Whoever holds the
+              card holds the GHOST, like cash.
             </Text>
             <Panel style={styles.form}>
-              <Text style={textStyles.quiet}>Amount</Text>
+              <Text style={textStyles.quiet}>Amount to add</Text>
               <View style={styles.amountRow}>
                 <TextInput
                   accessibilityLabel="Amount in GHOST"
@@ -161,25 +125,17 @@ export default function FillGhostCardScreen() {
                 <Text style={textStyles.body}>GHOST</Text>
               </View>
               {tooSmall && minimum !== null ? (
-                <Text style={textStyles.quiet} testID="ghost-fill-amount-error">
-                  The smallest card is {ghostText(minimum)} GHOST.
+                <Text style={[textStyles.quiet, styles.error]} testID="ghost-fill-amount-error">
+                  Add at least {ghostText(minimum)} GHOST.
+                </Text>
+              ) : null}
+              {tooMuch && !tooSmall ? (
+                <Text style={[textStyles.body, styles.error]} testID="ghost-fill-not-enough">
+                  {balance === null ? 'Not enough GHOST in your wallet.' : `Your wallet has ${formatGhost(balance)} GHOST, and the fee is on top.`}
                 </Text>
               ) : null}
             </Panel>
-            <Button
-              label={busy ? 'Hold the card near the iPhone' : `Tap a blank card to put ${ghostText(amount ?? 0n)} GHOST on it`}
-              icon="key"
-              disabled={busy || !amountOk}
-              onPress={() => void fill()}
-              testID="ghost-fill-tap"
-            />
           </>
-        ) : null}
-        {busy ? <CardBusy text="Making the key on the card and checking its seal…" testID="ghost-fill-spinner" /> : null}
-        {error ? (
-          <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="ghost-fill-error">
-            {error}
-          </Text>
         ) : null}
         {!cards ? (
           <Text style={textStyles.quiet} testID="ghost-fill-unavailable">
@@ -188,32 +144,31 @@ export default function FillGhostCardScreen() {
         ) : null}
       </Column>
       <Column>
-        {status ? <GhostCardStatusPanel status={status} testID="ghost-fill-status" /> : null}
-        {filled ? (
-          <Panel style={styles.form} testID="ghost-fill-summary">
-            <Text style={textStyles.quiet}>Card {filled.cardNumber}</Text>
-            <Text style={textStyles.body}>
-              Sealed (fill {filled.fill}) with a key made on the card. Paying {ghostText(filled.amountWei)} GHOST into it
-              now. Tap took {(filled.ms / 1000).toFixed(1)} s.
-            </Text>
-            {filled.checksLeft < LOW_CHECKS ? (
-              <Text style={[textStyles.body, styles.error]} testID="ghost-fill-low-checks">
-                Only {filled.checksLeft} seal checks left on this card: it is near the end of its life.
-              </Text>
-            ) : null}
-          </Panel>
-        ) : null}
-        {filled && !sequence && !busy ? (
+        {!done ? (
           <Button
-            label="Try the payment again"
-            onPress={() => void pay(filled.amountWei, filled.commitData)}
-            testID="ghost-fill-pay-again"
+            label={busy ? 'Keep holding the card' : `Hold your card to add ${ghostText(amount ?? 0n)} GHOST`}
+            icon="tap"
+            disabled={busy || !amountOk}
+            onPress={() => void add()}
+            testID="ghost-fill-tap"
           />
         ) : null}
-        {sequence && payment ? (
+        {busy ? <CardBusy text="Keep the card near the top of the iPhone…" testID="ghost-fill-spinner" /> : null}
+        {error ? (
+          <Text accessibilityLiveRegion="polite" style={[textStyles.body, styles.error]} testID="ghost-fill-error">
+            {error}
+          </Text>
+        ) : null}
+        {done ? (
           <>
-            <PaymentProgress status={payment.status} kind="vanish" step={payment.step} error={payment.error} />
-            <PaymentExit final={screenDone(payment.status)} onLeave={() => router.back()} testPrefix="ghost-fill" />
+            <CardBalancePanel
+              balance={{ kind: 'holds', cardNumber: done.cardNumber, amountWei: done.afterWei, updating: true }}
+              testID="ghost-fill-balance"
+            />
+            <Text style={textStyles.body} testID="ghost-fill-done">
+              Added {ghostText(done.addedWei)} GHOST. You can put the card away: the rest finishes by itself.
+            </Text>
+            <Button label="Done" onPress={() => router.back()} testID="ghost-fill-leave" />
           </>
         ) : null}
       </Column>

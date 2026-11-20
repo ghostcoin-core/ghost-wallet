@@ -45,6 +45,14 @@ export async function minimumVanish(kit: PaymentKit): Promise<bigint> {
   return BigInt(kit.core.minVanishWei(reference.baseFeePerGas.toString()));
 }
 
+/** The fee a Summon pays now, taken from the coin it Summons. */
+export async function summonFee(kit: PaymentKit): Promise<bigint> {
+  const tip = await kit.node.tipHeight();
+  const window = kit.core.feeWindow(BigInt(tip));
+  const reference = await kit.node.block(Number(window.referenceHeight));
+  return BigInt(kit.core.revealFeeWei(reference.baseFeePerGas.toString()));
+}
+
 /** The most a Vanish pays in fee now: its gas limit at the max fee it is signed with. */
 export async function vanishFee(kit: PaymentKit): Promise<bigint> {
   const tip = await kit.node.tipHeight();
