@@ -732,6 +732,12 @@ async function moveChangeSteps(
     (change.summonId !== null && payments.paymentState(change.summonId) === 'settled');
   const vanish = change.vanishId === null ? 'settled' : payments.paymentState(change.vanishId);
   if (summonSettled && (vanish === 'settled' || vanish === 'failed' || vanish === 'missing')) {
+    if (deps.activity) {
+      // Its row's outcome is on disk before the change goes: a row is never
+      // taken as done only because its change is gone. A write that fails
+      // keeps the change for the next move.
+      await noteChange(deps.activity, change, true, change.afterWei !== '0' && vanish !== 'settled');
+    }
     if (change.oldMarker) {
       keys.forgetKeptCardKey(tagOf(change.oldMarker));
     }
