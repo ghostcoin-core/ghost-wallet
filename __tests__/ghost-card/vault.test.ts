@@ -41,6 +41,8 @@ class World {
   pullNextRemake = false;
   /** The card is pulled away before the next clear. */
   pullNextRefill = false;
+  /** The app is killed right after the card makes its next key. */
+  killAfterNextMake = false;
 
   marker(coin: number): Uint8Array {
     return new Uint8Array(32).fill(coin);
@@ -114,6 +116,10 @@ class World {
     card.state = 'sealed';
     card.fill += 1;
     card.coin = coin;
+    if (this.killAfterNextMake) {
+      this.killAfterNextMake = false;
+      throw new Error('killed');
+    }
     return { ok: true, commitData: this.commitData(coin), amountWei: amount, fill: card.fill, cardNumber: 'CARD', checksLeft: 900, ms: 4000 };
   }
 
@@ -215,6 +221,11 @@ class World {
         moveSummon: async (id) => {
           const p = this.payments.get(id)!;
           expect(this.held).toBe(p.coin);
+          if (p.state === 'in-block') {
+            // Only moving it on makes it settle: nothing else moves it.
+            p.state = 'settled';
+            return;
+          }
           const coin = this.coins.get(p.coin)!;
           coin.spent = true;
           this.wallet += coin.amount - FEE;
@@ -252,7 +263,7 @@ class World {
   /** A block: every payment in a block settles. */
   settle() {
     for (const p of this.payments.values()) {
-      if (p.state === 'in-block') {
+      if (p.kind === 'vanish' && p.state === 'in-block') {
         p.state = 'settled';
       }
     }
@@ -438,4 +449,51 @@ it('taking it all on a card pulled away before it was cleared, then adding, does
   expect(world.onCard()).toBe(5n * GHOST);
   expect(world.wallet).toBe(walletBefore + 35n * GHOST - FEE - 5n * GHOST - FEE);
   expect(world.saved).toEqual([]);
+});
+
+it('a card opened on another phone shows its balance with a warning, and its owner can still take it all', async () => {
+  await add(5n);
+  await world.finish();
+  world.card.state = 'opened';
+  const balance = cardBalance(world.deps(), {
+    ...world.check(),
+    statement: { ...world.check().statement!, marker: world.marker(1).buffer } as CheckResult['statement'],
+  });
+  expect(balance).toMatchObject({ kind: 'holds', amountWei: 5n * GHOST, warning: expect.stringMatching(/opened on another phone/) });
+  expect(await take(null)).toMatchObject({ ok: true, beforeWei: 5n * GHOST, afterWei: 0n });
+  await world.finish();
+  expect(world.coins.get(1)!.spent).toBe(true);
+});
+
+it('a card made elsewhere and not yet paid keeps its key: a payment landing later comes home to the wallet', async () => {
+  const coin = world.nextCoin++;
+  world.coins.set(coin, { amount: 7n * GHOST, paid: false, spent: false });
+  world.card = { state: 'sealed', fill: 1, coin };
+  expect(await add(1n)).toMatchObject({ ok: true, beforeWei: 0n, afterWei: 1n * GHOST });
+  await world.finish();
+  expect(world.onCard()).toBe(1n * GHOST);
+  expect(world.kept.size).toBe(1);
+  // The other phone's payment lands late.
+  world.coins.get(coin)!.paid = true;
+  const walletBefore = world.wallet;
+  jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60 * 1000);
+  await world.finish();
+  jest.restoreAllMocks();
+  expect(world.wallet).toBe(walletBefore + 7n * GHOST - FEE);
+  expect(world.kept.size).toBe(0);
+  expect(world.saved).toEqual([]);
+});
+
+it('an app killed right after the card made its new key loses nothing: the next hold finishes both changes', async () => {
+  await add(5n);
+  await world.finish();
+  world.killAfterNextMake = true;
+  await expect(add(10n)).rejects.toThrow('killed');
+  // The card already holds its new key for 15, still unpaid; this phone shows what it will hold.
+  expect(cardBalance(world.deps(), world.check())).toMatchObject({ kind: 'holds', amountWei: 15n * GHOST, updating: true });
+  expect(await add(1n)).toMatchObject({ ok: true, beforeWei: 15n * GHOST, afterWei: 16n * GHOST });
+  await world.finish();
+  expect(world.onCard()).toBe(16n * GHOST);
+  expect(world.saved).toEqual([]);
+  expect(world.kept.size).toBe(0);
 });
