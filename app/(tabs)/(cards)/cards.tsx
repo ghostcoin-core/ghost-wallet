@@ -1,5 +1,5 @@
-// The Cards tab: check what a card holds, fill one, open one, and how cards
-// work. On the open iPhone Duo held sideways, the check sits left of the fold
+// The Cards tab: see what a card holds, add to it, take some off, and how
+// cards work. On the open iPhone Duo held sideways, the check sits left of the fold
 // and the other actions right of it, with the notes two each side.
 import { useRouter } from 'expo-router';
 import { useContext } from 'react';
@@ -15,10 +15,10 @@ import { FOLD_GAP, leftColumnWidth, useLayout } from '../../../lib/layout';
 type Note = { id: string; title: string; body: string };
 
 const NOTES: readonly Note[] = [
-  { id: 'cash', title: 'Like cash', body: 'Whoever holds the card holds the coins.' },
-  { id: 'fill', title: 'Fill it', body: 'Move coins onto it from your wallet.' },
-  { id: 'hand', title: 'Hand it over', body: 'They can check it is real first.' },
-  { id: 'open', title: 'Open it', body: 'Move the coins out into a wallet.' },
+  { id: 'cash', title: 'Like cash', body: 'Whoever holds the card holds its GHOST.' },
+  { id: 'fill', title: 'Add to it', body: 'Each time adds to what it holds.' },
+  { id: 'open', title: 'Take some off', body: 'Any amount, back to your wallet.' },
+  { id: 'hand', title: 'Hand it over', body: 'They can see what it holds first.' },
 ];
 
 const NO_INSETS = { left: 0, right: 0 };
@@ -69,16 +69,16 @@ export default function CardsScreen() {
       <Row
         first
         icon="send"
-        title="Fill a card"
-        detail="Move coins from your wallet onto it"
+        title="Add to a card"
+        detail="Move GHOST from your wallet onto it"
         opens
         onPress={() => router.push('/fill-ghost-card')}
         testID="cards-fill"
       />
       <Row
         icon="receive"
-        title="Open a card"
-        detail="Move its coins into your wallet"
+        title="Take off a card"
+        detail="Move any amount into your wallet"
         opens
         onPress={() => router.push('/open-ghost-card')}
         testID="cards-open"

@@ -34,6 +34,7 @@ const ALERT = {
   fill: 'Hold the empty Ghost card near the top of the iPhone, and keep it there.',
   open: 'Hold the Ghost card near the top of the iPhone, and keep it there.',
   refill: 'Hold the opened Ghost card near the top of the iPhone.',
+  remake: 'Keep holding the card near the top of the iPhone.',
 } as const;
 
 function buffer(bytes: Uint8Array): ArrayBuffer {
@@ -225,16 +226,37 @@ export async function fillGhostCard(deps: GhostCardDeps, amountWei: bigint): Pro
     return { ok: false, status: { kind: 'retry', message: 'This iPhone cannot read Ghost cards in this build.' } };
   }
   const challenge = bytes(core.javaCardRandom());
-  const make = new Uint8Array(52);
-  make.set(beBytes(amountWei, 12), 0);
-  make.set(beBytes(deps.chainId, 8), 12);
-  make.set(bytes(core.javaCardRandom()), 20);
+  const make = makeInput(core, deps, amountWei);
   let card: CardTap;
   try {
     card = await tap(() => nfc.javaCardFill(ALERT.fill, make, challenge));
   } catch (error) {
     return { ok: false, status: statusOfTapFailure(error) };
   }
+  return checkMade(core, deps, card, challenge, amountWei);
+}
+
+/** Make's input: the amount (12 bytes), this chain (8) and a fresh writer nonce (32). */
+function makeInput(core: JavaCardBindings, deps: GhostCardDeps, amountWei: bigint): Uint8Array {
+  const make = new Uint8Array(52);
+  make.set(beBytes(amountWei, 12), 0);
+  make.set(beBytes(deps.chainId, 8), 12);
+  make.set(bytes(core.javaCardRandom()), 20);
+  return make;
+}
+
+/**
+ * A Make and its Check in one tap, checked: only a statement that says
+ * Sealed at Make's fill, with Make's commitment, the amount, this chain and a
+ * digest of exactly the commit data Make returned, gives commit data to pay.
+ */
+function checkMade(
+  core: JavaCardBindings,
+  deps: GhostCardDeps,
+  card: CardTap,
+  challenge: Uint8Array,
+  amountWei: bigint,
+): FillResult {
   if (card.kind === 'ntag') {
     return { ok: false, status: { kind: 'carry-to-claim' } };
   }
@@ -268,11 +290,59 @@ export async function fillGhostCard(deps: GhostCardDeps, amountWei: bigint): Pro
   return { ok: true, commitData, amountWei, fill, cardNumber: s.cardNumber, checksLeft: s.checksLeft, ms: card.ms };
 }
 
+/**
+ * Gives the card `target` a new key for `amountWei` in one hold: the card,
+ * opened at `target.fill` (its key released, checked and kept on this phone)
+ * or blank at it, is cleared and makes the new key, then signs its Check.
+ * The result is checked exactly as a Fill's. Any other card is refused before
+ * anything is sent to it.
+ */
+export async function remakeGhostCard(deps: GhostCardDeps, target: RefillTarget, amountWei: bigint): Promise<FillResult> {
+  const { core, nfc } = deps;
+  if (!core || !nfc) {
+    return { ok: false, status: { kind: 'retry', message: 'This iPhone cannot read Ghost cards in this build.' } };
+  }
+  const challenge = bytes(core.javaCardRandom());
+  const make = makeInput(core, deps, amountWei);
+  let card: CardTap;
+  try {
+    card = await tap(() => nfc.javaCardRemake(ALERT.remake, target.cardId, target.fill, make, challenge));
+  } catch (error) {
+    return { ok: false, status: statusOfTapFailure(error) };
+  }
+  if (card.kind === 'ghost' && !sameBytes(core.javaCardIdentity(buffer(card.identify)).cardId, target.cardId)) {
+    return { ok: false, status: { kind: 'retry', message: 'Hold the same card to the iPhone again.' } };
+  }
+  return checkMade(core, deps, card, challenge, amountWei);
+}
+
+/** The coin an Open released, as its verified statement named it; null with no seal checks left. */
+export type OpenedCoin = {
+  /** What the card said before this tap. */
+  state: 'sealed' | 'opened';
+  commitment: Uint8Array;
+  marker: Uint8Array;
+  /** A sealed card's commit data: what its Vanish pays into. */
+  commitData: Uint8Array | null;
+};
+
 export type OpenResult =
   /** The card's Phantom Key is in the native core, checked against the card's coin: Summon now. */
-  | { ok: true; amountWei: bigint | null; cardId: Uint8Array; fill: number; cardNumber: string; ms: number }
-  /** `reuse` is set for a card opened before whose coin the chain shows taken off: it can only be reused. */
-  | { ok: false; status: GhostCardStatus | null; reuse?: RefillTarget };
+  | {
+      ok: true;
+      amountWei: bigint | null;
+      cardId: Uint8Array;
+      fill: number;
+      cardNumber: string;
+      ms: number;
+      coin: OpenedCoin | null;
+    }
+  /**
+   * `reuse` is set for a card opened before whose coin the chain shows taken
+   * off: it can only be reused. `blank` is set for a blank card: nothing was
+   * opened and no check was used.
+   */
+  | { ok: false; status: GhostCardStatus | null; reuse?: RefillTarget; blank?: RefillTarget & { cardNumber: string } };
 
 /**
  * Opens the next card tapped: the card's Check (and its commit data while
@@ -300,6 +370,14 @@ export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
     return { ok: false, status: { kind: 'carry-to-claim' } };
   }
   const identity = core.javaCardIdentity(buffer(card.identify));
+  if (identity.state === 'blank' && card.opened !== true) {
+    core.forgetJavaCardRelease();
+    return {
+      ok: false,
+      status: { kind: 'blank', fill: identity.fill, checksLeft: identity.checksLeft, cardNumber: identity.cardNumber },
+      blank: { cardId: bytes(identity.cardId), fill: identity.fill, cardNumber: identity.cardNumber },
+    };
+  }
 
   if (!card.statement) {
     // No seal checks left: nothing to check the release against but the chain.
@@ -316,6 +394,7 @@ export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
           fill: identity.fill,
           cardNumber: identity.cardNumber,
           ms: card.ms,
+          coin: null,
         }
       : { ok: false, status: { kind: 'not-genuine', reason: refusal } };
   }
@@ -372,6 +451,12 @@ export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
     fill: s.fill,
     cardNumber: s.cardNumber,
     ms: card.ms,
+    coin: {
+      state: s.state === 'opened' ? 'opened' : 'sealed',
+      commitment: bytes(s.commitment),
+      marker: bytes(s.marker),
+      commitData: s.state === 'sealed' ? card.commitData : null,
+    },
   };
 }
 

@@ -67,6 +67,30 @@ public final class GhostNfcModule: Module {
       self.javaCard.refill(alert: alert, cardId: cardId, fill: fill, promise: promise)
     }
 
+    // Clears the opened card `cardId` at `fill` and, in the same hold, makes
+    // its new key for the new balance (`make`, as for javaCardFill).
+    AsyncFunction("javaCardRemake") { (alert: String, cardId: Data, fill: UInt32, make: Data, challenge: Data, promise: Promise) in
+      self.javaCard.remake(alert: alert, cardId: cardId, fill: fill, make: make, challenge: challenge, promise: promise)
+    }
+
+    // An opened card's key, between the native core and the Keychain, keyed
+    // by its coin's public marker (hex). JavaScript never sees the key.
+    Function("keepCardKey") { (tag: String) throws in
+      try CardKeyKeychain.keep(tag: tag)
+    }
+
+    Function("restoreCardKey") { (tag: String) throws -> Bool in
+      try CardKeyKeychain.restore(tag: tag)
+    }
+
+    Function("hasKeptCardKey") { (tag: String) -> Bool in
+      CardKeyKeychain.has(tag: tag)
+    }
+
+    Function("forgetKeptCardKey") { (tag: String) in
+      CardKeyKeychain.forget(tag: tag)
+    }
+
     AsyncFunction("relayCheck") { (sealUrl: String, alert: String, promise: Promise) in
       self.relay.check(sealUrl: sealUrl, alert: alert, promise: promise)
     }

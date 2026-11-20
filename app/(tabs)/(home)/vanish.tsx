@@ -402,7 +402,7 @@ export function VanishFlow({ olderCard = false }: { olderCard?: boolean }) {
       <>
         <Text style={textStyles.body}>
           {cards
-            ? 'Move GHOST from your account into a new Phantom Key. Put the key on a blank card, or write it down, before anything is sent.'
+            ? 'Move GHOST from your account onto your card, or into a new Phantom Key you write down.'
             : 'Move GHOST from your account into a new Phantom Key. You will write the key down before anything is sent.'}
         </Text>
             <Panel style={styles.form}>
@@ -453,7 +453,7 @@ export function VanishFlow({ olderCard = false }: { olderCard?: boolean }) {
             <Text style={textStyles.quiet}>Where the key goes</Text>
             <KeyChoice
               title="On a card"
-              detail="Like cash. The card is the only copy."
+              detail="Adds to what your card holds. Like cash."
               selected={toCard}
               onPress={() => setToCard(true)}
               testID="vanish-choose-card"

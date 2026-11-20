@@ -3,10 +3,14 @@
 // screen is not moving (lib/vanish/pending.ts keeps two from moving the same
 // payment at once), so its row shows the step it is at until it settles or
 // fails. A Summon whose fee window passed waits here for its key, typed again
-// on its screen.
+// on its screen. A card's change of balance (lib/ghost-card/vault.ts) moves
+// here too, so it finishes with no screen open.
 import { useEffect, useMemo, useState } from 'react';
 import { AppState } from 'react-native';
 
+import { accountZeroAddress } from '../account';
+import { changePaymentIds, moveChanges } from '../ghost-card/vault';
+import { vaultDeps } from '../ghost-card/vault-deps';
 import { advanceSend, asSendKit } from '../send/send-payment';
 import { signVanishAgain } from '../vanish/actions';
 import { advance } from '../vanish/payments';
@@ -25,7 +29,15 @@ export const MOVE_PENDING_EVERY_MS = 10_000;
 
 /** Moves each pending payment once; a failed move is tried again next time. */
 async function movePending(kit: PaymentKit, pending: readonly PendingPayment[]) {
+  // A card's change of balance moves its own Summon (with the opened card's
+  // kept key) and starts its Vanish once that Summon is in a block.
+  const vault = vaultDeps(kit, accountZeroAddress());
+  await moveChanges(vault);
+  const ofChanges = changePaymentIds(vault.changes);
   for (const payment of pending) {
+    if (ofChanges.has(payment.id)) {
+      continue;
+    }
     if (payment.held || payment.otherNetwork || stoppedVanish(payment.id, kit.store) !== null) {
       // Nothing is signed before the key is written down, nor for another
       // chain, nor again for a Vanish the account could not pay for.

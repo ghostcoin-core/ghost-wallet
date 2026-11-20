@@ -15,6 +15,12 @@ intptr_t ghost_wallet_card_copy_new_key(uint8_t *out, uintptr_t capacity);
 /// are not a Phantom Key, -3 for a null pointer.
 intptr_t ghost_wallet_card_hold_key(const uint8_t *words, uintptr_t length);
 
+/// Copies the words of the card key held now into `out`, for the Keychain
+/// while an opened Ghost card is given a new balance. Returns the byte count,
+/// -1 when none is held, -2 when `capacity` is too small, -3 for a null
+/// pointer.
+intptr_t ghost_wallet_card_copy_held_key(uint8_t *out, uintptr_t capacity);
+
 // The C bridge of core/src/seal_open.rs: a Sealed card's Open. The release
 // package the Seal sends goes from the relay to the core here, and the Open's
 // phone key seed between the core and the Keychain; JavaScript sees neither.

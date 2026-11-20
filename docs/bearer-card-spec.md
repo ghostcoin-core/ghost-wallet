@@ -373,6 +373,56 @@ fill's key is new card randomness plus the new writer's nonce. If an opened
 card were refilled before its Claim confirmed, by the opener or anyone else
 holding it, the opener's app still holds the released seed material.
 
+### A card as a vault
+
+To the holder a card is a vault with one balance. Vanish adds to it: 5, then
+10, then 20 make 35. Summon takes any amount off it: take 3 of 35 and the card
+holds 32, or take it all and it is empty. The app shows no card states: no
+fill numbers, no Opened, no Reuse, and no "not safe" text. A card shows its
+balance, "Empty", or one plain line when it is fake, broken or unreadable.
+
+The applet is unchanged. A fill is still one coin, and a partial Claim would
+leave the rest under a key a phone has seen, so every change gives the card a
+new key for the new total. All of it happens in one hold of the card, two NFC
+sheets back to back (`lib/ghost-card/vault.ts`):
+
+1. **Open.** The card releases its key. The native core checks it makes the
+   card's coin, and the app keeps it in the iPhone Keychain under the coin's
+   public marker (this device only, never synchronised). The key is read
+   back before anything else is sent to the card.
+2. **Remake.** The card is cleared (Refill) and makes a new key for the new
+   total (Make). It signs a Check that the app verifies exactly as a Fill's.
+3. **In the background,** from Home's payment mover, with no screen open:
+   the old coin is Summoned into the wallet with the kept key. Once that
+   Summon is in a block, a Vanish pays the new total into the card's new
+   coin. The kept key is deleted when the Summon settles.
+
+An empty card (blank, or opened with its coin already taken) is filled in the
+same hold. A card whose last change is still on its way (sealed, its Vanish
+saved on this phone but not yet in a block) is changed on top of it: the old
+coin is Summoned once its own Vanish lands. A card someone made but nobody
+paid holds nothing.
+
+Nothing can be lost on the way:
+
+- The key is in the Keychain before the card is cleared. The card also
+  answers Open again with the same key until it is cleared.
+- A hold cut off after the card was cleared but before the new key was made
+  changes nothing. The change stays saved, the old coin is not Summoned, and
+  the card still shows the old balance. The next hold of that card carries on
+  from it.
+- Each step is saved as public data (card id, markers, commit data, amounts
+  and payment ids) and carries on after a restart.
+
+The cost of a change is a Summon fee and a Vanish fee. Adding needs the
+amount plus both fees in the wallet. Taking off must leave nothing or at
+least the smallest Vanish on the card. Each change uses two of the card's
+1,024 seal checks.
+
+The bearer guarantee holds: the coin on the card always comes from a key only
+the card has had. The phone that made a change holds the old coin's key only
+until that coin is in its own wallet.
+
 ### Java Cards need no Seal
 
 Fill (Make), Check, Open and Refill on a Java Card run between the phone and

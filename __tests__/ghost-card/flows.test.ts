@@ -106,6 +106,7 @@ function fakeNative(answer: () => NativeTap | Promise<NativeTap>, calls: Calls):
     javaCardFill: record('fill'),
     javaCardOpen: record('open'),
     javaCardRefill: record('refill'),
+    javaCardRemake: record('remake'),
   };
 }
 

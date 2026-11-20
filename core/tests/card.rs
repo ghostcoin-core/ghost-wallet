@@ -4,8 +4,8 @@
 use ghost_client::account::WalletSeed;
 use ghost_client::{KeyFormat, PhantomKey};
 use ghost_wallet_core::card::{
-    CARD_NO_KEY, CARD_NULL, CARD_TOO_SMALL, find_card_key_coins, forget_card_key, ghost_wallet_card_copy_new_key,
-    ghost_wallet_card_hold_key, has_card_key, hold_card_words,
+    CARD_NO_KEY, CARD_NULL, CARD_TOO_SMALL, find_card_key_coins, forget_card_key, ghost_wallet_card_copy_held_key,
+    ghost_wallet_card_copy_new_key, ghost_wallet_card_hold_key, has_card_key, hold_card_words,
 };
 use ghost_wallet_core::{
     CHECKED_KEY_WORDS, CoinLeaf, KeyVault, TEST_CHAIN_ID, VanishError, commit_leaf, vanish_commit_with,
@@ -107,6 +107,23 @@ fn the_key_a_card_hands_back_finds_its_coin_and_is_forgotten() {
     assert_eq!(coins.amount_wei, (2 * ONE_GHOST).to_string());
     // Still held after a lookup, for the proof.
     assert!(has_card_key());
+
+    // Copied out for the Keychain, it stays held, and given back after a
+    // restart it finds the same coin.
+    let mut kept = [0u8; 512];
+    // SAFETY: a null pointer is refused before any write; `kept` holds 512 bytes.
+    assert_eq!(unsafe { ghost_wallet_card_copy_held_key(core::ptr::null_mut(), 0) }, CARD_NULL);
+    assert_eq!(unsafe { ghost_wallet_card_copy_held_key(kept.as_mut_ptr(), 3) }, CARD_TOO_SMALL);
+    let length = unsafe { ghost_wallet_card_copy_held_key(kept.as_mut_ptr(), kept.len()) };
+    assert_eq!(usize::try_from(length).unwrap(), words.len());
+    assert_eq!(&kept[..words.len()], words.as_bytes());
+    assert!(has_card_key());
+    forget_card_key();
+    assert_eq!(unsafe { ghost_wallet_card_copy_held_key(kept.as_mut_ptr(), kept.len()) }, CARD_NO_KEY);
+    // SAFETY: `kept` holds the copied words.
+    assert_eq!(unsafe { ghost_wallet_card_hold_key(kept.as_ptr(), words.len()) }, 0);
+    kept.fill(0);
+    assert_eq!(find_card_key_coins(TEST_CHAIN_ID, leaves.clone(), vec![]).unwrap().status, "found");
 
     // Another key replaces it.
     assert!(hold_card_words(words_of(&key(33))));

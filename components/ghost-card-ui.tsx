@@ -1,4 +1,4 @@
-// What the Ghost card screens share: the card's status after a Check.
+// What the Ghost card screens share: what a card holds after a tap.
 import { StyleSheet, Text } from 'react-native';
 
 import {
@@ -8,6 +8,7 @@ import {
   safeToAccept,
   type GhostCardStatus,
 } from '../lib/ghost-card/status';
+import { balanceText, type CardBalance } from '../lib/ghost-card/vault';
 import { colors } from './theme';
 import { Panel, textStyles } from './ui';
 
@@ -52,3 +53,27 @@ const styles = StyleSheet.create({
     color: colors.violet,
   },
 });
+
+/** What a card holds: one balance, or plainly what is wrong. */
+export function CardBalancePanel({ balance, testID }: { balance: CardBalance; testID: string }) {
+  const alarm = balance.kind === 'problem' && balance.alarm;
+  return (
+    <Panel style={styles.panel} testID={testID}>
+      <Text style={textStyles.quiet}>
+        {balance.kind === 'problem' ? 'This card' : `Card ${balance.cardNumber}`}
+      </Text>
+      <Text
+        accessibilityLiveRegion="polite"
+        style={[styles.status, alarm && styles.alarm, balance.kind === 'holds' && styles.safe]}
+        testID={`${testID}-text`}
+      >
+        {balanceText(balance)}
+      </Text>
+      {balance.kind === 'holds' && balance.updating ? (
+        <Text style={textStyles.body} testID={`${testID}-updating`}>
+          Updating. It holds this in about a minute.
+        </Text>
+      ) : null}
+    </Panel>
+  );
+}

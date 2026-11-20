@@ -227,7 +227,7 @@ describe('SettingsScreen', () => {
     expect(mockPush).toHaveBeenCalledWith('/recovery-words');
   });
 
-  it('lists the cards: Check NFC Chip, Fill, Open into my wallet and Wipe, each opening its screen', () => {
+  it('lists the cards: what a card holds, the older cards Fill, Open and Wipe, each opening its screen', () => {
     render(<SettingsScreen />);
     expect(screen.getByText('Cards')).toBeOnTheScreen();
     for (const [testID, route] of [
@@ -239,7 +239,7 @@ describe('SettingsScreen', () => {
       fireEvent.press(screen.getByTestId(testID));
       expect(mockPush).toHaveBeenLastCalledWith(route);
     }
-    expect(screen.getByTestId('settings-check-card')).toHaveTextContent(/Check NFC Chip/);
+    expect(screen.getByTestId('settings-check-card')).toHaveTextContent(/What's on a card/);
   });
 
   it('opens the bench on the seventh tap of the version, not before', () => {
