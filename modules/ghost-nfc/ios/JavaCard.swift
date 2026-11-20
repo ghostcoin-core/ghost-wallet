@@ -184,14 +184,21 @@ final class JavaCard {
   /// while the card is still sealed, then Open, which needs nothing but the
   /// card. The answer goes to the native core only. A blank card answers its
   /// Identify only, with `opened` false, and uses no check.
-  func open(alert: String, checkChallenge: Data, promise: Promise) {
-    guard checkChallenge.count == 32 else {
+  ///
+  /// With `expectCardId` (16 bytes; empty for none), any other card, or this
+  /// card at a fill other than `expectFill`, is refused before anything is
+  /// sent to it: the app read that card first and saved what it needs.
+  func open(alert: String, checkChallenge: Data, expectCardId: Data, expectFill: UInt32, promise: Promise) {
+    guard checkChallenge.count == 32, expectCardId.isEmpty || expectCardId.count == 16 else {
       promise.reject(GhostCardBadInputException())
       return
     }
     var commitData: Data?
     run(alert: alert, working: "Opening the card", steps: 16, promise: promise) { link, out in
       let id = try self.identify(link, out)
+      if !expectCardId.isEmpty {
+        guard id.cardId == expectCardId, id.fill == expectFill else { throw GhostCardOtherCardException() }
+      }
       // A blank card holds nothing to open: its Identify alone goes back, so
       // adding to an empty card goes on to Make in the same hold.
       if id.state == 0 {

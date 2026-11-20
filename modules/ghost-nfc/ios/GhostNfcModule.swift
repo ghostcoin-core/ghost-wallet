@@ -58,8 +58,10 @@ public final class GhostNfcModule: Module {
       self.javaCard.fill(alert: alert, make: make, challenge: challenge, promise: promise)
     }
 
-    AsyncFunction("javaCardOpen") { (alert: String, checkChallenge: Data, promise: Promise) in
-      self.javaCard.open(alert: alert, checkChallenge: checkChallenge, promise: promise)
+    // With `expectCardId` (empty for none), only that card at `expectFill` is opened.
+    AsyncFunction("javaCardOpen") { (alert: String, checkChallenge: Data, expectCardId: Data, expectFill: UInt32, promise: Promise) in
+      self.javaCard.open(
+        alert: alert, checkChallenge: checkChallenge, expectCardId: expectCardId, expectFill: expectFill, promise: promise)
     }
 
     // Only the opened card `cardId` at `fill`, whose coin was seen spent.

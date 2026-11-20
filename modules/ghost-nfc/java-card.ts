@@ -23,7 +23,8 @@ export type GhostCardNative = {
   javaCardCheck(alert: string, challenge: Uint8Array, commitData: boolean): Promise<NativeTap>;
   /** `make`: the amount (12 bytes), chain id (8) and writer nonce (32). */
   javaCardFill(alert: string, make: Uint8Array, challenge: Uint8Array): Promise<NativeTap>;
-  javaCardOpen(alert: string, checkChallenge: Uint8Array): Promise<NativeTap>;
+  /** With `expectCardId` (16 bytes; empty for none), any card but that one at `expectFill` is refused untouched. */
+  javaCardOpen(alert: string, checkChallenge: Uint8Array, expectCardId: Uint8Array, expectFill: number): Promise<NativeTap>;
   /** Refills only the opened card `cardId` (16 bytes) at `fill`; any other card is refused untouched. */
   javaCardRefill(alert: string, cardId: Uint8Array, fill: number): Promise<NativeTap>;
   /**

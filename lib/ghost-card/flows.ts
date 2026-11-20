@@ -353,7 +353,7 @@ export type OpenResult =
  * from its leaf on chain; when the chain shows that coin already taken off,
  * nothing is summoned and the card is offered for reuse instead.
  */
-export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
+export async function openGhostCard(deps: GhostCardDeps, only?: RefillTarget): Promise<OpenResult> {
   const { core, nfc } = deps;
   if (!core || !nfc) {
     return { ok: false, status: { kind: 'retry', message: 'This iPhone cannot read Ghost cards in this build.' } };
@@ -362,7 +362,9 @@ export async function openGhostCard(deps: GhostCardDeps): Promise<OpenResult> {
   core.forgetJavaCardRelease();
   let card: CardTap;
   try {
-    card = await tap(() => nfc.javaCardOpen(ALERT.open, checkChallenge));
+    card = await tap(() =>
+      nfc.javaCardOpen(ALERT.open, checkChallenge, only?.cardId ?? new Uint8Array(0), only?.fill ?? 0),
+    );
   } catch (error) {
     return { ok: false, status: statusOfTapFailure(error) };
   }
