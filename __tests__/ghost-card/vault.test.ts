@@ -715,3 +715,30 @@ it('lists an Add whose Vanish could not be paid as failed, never as added', asyn
   expect(world.onCard()).toBe(0n);
   expect(cardActivityItems(world.rows).map((i) => [i.card, i.state])).toEqual([['add', 'failed']]);
 });
+
+it('keeps a change whose Vanish failed until its failed row is on disk', async () => {
+  await add(5n);
+  world.wallet = 0n;
+  const write = world.deps().activity!.write;
+  let fail = true;
+  const deps = world.deps();
+  deps.activity = {
+    read: deps.activity!.read,
+    write: async (entries) => {
+      if (fail && entries.some((e) => e.failed)) {
+        throw new Error('disk full');
+      }
+      await write(entries);
+    },
+  };
+  for (let i = 0; i < 4; i++) {
+    await moveChanges(deps);
+    world.settle();
+  }
+  // Not dropped: its row could not say it failed.
+  expect(world.saved).toHaveLength(1);
+  fail = false;
+  await world.finish();
+  expect(world.saved).toEqual([]);
+  expect(cardActivityItems(world.rows).map((i) => i.state)).toEqual(['failed']);
+});
