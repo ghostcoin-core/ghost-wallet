@@ -18,6 +18,7 @@ import { formatGhost } from '../../../lib/home/balance-format';
 import { balanceStatus } from '../../../lib/home/cache-refresh';
 import { SAMPLE_NEWS } from '../../../lib/home/news';
 import { useFaucet } from '../../../lib/home/use-faucet';
+import { useCardBalance } from '../../../lib/home/use-card-balance';
 import { useHome, useNow } from '../../../lib/home/use-home';
 import { FOLD_GAP, leftColumnWidth, useLayout } from '../../../lib/layout';
 import { buildNetwork, offersTestGhost } from '../../../lib/network/build-network';
@@ -49,6 +50,8 @@ export default function HomeScreen() {
   const faucet = useFaucet(nodeUrl, address, refresh);
   const now = useNow();
   const snapshot = view.snapshot;
+  // A card change still going through counts as done: the balance never jumps up and back.
+  const balanceWei = useCardBalance(nodeUrl, snapshot?.balanceWei ?? null, snapshot?.tipHeight ?? null);
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={styles.page} testID="home-screen">
@@ -93,9 +96,9 @@ export default function HomeScreen() {
                     adjustsFontSizeToFit
                     numberOfLines={1}
                     testID="balance-amount"
-                    accessibilityLabel={snapshot ? `${formatGhost(snapshot.balanceWei)} GHOST` : 'Balance not known yet'}
+                    accessibilityLabel={balanceWei !== null ? `${formatGhost(balanceWei)} GHOST` : 'Balance not known yet'}
                   >
-                    {snapshot ? formatGhost(snapshot.balanceWei) : '–'}
+                    {balanceWei !== null ? formatGhost(balanceWei) : '–'}
                     <Text style={styles.balanceUnit}> GHOST</Text>
                   </Text>
                   <Text style={styles.cardStatus} testID="balance-status">

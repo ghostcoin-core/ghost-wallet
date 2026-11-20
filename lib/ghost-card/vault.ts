@@ -847,3 +847,33 @@ export function balanceText(balance: CardBalance): string {
       return balance.message;
   }
 }
+
+// ---------------------------------------------------------------------------
+// The wallet as it will be
+
+/** Where one of a change's payments stands against a balance reading. */
+export type PaymentAtReading = 'in-reading' | 'not-yet' | 'failed';
+
+/**
+ * How far the wallet's balance, read at a block, is from what it will be once
+ * every saved change finishes: the old coin's Summon still to come in, less
+ * the new total still to go onto the card. Home adds it, so a balance never
+ * jumps up while a card change goes through: adding 2 to a card holding 3
+ * shows the wallet down 2 at once, never up 3 and then down 5. Fees are left
+ * out; they show when the payments land.
+ */
+export function pendingCardChange(changes: readonly CardChange[], at: (paymentId: string) => PaymentAtReading): bigint {
+  let total = 0n;
+  for (const c of changes) {
+    const after = BigInt(c.afterWei);
+    if (after > 0n && c.commitData === null) {
+      // Cut off before the card made its new key: nothing has moved yet.
+      continue;
+    }
+    const comesIn =
+      c.oldMarker !== null && c.oldCounted && c.summonId !== 'gone' && (c.summonId === null || at(c.summonId) !== 'in-reading');
+    const goesOut = after > 0n && (c.vanishId === null || at(c.vanishId) === 'not-yet');
+    total += (comesIn ? BigInt(c.beforeWei) : 0n) - (goesOut ? after : 0n);
+  }
+  return total;
+}
