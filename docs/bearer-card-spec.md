@@ -401,7 +401,13 @@ An empty card (blank, or opened with its coin already taken) is filled in the
 same hold. A card whose last change is still on its way (sealed, its Vanish
 saved on this phone but not yet in a block) is changed on top of it: the old
 coin is Summoned once its own Vanish lands. A card someone made but nobody
-paid holds nothing.
+paid holds nothing. Its key is still kept for a week, so a payment from
+another phone that lands late comes home to the wallet.
+
+A card opened on another phone (opened, its coin unspent, and no change on
+this phone brings it home) shows its balance with a red warning: someone else
+may hold its key, so it must not be accepted. Its owner can still take it all
+off.
 
 Nothing can be lost on the way:
 
@@ -411,6 +417,11 @@ Nothing can be lost on the way:
   changes nothing. The change stays saved, the old coin is not Summoned, and
   the card still shows the old balance. The next hold of that card carries on
   from it.
+- An app killed after the card made its new key, before that was saved, is
+  caught at the next hold: the card is sealed at the next fill for the
+  change's new total, and that change is finished as made.
+- A Summon is moved here until it settles, so a block that is dropped gets a
+  new proof made with the kept key.
 - Each step is saved as public data (card id, markers, commit data, amounts
   and payment ids) and carries on after a restart.
 

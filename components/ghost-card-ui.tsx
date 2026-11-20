@@ -69,6 +69,11 @@ export function CardBalancePanel({ balance, testID }: { balance: CardBalance; te
       >
         {balanceText(balance)}
       </Text>
+      {balance.kind === 'holds' && balance.warning ? (
+        <Text style={[textStyles.body, styles.alarm]} testID={`${testID}-warning`}>
+          {balance.warning}
+        </Text>
+      ) : null}
       {balance.kind === 'holds' && balance.updating ? (
         <Text style={textStyles.body} testID={`${testID}-updating`}>
           Updating. It holds this in about a minute.

@@ -38,6 +38,12 @@ export type CardChange = {
   oldMarker: string | null;
   /** The old coin's commit data (hex), when its own Vanish was still on its way at the hold. */
   oldCommitData: string | null;
+  /**
+   * Whether the old coin counts in `beforeWei`. A coin nobody had paid at the
+   * hold does not, but its key is kept all the same: a Vanish from another
+   * phone may still land on it, and is then brought home to the wallet.
+   */
+  oldCounted: boolean;
   /** What the card held before the change. */
   beforeWei: string;
   /** What it holds after: 0 when it was emptied. */
@@ -95,12 +101,35 @@ export type ChangeResult =
 /** What a card holds, as the screens say it. */
 export type CardBalance =
   /** `updating`: a change is still going through; the balance is what it will hold. */
-  | { kind: 'holds'; cardNumber: string; amountWei: bigint; updating: boolean }
+  /** `warning`: why it is not safe to accept, while its owner can still take it off. */
+  | { kind: 'holds'; cardNumber: string; amountWei: bigint; updating: boolean; warning?: string }
   | { kind: 'empty'; cardNumber: string }
   | { kind: 'problem'; message: string; alarm: boolean };
 
+/** How often a coin no one had paid is looked for: a lookup reads the coin tree. */
+const STRAY_LOOK_EVERY_MS = 5 * 60 * 1000;
+const lastLooked = new Map<string, number>();
+
+/** Whether to look for the change's old coin on this move. */
+function lookNow(change: CardChange): boolean {
+  if (change.oldCounted) {
+    return true;
+  }
+  const now = Date.now();
+  if (now - (lastLooked.get(change.id) ?? 0) < STRAY_LOOK_EVERY_MS) {
+    return false;
+  }
+  lastLooked.set(change.id, now);
+  return true;
+}
+
+/** How long a kept key of a coin no one had paid is watched for a late payment. */
+const STRAY_WATCH_MS = 7 * 24 * 60 * 60 * 1000;
+
 const CANNOT_READ = 'This iPhone cannot read Ghost cards in this build.';
 const NO_NETWORK = "Can't reach the Ghost network. Nothing was changed. Try again in a moment.";
+const OPENED_ELSEWHERE =
+  "This card was opened on another phone, so someone else may be able to take its GHOST. Don't accept it. If it's yours, take it all off now.";
 const NOT_CHANGED = 'The card was not changed. Hold it still near the top of the iPhone and try again.';
 
 // ---------------------------------------------------------------------------
@@ -117,6 +146,7 @@ function isChange(value: unknown): value is CardChange {
     typeof c.id === 'string' &&
     typeof c.cardId === 'string' &&
     typeof c.oldFill === 'number' &&
+    typeof c.oldCounted === 'boolean' &&
     typeof c.beforeWei === 'string' &&
     typeof c.afterWei === 'string'
   );
@@ -190,6 +220,29 @@ function newChangeId(store: ChangeStore): string {
     id = `change-${Date.now()}-${n}`;
   }
   return id;
+}
+
+/**
+ * A change whose card made its new key but which was not saved as made (the
+ * app was killed in between): the card is sealed at the next fill, for the
+ * change's new total, with the commit data its signed statement covers. That
+ * is the change's new coin, so it is saved as made and finishes as usual.
+ */
+async function adoptMade(deps: VaultDeps, cardId: string, fill: number, amountWei: bigint | null, commitData: Uint8Array) {
+  const made = deps.changes
+    .read()
+    .find(
+      (c) =>
+        c.cardId === cardId &&
+        c.commitData === null &&
+        c.afterWei !== '0' &&
+        c.oldFill + 1 === fill &&
+        amountWei !== null &&
+        BigInt(c.afterWei) === amountWei,
+    );
+  if (made) {
+    await save(deps.changes, { ...made, commitData: bytesToHex(commitData), newFill: fill });
+  }
 }
 
 /** Whether a saved change already brings the coin with `marker` home. */
@@ -276,12 +329,16 @@ async function hold(
   let oldCommitData: string | null = null;
   // A change whose hold was cut off on this coin: this one takes its place.
   let resumed: CardChange | null = null;
+  let oldCounted = true;
 
   if (opened.ok) {
     cardId = opened.cardId;
     fill = opened.fill;
     cardNumber = opened.cardNumber;
     const coin = opened.coin;
+    if (coin?.state === 'sealed' && coin.commitData) {
+      await adoptMade(deps, bytesToHex(cardId), fill, opened.amountWei, coin.commitData);
+    }
     let chain: CoinOnChain | null = null;
     if (coin) {
       try {
@@ -297,6 +354,7 @@ async function hold(
       before = BigInt(unfinished.beforeWei);
       oldMarker = unfinished.oldMarker;
       oldCommitData = unfinished.oldCommitData;
+      oldCounted = unfinished.oldCounted;
     } else if (!coin) {
       // No seal checks left: it cannot prove what it holds. Nothing was changed.
       return { ok: false, message: 'This card is worn out. Use Settings, Cards, to move its GHOST to your wallet.' };
@@ -319,8 +377,12 @@ async function hold(
       oldMarker = bytesToHex(coin.marker);
       oldCommitData = coin.commitData ? bytesToHex(coin.commitData) : null;
     } else {
-      // Sealed, but nothing was ever paid into it: it holds nothing.
+      // Sealed, but nothing has paid into it yet: it holds nothing. Its key
+      // is kept anyway, in case a payment from another phone still lands.
       before = 0n;
+      oldMarker = bytesToHex(coin.marker);
+      oldCommitData = coin.commitData ? bytesToHex(coin.commitData) : null;
+      oldCounted = false;
     }
   } else if (opened.blank) {
     cardId = opened.blank.cardId;
@@ -333,6 +395,7 @@ async function hold(
       before = BigInt(unfinished.beforeWei);
       oldMarker = unfinished.oldMarker;
       oldCommitData = unfinished.oldCommitData;
+      oldCounted = unfinished.oldCounted;
     }
   } else if (opened.reuse) {
     // Opened before, its coin already taken off: an empty card.
@@ -378,6 +441,7 @@ async function hold(
     oldFill: fill,
     oldMarker,
     oldCommitData,
+    oldCounted,
     beforeWei: before.toString(),
     afterWei: after.toString(),
     commitData: null,
@@ -462,7 +526,7 @@ async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPa
   }
 
   // The old coin, into the wallet.
-  if (change.oldMarker !== null && change.summonId === null) {
+  if (change.oldMarker !== null && change.summonId === null && lookNow(change)) {
     const marker = change.oldMarker;
     const summonId = await withCardKey(async () => {
       try {
@@ -476,8 +540,12 @@ async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPa
         if (found === 'found') {
           return await payments.summonHeldKey();
         }
-        // Not on chain yet: its own Vanish is still on its way, or it failed
-        // (then it was never paid, and there is nothing to take home).
+        // Not on chain yet. A coin no one had paid at the hold is watched for
+        // a while in case a payment from another phone lands. A counted coin
+        // waits for its own Vanish, unless that failed (then it was never paid).
+        if (!change.oldCounted) {
+          return Date.now() - change.at > STRAY_WATCH_MS ? 'gone' : null;
+        }
         return change.oldCommitData !== null && onItsWay(deps, hexToBytes(change.oldCommitData), change) ? null : 'gone';
       } finally {
         payments.forgetHeldKey();
@@ -488,11 +556,13 @@ async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPa
       await save(deps.changes, change);
     }
   }
-  let summoned = change.oldMarker === null || change.summonId === 'gone';
+  let summoned = change.oldMarker === null || change.summonId === 'gone' || !change.oldCounted;
   if (change.summonId !== null && change.summonId !== 'gone') {
     const id = change.summonId;
     let state = payments.paymentState(id);
-    if (state === 'moving') {
+    // Moved here until it settles: Home leaves it alone, and a block that is
+    // dropped may need a new proof, made with the kept key.
+    if (state === 'moving' || state === 'in-block') {
       await withCardKey(async () => {
         try {
           keys.restoreCardKey(tagOf(change.oldMarker ?? ''));
@@ -508,7 +578,7 @@ async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPa
       await save(deps.changes, { ...change, summonId: null });
       return;
     }
-    summoned = state === 'in-block' || state === 'settled';
+    summoned = summoned || state === 'in-block' || state === 'settled';
     if (state === 'settled' && change.oldMarker) {
       keys.forgetKeptCardKey(tagOf(change.oldMarker));
     }
@@ -523,7 +593,10 @@ async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPa
     change = { ...change, vanishId };
     await save(deps.changes, change);
   }
-  const summonSettled = change.summonId === null || change.summonId === 'gone' || payments.paymentState(change.summonId) === 'settled';
+  const summonSettled =
+    change.oldMarker === null ||
+    change.summonId === 'gone' ||
+    (change.summonId !== null && payments.paymentState(change.summonId) === 'settled');
   const vanish = change.vanishId === null ? 'settled' : payments.paymentState(change.vanishId);
   if (summonSettled && (vanish === 'settled' || vanish === 'failed' || vanish === 'missing')) {
     if (change.oldMarker) {
@@ -586,7 +659,29 @@ export function cardBalance(deps: Pick<VaultDeps, 'changes' | 'payments'>, check
     return { kind: 'holds', cardNumber: statement.cardNumber, amountWei: BigInt(unfinished.beforeWei), updating: false };
   }
   if (status.kind === 'opened' && status.spent !== true) {
-    return { kind: 'holds', cardNumber: statement.cardNumber, amountWei: BigInt(statement.amountWei), updating: false };
+    if (claimed(deps, bytesToHex(statement.marker))) {
+      // All of it is on its way to this phone's wallet.
+      return { kind: 'empty', cardNumber: statement.cardNumber };
+    }
+    if (status.spent === null) {
+      return balanceOfStatus({ kind: 'no-connection' });
+    }
+    // Its key left the card on some phone, and that phone may still hold it:
+    // whoever has it can take the GHOST without the card.
+    return {
+      kind: 'holds',
+      cardNumber: statement.cardNumber,
+      amountWei: BigInt(statement.amountWei),
+      updating: false,
+      warning: OPENED_ELSEWHERE,
+    };
+  }
+  const made = deps.changes
+    .read()
+    .find((c) => c.cardId === cardId && c.commitData === null && c.afterWei !== '0' && c.oldFill + 1 === statement.fill);
+  if (status.kind === 'not-on-chain' && made && BigInt(made.afterWei) === status.amountWei) {
+    // Made its new key just before the app was stopped: finished at the next hold.
+    return { kind: 'holds', cardNumber: status.cardNumber, amountWei: status.amountWei, updating: true };
   }
   if (status.kind === 'not-on-chain') {
     return onItsWay(deps, check.commitData)
