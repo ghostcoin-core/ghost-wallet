@@ -5,10 +5,11 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { AppState } from 'react-native';
 
+import { fileCardActivity, subscribeCardActivity, withCardActivity } from '../ghost-card/card-activity';
 import { jsonFile } from '../storage';
 import { subscribePending } from '../vanish/pending';
 import { paymentKit } from '../vanish/use-payment';
-import type { ActivityItem } from './activity';
+import { sortActivity, type ActivityItem } from './activity';
 import { ACTIVITY_LIMIT, HomeLoader, type HomeView, type ReadAccount, type SnapshotCache } from './cache-refresh';
 import { scanHistory as scanRecentBlocks, type ScanHistory } from './history';
 import { readAccountZero } from './read-account';
@@ -70,7 +71,7 @@ export function useHome(
 }
 
 function readSaved(kit: ReturnType<typeof paymentKit>) {
-  return { items: savedActivity(kit), hashes: savedHashes(kit), credits: savedCredits(kit) };
+  return { items: savedActivity(kit), hashes: savedHashes(kit), credits: savedCredits(kit), cards: fileCardActivity().read() };
 }
 
 /**
@@ -85,10 +86,22 @@ export function useActivity(nodeUrl: string, kept: readonly ActivityItem[]): Act
   useEffect(() => {
     const update = () => setSaved(readSaved(kit));
     update();
-    return subscribePending(update);
+    const stopPending = subscribePending(update);
+    const stopCards = subscribeCardActivity(update);
+    return () => {
+      stopPending();
+      stopCards();
+    };
   }, [kit]);
 
-  return useMemo(() => activityWithSaved(kept, saved.items, saved.hashes, ACTIVITY_LIMIT, saved.credits), [kept, saved]);
+  // A card's change of balance shows as its one row, not its payments.
+  return useMemo(
+    () =>
+      sortActivity(
+        withCardActivity(activityWithSaved(kept, saved.items, saved.hashes, Number.MAX_SAFE_INTEGER, saved.credits), saved.cards),
+      ).slice(0, ACTIVITY_LIMIT),
+    [kept, saved],
+  );
 }
 
 /** The current time, ticking every `everyMs` so ages on screen stay right. */

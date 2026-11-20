@@ -6,6 +6,7 @@
 // is cut off, and that the background moves Summon the old coin before they
 // pay the new one.
 import type { CardKeyStore } from '../../modules/ghost-nfc/java-card';
+import { cardActivityItems, cardPaymentIds, type CardActivityEntry } from '../../lib/ghost-card/card-activity';
 import type { CheckResult, FillResult, OpenResult, RefillResult } from '../../lib/ghost-card/flows';
 import {
   cardBalance,
@@ -35,6 +36,8 @@ class World {
   kept = new Map<string, number>();
   payments = new Map<string, { kind: 'summon' | 'vanish'; coin: number; state: PaymentState }>();
   saved: CardChange[] = [];
+  /** Activity's card rows. */
+  rows: CardActivityEntry[] = [];
   log: string[] = [];
   /** The card taps and the native hold around them, in order. */
   sheet: string[] = [];
@@ -263,6 +266,12 @@ class World {
       },
       keys: this.keys(),
       changes: this.store(),
+      activity: {
+        read: () => this.rows,
+        write: async (entries) => {
+          this.rows = entries;
+        },
+      },
       payments: {
         lookUpHeldKey: async () => {
           const coin = this.coins.get(this.held!)!;
@@ -676,4 +685,25 @@ it('closes the sheet with the reason when a step after a tap stops the hold', as
   expect(result).toMatchObject({ ok: false });
   const message = (result as { message: string }).message;
   expect(world.sheet).toEqual(['hold', 'open', `end - | ${message}`]);
+});
+
+it('lists each Add and Take off as one row with what was added or taken off, hiding its Summon and Vanish', async () => {
+  await add(1n);
+  await world.finish();
+  await add(2n);
+  // While it goes through, the Add of 2 reads as adding 2, not a Summon of 1 and a Vanish of 3.
+  expect(cardActivityItems(world.rows).map((i) => [i.card, i.amountWei, i.state])).toEqual([
+    ['add', (1n * GHOST).toString(), 'done'],
+    ['add', (2n * GHOST).toString(), 'pending'],
+  ]);
+  await world.finish();
+  await take(null);
+  await world.finish();
+  expect(cardActivityItems(world.rows).map((i) => [i.card, i.direction, i.amountWei, i.state])).toEqual([
+    ['add', 'sent', (1n * GHOST).toString(), 'done'],
+    ['add', 'sent', (2n * GHOST).toString(), 'done'],
+    ['take', 'received', (3n * GHOST).toString(), 'done'],
+  ]);
+  // Every Summon and Vanish the changes made is under a row, so none is listed on its own.
+  expect(cardPaymentIds(world.rows)).toEqual(new Set(world.payments.keys()));
 });

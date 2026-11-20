@@ -14,6 +14,7 @@ import { moveAlone, openShared, paymentsChanged, shared, stoppedVanish } from '.
 import { statusOfStep } from '../vanish/status-mapping';
 import type { PaymentKit } from '../vanish/use-payment';
 import { ghostCardDeps } from './deps';
+import { fileCardActivity } from './card-activity';
 import { fileChanges, type PaymentState, type VaultDeps, type VaultPayments } from './vault';
 
 function vaultPayments(kit: PaymentKit, account: string): VaultPayments {
@@ -81,5 +82,6 @@ export function vaultDeps(kit: PaymentKit | null, account: string | null): Vault
     keys: cardKeyStore(),
     payments: kit && account ? vaultPayments(kit, account) : null,
     changes: fileChanges(),
+    activity: fileCardActivity(),
   };
 }

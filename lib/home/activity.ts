@@ -24,6 +24,11 @@ export type ActivityItem = {
    * block after tip `after` and up to tip `upTo`, the two balance readings.
    */
   blocks?: { after: number; upTo: number };
+  /**
+   * A card's change of balance (lib/ghost-card/card-activity.ts): GHOST
+   * added to a card or taken off it, as one row for its payments underneath.
+   */
+  card?: 'add' | 'take';
 };
 
 /** The payments this phone makes and saves. */
@@ -73,7 +78,17 @@ const REVEAL_VERBS = {
   claim: ['Claimed', 'Claiming', 'Claim'],
 } as const;
 
+/** What an Add to a card or a Take off is called once done, while going, and when it did not go through. */
+const CARD_VERBS = {
+  add: ['Added to card', 'Adding to card', 'Add to card'],
+  take: ['Taken off card', 'Taking off card', 'Take off card'],
+} as const;
+
 function title(item: ActivityItem): string {
+  if (item.card) {
+    const [done, going, stopped] = CARD_VERBS[item.card];
+    return item.state === 'done' ? done : item.state === 'pending' ? going : stopped;
+  }
   if (item.kind && item.kind !== 'send') {
     const [done, going, stopped] = REVEAL_VERBS[item.kind];
     return item.state === 'done' ? done : item.state === 'pending' ? going : stopped;
@@ -99,7 +114,7 @@ export function describeActivity(item: ActivityItem, now: number): ActivityRow {
       return {
         ...base,
         icon: 'check',
-        detail: `${item.direction === 'received' ? 'Received' : 'Sent'}, ${formatWhen(item.at, now)}`,
+        detail: `${item.card ? 'Done' : item.direction === 'received' ? 'Received' : 'Sent'}, ${formatWhen(item.at, now)}`,
         struck: false,
       };
     case 'failed':
@@ -149,7 +164,8 @@ export function parseActivityItem(raw: unknown): ActivityItem | null {
     Number.isFinite(item.at) &&
     (item.kind === undefined || KINDS.includes(item.kind as PaymentKind)) &&
     (item.hash === undefined || (typeof item.hash === 'string' && /^0x[0-9a-f]{64}$/i.test(item.hash))) &&
-    (item.blocks === undefined || isBlocks(item.blocks));
+    (item.blocks === undefined || isBlocks(item.blocks)) &&
+    (item.card === undefined || item.card === 'add' || item.card === 'take');
   if (!valid) {
     return null;
   }
@@ -163,6 +179,7 @@ export function parseActivityItem(raw: unknown): ActivityItem | null {
     ...(item.kind === undefined ? {} : { kind: item.kind as PaymentKind }),
     ...(item.hash === undefined ? {} : { hash: (item.hash as string).toLowerCase() }),
     ...(item.blocks === undefined ? {} : { blocks: blocksOf(item.blocks as { after: number; upTo: number }) }),
+    ...(item.card === undefined ? {} : { card: item.card as 'add' | 'take' }),
   };
 }
 
