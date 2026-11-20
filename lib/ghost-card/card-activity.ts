@@ -147,6 +147,38 @@ export function noteChange(
   return next;
 }
 
+/**
+ * Squares the rows with the saved changes: a pending row whose change is no
+ * longer saved finished (a change is only dropped once done, or once its
+ * coin was taken off elsewhere), and a row whose change is saved but was cut
+ * off before the card made its new key goes (nothing has moved for it; its
+ * next hold lists it again).
+ */
+export function squareRows(store: CardActivityStore, saved: readonly { id: string; cutOff: boolean }[]): Promise<void> {
+  const next = journal.then(() => {
+    const byId = new Map(saved.map((c) => [c.id, c]));
+    const entries = store.read();
+    let changed = false;
+    const kept: CardActivityEntry[] = [];
+    for (const e of entries) {
+      const c = byId.get(e.id);
+      if (c?.cutOff && e.paymentIds.length === 0) {
+        changed = true;
+        continue;
+      }
+      if (!c && !e.done) {
+        changed = true;
+        kept.push({ ...e, done: true });
+        continue;
+      }
+      kept.push(e);
+    }
+    return changed ? store.write(kept) : undefined;
+  });
+  journal = next.catch(() => undefined);
+  return next;
+}
+
 /** Every payment a card row stands for. */
 export function cardPaymentIds(entries: readonly CardActivityEntry[]): Set<string> {
   return new Set(entries.flatMap((e) => e.paymentIds));

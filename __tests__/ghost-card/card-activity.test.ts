@@ -74,3 +74,21 @@ it('marks an Add whose Vanish failed as failed, and never hides the Summon of an
   ]);
   expect(describeActivity(items[1], 10).title).toBe('Add to card');
 });
+
+it('finishes a pending row whose change is gone, and drops the row of a change cut off before its new key', async () => {
+  const { squareRows } = jest.requireActual('../../lib/ghost-card/card-activity') as typeof import('../../lib/ghost-card/card-activity');
+  const store = memory();
+  store.rows = [
+    { id: 'gone', kind: 'take', amountWei: '5', at: 1, paymentIds: ['s'], done: false },
+    { id: 'cut', kind: 'add', amountWei: '2', at: 2, paymentIds: [], done: false },
+    { id: 'going', kind: 'add', amountWei: '3', at: 3, paymentIds: ['v'], done: false },
+  ];
+  await squareRows(store, [
+    { id: 'cut', cutOff: true },
+    { id: 'going', cutOff: false },
+  ]);
+  expect(store.rows.map((r) => [r.id, r.done])).toEqual([
+    ['gone', true],
+    ['going', false],
+  ]);
+});
