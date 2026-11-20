@@ -32,7 +32,7 @@ function payment(id: string, kind: 'summon' | 'vanish', amount: bigint): Activit
 
 it('shows a card holding 1 that has 2 added as "Added to card −2", not a Summon of 1 and a Vanish of 3', async () => {
   const store = memory();
-  const change = { id: 'c1', beforeWei: (1n * GHOST).toString(), afterWei: (3n * GHOST).toString(), at: 5, summonId: 's1', vanishId: null };
+  const change = { id: 'c1', beforeWei: (1n * GHOST).toString(), afterWei: (3n * GHOST).toString(), at: 5, summonId: 's1', vanishId: null, oldCounted: true };
   await noteChange(store, change, false);
   await noteChange(store, { ...change, vanishId: 'v1' }, true);
   const items = withCardActivity(
@@ -48,7 +48,7 @@ it('shows a card holding 1 that has 2 added as "Added to card −2", not a Summo
 
 it('says taking off as received, and keeps a payment hidden once listed even after it is made again', async () => {
   const store = memory();
-  const change = { id: 'c2', beforeWei: (5n * GHOST).toString(), afterWei: (2n * GHOST).toString(), at: 5, summonId: 's1', vanishId: null };
+  const change = { id: 'c2', beforeWei: (5n * GHOST).toString(), afterWei: (2n * GHOST).toString(), at: 5, summonId: 's1', vanishId: null, oldCounted: true };
   await noteChange(store, change, false);
   await noteChange(store, { ...change, summonId: null }, false);
   await noteChange(store, { ...change, summonId: 's2' }, false);
@@ -60,4 +60,17 @@ it('says taking off as received, and keeps a payment hidden once listed even aft
   expect(item.direction).toBe('received');
   // A cached card row reads back.
   expect(parseActivityItem(item)).toEqual(item);
+});
+
+it('marks an Add whose Vanish failed as failed, and never hides the Summon of an uncounted coin', async () => {
+  const store = memory();
+  const change = { id: 'c3', beforeWei: '0', afterWei: (1n * GHOST).toString(), at: 5, summonId: 's9', vanishId: 'v9', oldCounted: false };
+  await noteChange(store, change, true, true);
+  const items = withCardActivity([payment('s9', 'summon', 7n * GHOST), payment('v9', 'vanish', GHOST)], store.rows);
+  // The late payment of 7 is listed on its own; the failed Vanish is under the failed row.
+  expect(items.map((i) => [i.id, i.state])).toEqual([
+    ['s9', 'done'],
+    ['card-c3', 'failed'],
+  ]);
+  expect(describeActivity(items[1], 10).title).toBe('Add to card');
 });

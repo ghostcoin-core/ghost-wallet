@@ -19,6 +19,8 @@ export type CardActivityEntry = {
   paymentIds: string[];
   /** The change finished: its payments settled. */
   done: boolean;
+  /** It finished without the card's new coin being paid: nothing went onto the card. */
+  failed?: boolean;
 };
 
 export type CardActivityStore = {
@@ -46,7 +48,8 @@ function isEntry(value: unknown): value is CardActivityEntry {
     Number.isFinite(e.at) &&
     Array.isArray(e.paymentIds) &&
     e.paymentIds.every((id) => typeof id === 'string') &&
-    typeof e.done === 'boolean'
+    typeof e.done === 'boolean' &&
+    (e.failed === undefined || typeof e.failed === 'boolean')
   );
 }
 
@@ -87,6 +90,12 @@ export type ChangeForActivity = {
   at: number;
   summonId: string | null;
   vanishId: string | null;
+  /**
+   * Whether the old coin was counted in the balance before. A Summon of an
+   * uncounted coin (one paid late, from another phone) is a real incoming
+   * payment of its own: it is never hidden under the row.
+   */
+  oldCounted: boolean;
 };
 
 let journal: Promise<unknown> = Promise.resolve();
@@ -96,14 +105,19 @@ let journal: Promise<unknown> = Promise.resolve();
  * `done` once it finished. A payment once listed stays hidden under the row,
  * even one that failed and was made again.
  */
-export function noteChange(store: CardActivityStore, change: ChangeForActivity, done: boolean): Promise<void> {
+export function noteChange(
+  store: CardActivityStore,
+  change: ChangeForActivity,
+  done: boolean,
+  failed = false,
+): Promise<void> {
   const next = journal.then(() => {
     const entries = store.read();
     const before = BigInt(change.beforeWei);
     const after = BigInt(change.afterWei);
     const old = entries.find((e) => e.id === change.id);
     const ids = new Set(old?.paymentIds ?? []);
-    for (const id of [change.summonId, change.vanishId]) {
+    for (const id of [change.oldCounted ? change.summonId : null, change.vanishId]) {
       if (id && id !== 'gone') {
         ids.add(id);
       }
@@ -115,10 +129,12 @@ export function noteChange(store: CardActivityStore, change: ChangeForActivity, 
       at: old?.at ?? change.at,
       paymentIds: [...ids],
       done: done || (old?.done ?? false),
+      ...(failed || old?.failed ? { failed: true } : {}),
     };
     if (
       old &&
       old.done === entry.done &&
+      (old.failed ?? false) === (entry.failed ?? false) &&
       old.paymentIds.length === entry.paymentIds.length &&
       old.amountWei === entry.amountWei
     ) {
@@ -145,7 +161,7 @@ export function cardActivityItems(entries: readonly CardActivityEntry[]): Activi
       direction: e.kind === 'add' ? 'sent' : 'received',
       counterparty: null,
       amountWei: e.amountWei,
-      state: e.done ? 'done' : 'pending',
+      state: e.failed ? 'failed' : e.done ? 'done' : 'pending',
       at: e.at,
       card: e.kind,
     }));
