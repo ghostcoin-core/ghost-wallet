@@ -466,11 +466,13 @@ export function VanishFlow({ olderCard = false }: { olderCard?: boolean }) {
               testID="vanish-choose-words"
             />
             <Button
-              label="Continue"
+              label={toCard ? 'Vanish' : 'Continue'}
               ink
               disabled={!canMake}
               onPress={() =>
-                toCard ? router.push({ pathname: '/fill-ghost-card', params: { amount: amountText } }) : void makeKey()
+                toCard
+                  ? router.push({ pathname: '/fill-ghost-card', params: { amount: amountText, start: '1' } })
+                  : void makeKey()
               }
               testID={toCard ? 'vanish-fill-card' : 'vanish-make-key'}
             />

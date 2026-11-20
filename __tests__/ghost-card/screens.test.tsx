@@ -69,7 +69,8 @@ jest.mock('../../modules/ghost-nfc', () => ({
   cardsSupported: () => true,
 }));
 const mockRouter = { push: jest.fn(), back: jest.fn(), replace: jest.fn() };
-jest.mock('expo-router', () => ({ useRouter: () => mockRouter, useLocalSearchParams: () => ({}) }));
+let mockParams: Record<string, string> = {};
+jest.mock('expo-router', () => ({ useRouter: () => mockRouter, useLocalSearchParams: () => mockParams }));
 jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({
   __esModule: true,
   default: () => require('../sealed-card/screen-kit').windowSize,
@@ -78,6 +79,7 @@ jest.mock('react-native/Libraries/Utilities/useWindowDimensions', () => ({
 export { fake };
 
 beforeEach(() => {
+  mockParams = {};
   fake.calls = [];
   fake.paymentStatus = null;
   for (const fn of [fake.fill, fake.open, fake.refill, fake.check, fake.sealCheck, mockRouter.replace, mockRouter.push]) {
@@ -113,6 +115,47 @@ describe.each(DEVICE_NAMES)('on the %s', (device) => {
     expect(fake.fill.mock.calls[0].length).toBe(2);
     expect(fake.calls).toEqual(['vanish']);
     expect(screen.getByTestId('ghost-fill-low-checks')).toBeTruthy();
+  });
+
+  it('Fill from Vanish: the card read starts at once, with no second button', async () => {
+    mockParams = { amount: '2', start: '1' };
+    fake.fill.mockResolvedValue({
+      ok: true,
+      commitData: new Uint8Array(430),
+      amountWei: 2n * 10n ** 18n,
+      fill: 1,
+      cardNumber: 'AAAA BBBB',
+      checksLeft: 400,
+      ms: 4200,
+    });
+    renderOn(device, FillGhostCardScreen);
+    await act(async () => {});
+    expect(fake.fill).toHaveBeenCalledTimes(1);
+    expect(fake.fill.mock.calls[0][1]).toBe(2n * 10n ** 18n);
+    expect(fake.calls).toEqual(['vanish']);
+  });
+
+  it('Fill: opened without the go-ahead, it waits for the tap', async () => {
+    mockParams = { amount: '2' };
+    renderOn(device, FillGhostCardScreen);
+    await act(async () => {});
+    expect(fake.fill).not.toHaveBeenCalled();
+  });
+
+  it('Open from Summon: the card read starts at once, with no second button', async () => {
+    mockParams = { start: '1' };
+    fake.open.mockResolvedValue({
+      ok: true,
+      amountWei: 2n * 10n ** 18n,
+      cardId: new Uint8Array(16).fill(7),
+      fill: 1,
+      cardNumber: 'AAAA BBBB',
+      ms: 2600,
+    });
+    renderOn(device, OpenGhostCardScreen);
+    await act(async () => {});
+    expect(fake.open).toHaveBeenCalledTimes(1);
+    expect(fake.calls).toEqual(['summon']);
   });
 
   it('Fill: a card that does not check out pays nothing', async () => {

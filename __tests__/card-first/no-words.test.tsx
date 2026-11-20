@@ -257,6 +257,8 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
     expect(mockPush).toHaveBeenCalledTimes(1);
     expect(mockPush.mock.calls[0][0].pathname).toBe('/fill-ghost-card');
     expect(mockPush.mock.calls[0][0].params.amount).toBe(screen.getByTestId('vanish-amount').props.value);
+    // Vanish is the go-ahead: Fill a card starts the card read at once.
+    expect(mockPush.mock.calls[0][0].params.start).toBe('1');
     expect(mockCore.prepareCardVanish).not.toHaveBeenCalled();
     expect(mockCore.prepareVanish).not.toHaveBeenCalled();
     expect(mockPut).not.toHaveBeenCalled();

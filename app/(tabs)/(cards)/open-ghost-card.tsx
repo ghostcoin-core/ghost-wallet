@@ -7,7 +7,7 @@
 // usual restart-safe payment. Once that settles and the chain shows the coin
 // spent, the card can be reused: Refill empties it, and Fill gives it a new
 // key.
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
@@ -59,6 +59,9 @@ export default function OpenGhostCardScreen() {
   const [spentCard, setSpentCard] = useState<RefillTarget | null>(null);
   const [refilled, setRefilled] = useState<{ fill: number; ms: number } | null>(null);
   const settled = useRef(false);
+  // With `start`, Summon's Open a card button was the go-ahead: the card read starts at once.
+  const { start } = useLocalSearchParams<{ start?: string }>();
+  const autoOpened = useRef(false);
 
   const rebuild = useMemo(
     () => (kit && sequence && address ? proveRevealAgain(kit, sequence, CARD_KEY, address) : null),
@@ -110,6 +113,15 @@ export default function OpenGhostCardScreen() {
     });
     await summon();
   }
+
+  useEffect(() => {
+    if (start === '1' && cards && kit && address && !autoOpened.current) {
+      autoOpened.current = true;
+      void open();
+    }
+    // Runs once, when the screen opens from Summon.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, cards, kit, address]);
 
   /** Summons the whole coin of the opened card into this wallet's account. */
   async function summon() {
