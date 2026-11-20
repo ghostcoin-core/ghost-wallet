@@ -36,6 +36,8 @@ class World {
   payments = new Map<string, { kind: 'summon' | 'vanish'; coin: number; state: PaymentState }>();
   saved: CardChange[] = [];
   log: string[] = [];
+  /** The card taps and the native hold around them, in order. */
+  sheet: string[] = [];
   network = true;
   /** The card is pulled away during the next remake. */
   pullNextRemake = false;
@@ -245,7 +247,11 @@ class World {
     return {
       card: {
         core: {} as never,
-        nfc: {} as never,
+        nfc: {
+          javaCardHold: (on: boolean, alert: string | null, error: string | null) => {
+            this.sheet.push(on ? 'hold' : `end ${alert ?? '-'} | ${error ?? '-'}`);
+          },
+        } as never,
         chainId: 1n,
         coinOnChain: async (_commitment, marker) => {
           if (!this.network) {
@@ -332,11 +338,22 @@ let world: World;
 
 jest.mock('../../lib/ghost-card/flows', () => ({
   ...jest.requireActual('../../lib/ghost-card/flows'),
-  openGhostCard: async (_deps: unknown, only?: { cardId: Uint8Array; fill: number }) => require('./vault.test').current().open(only),
-  remakeGhostCard: async (_deps: unknown, target: { fill: number }, amount: bigint) =>
-    require('./vault.test').current().remake(target.fill, amount),
-  refillGhostCard: async () => require('./vault.test').current().refill(),
-  checkGhostCard: async () => require('./vault.test').current().checkTap(),
+  openGhostCard: async (_deps: unknown, only?: { cardId: Uint8Array; fill: number }) => {
+    require('./vault.test').current().sheet.push('open');
+    return require('./vault.test').current().open(only);
+  },
+  remakeGhostCard: async (_deps: unknown, target: { fill: number }, amount: bigint) => {
+    require('./vault.test').current().sheet.push('remake');
+    return require('./vault.test').current().remake(target.fill, amount);
+  },
+  refillGhostCard: async () => {
+    require('./vault.test').current().sheet.push('refill');
+    return require('./vault.test').current().refill();
+  },
+  checkGhostCard: async () => {
+    require('./vault.test').current().sheet.push('check');
+    return require('./vault.test').current().checkTap();
+  },
 }));
 jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, write: async () => {} }) }));
 
@@ -632,4 +649,31 @@ it('two saves at once do not lose either', async () => {
   await Promise.all([add(5n), moveChanges(deps)]);
   await world.finish();
   expect(world.onCard()).toBe(5n * GHOST);
+});
+
+it('runs every tap of a change in one hold, one sheet, closed once at the end', async () => {
+  await add(5n);
+  expect(world.sheet).toEqual(['hold', 'open', 'remake', 'end Done. | -']);
+  world.sheet = [];
+  await take(null);
+  expect(world.sheet).toEqual(['hold', 'open', 'refill', 'end Done. | -']);
+});
+
+it('keeps a cut-off change to one sheet too: its Check, Open and new key in one hold', async () => {
+  world.killAfterNextMake = true;
+  await expect(add(5n)).resolves.toMatchObject({ ok: false });
+  world.sheet = [];
+  await add(10n);
+  expect(world.sheet).toEqual(['hold', 'check', 'open', 'remake', 'end Done. | -']);
+});
+
+it('closes the sheet with the reason when a step after a tap stops the hold', async () => {
+  await add(5n);
+  await world.finish();
+  world.network = false;
+  world.sheet = [];
+  const result = await add(10n);
+  expect(result).toMatchObject({ ok: false });
+  const message = (result as { message: string }).message;
+  expect(world.sheet).toEqual(['hold', 'open', `end - | ${message}`]);
 });

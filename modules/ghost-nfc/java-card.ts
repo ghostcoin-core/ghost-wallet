@@ -33,6 +33,14 @@ export type GhostCardNative = {
    * javaCardFill. Any other card is refused untouched.
    */
   javaCardRemake(alert: string, cardId: Uint8Array, fill: number, make: Uint8Array, challenge: Uint8Array): Promise<NativeTap>;
+  /**
+   * Starts (`on`) or ends a hold: while on, a flow that succeeds leaves its
+   * sheet open with the card connected, and the next flow goes on with it,
+   * so one hold of the card is one sheet. Ending it closes the sheet, if
+   * still open, with `error` shown or as a success with `alert`. Absent in
+   * older builds, where each flow is its own sheet.
+   */
+  javaCardHold?(on: boolean, alert: string | null, error: string | null): void;
 };
 
 /**
@@ -100,10 +108,15 @@ export const CARD_PROBLEMS: Record<CardProblem, string> = {
 export class GhostCardError extends Error {
   constructor(
     readonly problem: CardProblem,
-    /** The card's own words for a refusal (a state or a status word); never a secret. */
+    /**
+     * The card's own words for a refusal (a state or a status word), or the
+     * phone's short code for why a tap was lost; never a secret.
+     */
     readonly detail: string | null = null,
   ) {
-    super(CARD_PROBLEMS[problem]);
+    // A lost tap says its code, small, so a failure on a real phone can be
+    // told apart from the others.
+    super(problem === 'card-lost' && detail ? `${CARD_PROBLEMS[problem]} (${detail})` : CARD_PROBLEMS[problem]);
     this.name = 'GhostCardError';
   }
 }
@@ -133,6 +146,9 @@ export function cardFailure(error: unknown): Error {
       String((error as { message?: unknown } | null)?.message ?? ''),
     );
     detail = match ? (match[1] ?? match[2] ?? null) : null;
+  } else if (problem === 'card-lost') {
+    const match = /\[([a-z0-9-]{1,20})\]$/.exec(String((error as { message?: unknown } | null)?.message ?? ''));
+    detail = match ? match[1] : null;
   }
   return new GhostCardError(problem, detail);
 }

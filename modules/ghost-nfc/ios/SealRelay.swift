@@ -532,7 +532,7 @@ final class SealRelay {
           run.rounds.append(["kind": "card", "ms": Self.since(sent)])
           guard let answer else {
             self.abort(run)
-            self.finish(run, error: NfcSessionException())
+            self.finish(run, error: NfcSessionException("relay-lost"))
             return
           }
           self.post(run, path: "v1/relay/step", body: ["session": session, "answer": Self.hex(answer)])
@@ -635,7 +635,7 @@ final class SealRelay {
     case "expired":
       return SealExpiredException()
     case "card-dropped":
-      return NfcSessionException()
+      return NfcSessionException("relay-dropped")
     default:
       break
     }

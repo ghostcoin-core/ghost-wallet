@@ -49,6 +49,12 @@ public final class GhostNfcModule: Module {
     // A Ghost Java card (JavaCard.swift): each flow runs natively in one
     // tap, and resolves with public parts only, as hex. An Open's answer goes
     // to the native core, never here.
+    // A hold: while on, the flows run on one sheet with the card kept
+    // connected between them; ending it closes the sheet.
+    Function("javaCardHold") { (on: Bool, alert: String?, error: String?) in
+      self.javaCard.hold(on, alert: alert, error: error)
+    }
+
     AsyncFunction("javaCardCheck") { (alert: String, challenge: Data, commitData: Bool, promise: Promise) in
       self.javaCard.check(alert: alert, challenge: challenge, commitData: commitData, promise: promise)
     }

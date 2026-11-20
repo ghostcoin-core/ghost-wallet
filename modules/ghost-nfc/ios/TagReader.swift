@@ -22,8 +22,12 @@ final class NfcCancelledException: Exception {
   override var reason: String { "The card sheet was closed." }
 }
 
-final class NfcSessionException: Exception {
-  override var reason: String { "The card could not be read. Hold it still and try again." }
+/// The session ended or the card was lost. `param` is a short, non-secret
+/// code for why (such as "nfc-203", Core NFC's reason, or "lost-30", the
+/// command the card was lost on), shown small on the screen so a failure on
+/// a real phone can be told apart from the others.
+final class NfcSessionException: GenericException<String> {
+  override var reason: String { "The card could not be read. Hold it still and try again. [\(param)]" }
 }
 
 /// Which application the reader selected on the card tapped: the NTAG 424
@@ -98,7 +102,7 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
       if let answer {
         promise.resolve(answer)
       } else {
-        promise.reject(NfcSessionException())
+        promise.reject(NfcSessionException("no-card"))
       }
     }
   }
@@ -133,7 +137,7 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
   func reconnect(alert: String, onConnected: @escaping (Result<Data, Exception>) -> Void) {
     queue.async {
       guard let session = self.session else {
-        onConnected(.failure(NfcSessionException()))
+        onConnected(.failure(NfcSessionException("session-gone")))
         return
       }
       self.tag = nil
@@ -142,6 +146,12 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
       session.alertMessage = alert
       session.restartPolling()
     }
+  }
+
+  /// The kind of the card connected now, when a session is open with a card
+  /// connected; nil otherwise. Never call it on the reader's own queue.
+  func connectedCard() -> TappedCard? {
+    queue.sync { self.session != nil && self.tag != nil ? self.tapped : nil }
   }
 
   /// The kind of the card connected now, read on the reader's queue.
@@ -192,8 +202,9 @@ final class TagReader: NSObject, NFCTagReaderSessionDelegate {
     feedback.stop()
     if let onConnected = connected {
       connected = nil
-      let cancelled = (error as? NFCReaderError)?.code == .readerSessionInvalidationErrorUserCanceled
-      onConnected(.failure(cancelled ? NfcCancelledException() : NfcSessionException()))
+      let code = (error as? NFCReaderError)?.code
+      let cancelled = code == .readerSessionInvalidationErrorUserCanceled
+      onConnected(.failure(cancelled ? NfcCancelledException() : NfcSessionException("nfc-\(code.map { String($0.rawValue) } ?? "x")")))
     }
     if session === self.session {
       self.session = nil

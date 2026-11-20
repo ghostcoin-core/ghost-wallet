@@ -329,13 +329,21 @@ export async function changeCard(deps: VaultDeps, request: ChangeRequest, minimu
   if (!deps.card.core || !deps.card.nfc || !keys || !payments) {
     return { ok: false, message: CANNOT_READ };
   }
+  const nfc = deps.card.nfc;
   return withCardKey(async () => {
+    // One hold, one sheet: the Check, Open and new key run with the card
+    // kept connected, never a sheet closing and another opening mid-hold.
+    nfc.javaCardHold?.(true, null, null);
+    let result: ChangeResult = { ok: false, message: SAVE_FAILED };
     try {
-      return await hold(deps, keys, payments, request, minimumWei);
+      result = await hold(deps, keys, payments, request, minimumWei);
+      return result;
     } catch {
       // A save that failed: whatever the card did is picked up at its next hold.
-      return { ok: false, message: SAVE_FAILED };
+      return result;
     } finally {
+      // Closes the sheet if a step after a tap stopped the hold.
+      nfc.javaCardHold?.(false, result.ok ? 'Done.' : null, result.ok ? null : result.message);
       payments.forgetHeldKey();
     }
   });
