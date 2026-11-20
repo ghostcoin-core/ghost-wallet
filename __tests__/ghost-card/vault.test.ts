@@ -43,6 +43,8 @@ class World {
   pullNextRefill = false;
   /** The app is killed right after the card makes its next key. */
   killAfterNextMake = false;
+  /** The app is killed right after the card's next Open. */
+  killAfterNextOpen = false;
 
   marker(coin: number): Uint8Array {
     return new Uint8Array(32).fill(coin);
@@ -80,9 +82,18 @@ class World {
         reuse: { cardId: CARD_ID, fill: card.fill },
       };
     }
+    if (card.state === 'opened' && !coin.paid) {
+      // Opened, its commit data gone and no leaf on chain: the core cannot check the release.
+      return { ok: false, status: { kind: 'not-on-chain', fill: card.fill, amountWei: coin.amount, cardNumber: 'CARD' } };
+    }
     const was = card.state;
     card.state = 'opened';
     this.held = card.coin;
+    if (this.killAfterNextOpen) {
+      this.killAfterNextOpen = false;
+      this.held = null;
+      throw new Error('killed');
+    }
     return {
       ok: true,
       amountWei: coin.amount,
@@ -132,6 +143,21 @@ class World {
     this.card.state = 'blank';
     this.card.coin = null;
     return { ok: true, fill: this.card.fill, ms: 500 };
+  }
+
+  /** A Check tap, with the statement fields the vault reads. */
+  checkTap(): CheckResult {
+    this.log.push('check');
+    const result = this.check();
+    const coin = this.card.coin === null ? null : this.coins.get(this.card.coin)!;
+    return {
+      ...result,
+      statement: {
+        ...result.statement!,
+        state: this.card.state,
+        amountWei: (coin?.amount ?? 0n).toString(),
+      } as CheckResult['statement'],
+    };
   }
 
   check(): CheckResult {
@@ -286,6 +312,7 @@ jest.mock('../../lib/ghost-card/flows', () => ({
   remakeGhostCard: async (_deps: unknown, target: { fill: number }, amount: bigint) =>
     require('./vault.test').current().remake(target.fill, amount),
   refillGhostCard: async () => require('./vault.test').current().refill(),
+  checkGhostCard: async () => require('./vault.test').current().checkTap(),
 }));
 jest.mock('../../lib/storage', () => ({ jsonFile: () => ({ read: () => null, write: async () => {} }) }));
 
@@ -496,4 +523,38 @@ it('an app killed right after the card made its new key loses nothing: the next 
   expect(world.onCard()).toBe(16n * GHOST);
   expect(world.saved).toEqual([]);
   expect(world.kept.size).toBe(0);
+});
+
+it('a recovery hold cut off right after its Open still loses nothing', async () => {
+  await add(5n);
+  await world.finish();
+  world.killAfterNextMake = true;
+  await expect(add(10n)).rejects.toThrow('killed');
+  // The next hold reads the card first and saves its new coin, then is killed after the Open.
+  world.killAfterNextOpen = true;
+  await expect(add(1n)).rejects.toThrow('killed');
+  expect(world.log).toContain('check');
+  // The saved change finishes by itself: the old 5 comes home and 15 goes onto the card's coin.
+  await world.finish();
+  expect(world.coins.get(1)!.spent).toBe(true);
+  expect(world.coins.get(2)!.paid).toBe(true);
+  // The card is opened at that coin; the next hold carries on from 15.
+  expect(await add(1n)).toMatchObject({ ok: true, beforeWei: 15n * GHOST, afterWei: 16n * GHOST });
+  await world.finish();
+  expect(world.onCard()).toBe(16n * GHOST);
+  expect(world.saved).toEqual([]);
+  expect(world.kept.size).toBe(0);
+});
+
+it('a coin nobody paid keeps its key past a week', async () => {
+  const coin = world.nextCoin++;
+  world.coins.set(coin, { amount: 7n * GHOST, paid: false, spent: false });
+  world.card = { state: 'sealed', fill: 1, coin };
+  await add(1n);
+  await world.finish();
+  jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  await world.finish();
+  jest.restoreAllMocks();
+  expect(world.kept.size).toBe(1);
+  expect(world.saved).toHaveLength(1);
 });
