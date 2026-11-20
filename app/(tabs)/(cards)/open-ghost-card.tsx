@@ -23,7 +23,7 @@ import type { GhostCardStatus } from '../../../lib/ghost-card/status';
 import { ghostText } from '../../../lib/seal/card-status';
 import { useSettings } from '../../../lib/settings/settings';
 import { CARD_KEY, proveRevealAgain, startReveal } from '../../../lib/vanish/actions';
-import { paymentsChanged, shared } from '../../../lib/vanish/pending';
+import { discardSpentElsewhere, paymentsChanged, shared } from '../../../lib/vanish/pending';
 import { arrivedText, notSentReason, screenDone } from '../../../lib/vanish/status-mapping';
 import { paymentKit, usePayment, type PaymentKit } from '../../../lib/vanish/use-payment';
 import type { CorePaymentSequence } from '../../../modules/ghost-core';
@@ -261,7 +261,26 @@ export default function OpenGhostCardScreen() {
           <>
             <PaymentProgress status={paid} kind="summon" step={payment?.step} error={payment?.error} />
             {arrived ? <CoinsBack text={arrived} /> : null}
-            <PaymentExit final={screenDone(paid)} onLeave={() => router.back()} testPrefix="ghost-open" />
+            {payment?.spentElsewhere ? (
+              <>
+                <Text accessibilityLiveRegion="polite" style={textStyles.body} testID="ghost-open-spent-elsewhere">
+                  These coins were already summoned by another try of this Summon. This one never reached the chain, and
+                  nothing more is sent. Discard it.
+                </Text>
+                <Button
+                  label="Discard"
+                  onPress={() => {
+                    if (kit && sequence) {
+                      discardSpentElsewhere(kit, sequence.record().id);
+                    }
+                    router.back();
+                  }}
+                  testID="ghost-open-discard"
+                />
+              </>
+            ) : (
+              <PaymentExit final={screenDone(paid)} onLeave={() => router.back()} testPrefix="ghost-open" />
+            )}
           </>
         ) : status ? (
           <GhostCardStatusPanel status={status} testID="ghost-open-status" />

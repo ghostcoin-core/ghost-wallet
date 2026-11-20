@@ -303,6 +303,52 @@ export function noteNotUnmined(id: string) {
   }
 }
 
+/**
+ * The Summons and Claims last seen needing a new proof while their coin was
+ * already taken by another transaction (`advance` finds it on every move).
+ * Kept in memory only, and set again or cleared by each move: a reorg, or a
+ * node that read the markers wrong, never stops a Summon for good.
+ */
+const spentElsewhere = new Set<string>();
+
+/** Notes what the last move of payment `id` found about its coin being taken by another transaction. */
+export function noteSpentElsewhere(id: string, spent: boolean) {
+  const changed = spent ? !spentElsewhere.has(id) : spentElsewhere.has(id);
+  if (spent) {
+    spentElsewhere.add(id);
+  } else {
+    spentElsewhere.delete(id);
+  }
+  if (changed) {
+    notify();
+  }
+}
+
+/** Whether the last move of Summon or Claim `id` found its coin taken by another transaction. */
+export function isSpentElsewhere(id: string): boolean {
+  return spentElsewhere.has(id);
+}
+
+/** How Home lists a Summon or Claim whose coin another of its transactions already took. */
+export const SPENT_ELSEWHERE_STEP_TEXT = 'Already summoned. Open it to discard.';
+
+/**
+ * Removes Summon or Claim `id` from this phone, on the person's tap, when its
+ * last move found its coin taken by another transaction and none of its own
+ * attempts at the node: nothing of it can land. False otherwise; then nothing
+ * is removed.
+ */
+export function discardSpentElsewhere(kit: Pick<Kit, 'store'>, id: string): boolean {
+  const kind = kindOfId(id);
+  if ((kind !== 'summon' && kind !== 'claim') || moving.has(id) || !spentElsewhere.has(id)) {
+    return false;
+  }
+  kit.store.remove(id);
+  spentElsewhere.delete(id);
+  forgetShared(id);
+  return true;
+}
+
 /** Whether payment `id` was last seen sent and not mined for `STUCK_BLOCKS` blocks. */
 export function isStuck(id: string): boolean {
   const known = unmined.get(id);
@@ -516,6 +562,8 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
             : STOPPED_TEXT
           : keyStep
             ? heldStepText(keyStep)
+            : isSpentElsewhere(id)
+              ? SPENT_ELSEWHERE_STEP_TEXT
             : stepName(step) === 'Sent' && isStuck(id)
               ? notMinedStepText(kind)
               : kind === 'send'
@@ -528,6 +576,7 @@ export function pendingPayments(kit: Kit | null): PendingPayment[] {
 
 /** Clears everything kept here; for tests. */
 export function resetPending() {
+  spentElsewhere.clear();
   held = null;
   reopened = null;
   sequences.clear();
