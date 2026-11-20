@@ -19,10 +19,12 @@ import type {
 import { bytesToHex, hexToBytes } from '../../modules/ghost-core/account-lookup';
 import { GHOST_DEV_CHAIN_ID, buildNetwork } from '../network/build-network';
 import type { CoinTree } from './coin-tree';
+import { readSpentMarkers } from './coin-pages';
 import type { NodeReceipt, VanishNode } from './node';
-import { isCancel, noteNotUnmined, noteUnmined } from './pending';
+import { isCancel, noteNotUnmined, noteSpentElsewhere, noteUnmined } from './pending';
 import {
   refusedByCheck,
+  SETTLE_CONFIRMATIONS,
   statusOfRecovery,
   statusOfStep,
   stepName,
@@ -271,6 +273,8 @@ export type Advance = {
   stuck?: boolean;
   /** Stuck, with an account nonce a cancel can take: the screen offers Cancel. */
   cancellable?: boolean;
+  /** A Summon or Claim whose coin another transaction took, none of its attempts at the node: it can only be discarded. */
+  spentElsewhere?: boolean;
 };
 
 /**
@@ -325,11 +329,23 @@ export async function advance(
     return { status: stuck ? 'stuck' : statusOfStep(step), step, needsKey, needsBackup, stuck, cancellable };
   };
   const before = record.attempts.map((attempt) => bytesToHex(attempt.transactionHash));
+  if (tag !== 'Sign' && tag !== 'Rebuild') {
+    noteSpentElsewhere(record.id, false);
+  }
   switch (tag) {
     case 'BackUp':
       return result(false, true);
     case 'Sign':
     case 'Rebuild': {
+      // A Summon or Claim that needs a new proof and has no key here to make
+      // one, whose coin another transaction already took, can never land:
+      // the screen offers to discard it. Checked again on every move. With
+      // the key held, the new proof is made and the node is the judge.
+      const spent = !rebuild && (await revealSpentElsewhere(node, record, tip));
+      noteSpentElsewhere(record.id, spent);
+      if (spent) {
+        return { ...result(), spentElsewhere: true };
+      }
       if (!rebuild) {
         return result(true);
       }
@@ -344,6 +360,38 @@ export async function advance(
     case 'Wait':
     case 'Done':
       return result();
+  }
+}
+
+/**
+ * Whether reveal `record`'s marker is spent on chain while the node knows
+ * none of its attempts: another transaction (an earlier try of this Summon on
+ * this phone, or the same key elsewhere) took the coin. Called only when
+ * `recover` found no receipt for any attempt. The markers are read as of a
+ * block `SETTLE_CONFIRMATIONS` deep, so a spend a short reorg can take back
+ * does not count. They are a hint the node could get wrong, so this never
+ * sends or removes anything: it is checked again on every move, and only the
+ * person's tap discards. Asked only when no key is held to prove it again:
+ * the record alone can then do nothing, so discarding it loses nothing the
+ * key (typed again, or its card) could not do. False when the pages or the
+ * node cannot be read.
+ */
+async function revealSpentElsewhere(node: VanishNode, record: CorePaymentRecord, tip: number): Promise<boolean> {
+  if (record.intent.identity.tag !== 'RevealMarker') {
+    return false;
+  }
+  const marker = bytesToHex(record.intent.identity.inner.marker).toLowerCase();
+  const attempts = record.attempts.map((attempt) => bytesToHex(attempt.transactionHash));
+  try {
+    const known = attempts.length > 0 ? await node.known(attempts) : [];
+    if (known.some((held) => held)) {
+      return false;
+    }
+    const anchor = await node.block(Math.max(0, tip - (SETTLE_CONFIRMATIONS - 1)));
+    const spent = await readSpentMarkers(node, anchor.hash);
+    return spent !== null && spent.some((entry) => entry.toLowerCase() === marker);
+  } catch {
+    return false;
   }
 }
 

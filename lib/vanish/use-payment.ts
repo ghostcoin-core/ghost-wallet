@@ -84,6 +84,8 @@ export type PaymentView = {
   stuck?: boolean;
   /** Stuck, and a cancel can take its place: the screen offers Cancel. */
   cancellable?: boolean;
+  /** A Summon or Claim whose coin another transaction took: the screen offers Discard. */
+  spentElsewhere?: boolean;
 };
 
 /**

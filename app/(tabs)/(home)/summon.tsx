@@ -30,7 +30,7 @@ import { parseGhostAmount } from '../../../lib/vanish/amount';
 import type { SpentHint } from '../../../lib/vanish/coin-pages';
 import { keyFieldRule } from '../../../lib/vanish/field-rules';
 import { decodeDetails } from '../../../lib/vanish/payments';
-import { newestShared, openShared, paymentsChanged, shared, takeReopened } from '../../../lib/vanish/pending';
+import { discardSpentElsewhere, newestShared, openShared, paymentsChanged, shared, takeReopened } from '../../../lib/vanish/pending';
 import {
   arrivedText,
   isFinal,
@@ -335,7 +335,26 @@ export function SummonFlow({ olderCard = false }: { olderCard?: boolean }) {
           <>
             <PaymentProgress status={status} kind={kind} step={payment?.step} error={payment?.error} />
             {arrived ? <CoinsBack text={arrived} /> : null}
-            <PaymentExit final={screenDone(status)} onLeave={() => router.back()} testPrefix="summon" />
+            {payment?.spentElsewhere ? (
+              <>
+                <Text accessibilityLiveRegion="polite" style={textStyles.body} testID="summon-spent-elsewhere">
+                  These coins were already summoned by another try of this Summon. This one never reached the chain, and
+                  nothing more is sent. Discard it.
+                </Text>
+                <Button
+                  label="Discard"
+                  onPress={() => {
+                    if (kit && sequence) {
+                      discardSpentElsewhere(kit, sequence.record().id);
+                    }
+                    router.back();
+                  }}
+                  testID="summon-discard"
+                />
+              </>
+            ) : (
+              <PaymentExit final={screenDone(status)} onLeave={() => router.back()} testPrefix="summon" />
+            )}
           </>
   ) : lookingUp ? (
           <KeyLookupProgress failure={lookupFailure} onRetry={() => void find(lookingUp)} />
