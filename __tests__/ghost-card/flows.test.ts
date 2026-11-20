@@ -354,6 +354,19 @@ describe('the card module', () => {
       detail: 'not a Ghost card',
     });
     expect(cardFailure({ code: 'ERR_GHOST_CARD_NO_CHECKS' })).toMatchObject({ problem: 'no-checks' });
+    // A lost tap carries the phone's short code for why, said small.
+    expect(
+      cardFailure({ code: 'ERR_NFC_SESSION', message: 'The card could not be read. Hold it still and try again. [nfc-203]' }),
+    ).toMatchObject({
+      problem: 'card-lost',
+      detail: 'nfc-203',
+      message: 'The card moved away. Hold it still near the top of the iPhone and try again. (nfc-203)',
+    });
+    expect(cardFailure({ code: 'ERR_NFC_SESSION' })).toMatchObject({
+      problem: 'card-lost',
+      detail: null,
+      message: 'The card moved away. Hold it still near the top of the iPhone and try again.',
+    });
     expect(readTap({ kind: 'ntag' })).toEqual({ kind: 'ntag' });
     expect(() => readTap({ kind: 'ghost', identify: hex(28) })).toThrow();
     expect(() => readTap({ kind: 'ghost', identify: identify(0), make: hex(465) })).toThrow();

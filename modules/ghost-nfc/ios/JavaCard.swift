@@ -52,14 +52,20 @@ private struct CardStatus: Error {
   let sw: UInt16
 }
 
-/// The card left the field, or the session ended, mid-command.
-private struct CardLost: Error {}
+/// The card left the field, or the session ended, mid-command `ins`.
+private struct CardLost: Error {
+  let ins: UInt8
+}
 
 final class JavaCard {
   private let reader: TagReader
   /// Every flow runs here, one at a time, and blocks on each command.
   private let queue = DispatchQueue(label: "com.ghostcoin.wallet.java-card")
   private var running = false
+  /// While true, a flow that succeeds leaves the sheet open and the card
+  /// connected, and the next flow goes on with that card on the same sheet:
+  /// one hold, however many flows it takes. Set and read under `lock`.
+  private var holding = false
   private let lock = NSLock()
 
   static let aid = Data([0xA0, 0x00, 0x00, 0x08, 0x47, 0x47, 0x43, 0x41, 0x52, 0x44, 0x01])
@@ -83,6 +89,22 @@ final class JavaCard {
 
   init(reader: TagReader) {
     self.reader = reader
+  }
+
+  // MARK: Holds
+
+  /// Starts or ends a hold (see `holding`). Ending one closes its sheet, if
+  /// it is still open, after any flow under way: with `error` shown, or as a
+  /// success with `alert`, or quietly with neither.
+  func hold(_ on: Bool, alert: String?, error: String?) {
+    lock.lock()
+    holding = on
+    lock.unlock()
+    if !on {
+      queue.async {
+        self.reader.end(alert: alert, error: error)
+      }
+    }
   }
 
   // MARK: The flows
@@ -393,7 +415,7 @@ final class JavaCard {
         done.signal()
       }
       guard done.wait(timeout: .now() + JavaCard.commandTimeout) == .success, let answer, answer.count >= 2 else {
-        throw CardLost()
+        throw CardLost(ins: apdu.count > 1 ? apdu[apdu.startIndex + 1] : 0)
       }
       commands += 1
       showProgress()
@@ -423,13 +445,20 @@ final class JavaCard {
       return
     }
     running = true
+    let held = holding
     lock.unlock()
     queue.async {
       let started = DispatchTime.now().uptimeNanoseconds
       let link = Link(reader: self.reader, working: working, steps: steps)
       let out = Out()
       var reconnects = 0
-      var connect: Result<TappedCard, Exception> = self.waitForCard { self.reader.begin(alert: alert, onConnected: $0) }
+      var connect: Result<TappedCard, Exception>
+      if held, let card = self.reader.connectedCard() {
+        // The hold goes on: the same sheet, the card still connected.
+        connect = .success(card)
+      } else {
+        connect = self.begin(alert: alert)
+      }
       while true {
         let tapped: TappedCard
         switch connect {
@@ -452,14 +481,19 @@ final class JavaCard {
           out["ms"] = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
           out["commands"] = link.commands
           out["reconnects"] = reconnects
-          self.reader.end(alert: "Done.", error: nil)
+          if held {
+            // More of this hold is to come: the sheet stays open.
+            self.reader.update(alert: "Keep holding it still.")
+          } else {
+            self.reader.end(alert: "Done.", error: nil)
+          }
           self.done()
           promise.resolve(out.values.mapValues { value -> Any in (value as? Data).map(Self.hex) ?? value })
           return
-        } catch is CardLost {
+        } catch let lost as CardLost {
           reconnects += 1
           guard reconnects <= Self.maxReconnects else {
-            self.finish(promise, error: NfcSessionException())
+            self.finish(promise, error: NfcSessionException(String(format: "lost-%02x", lost.ins)))
             return
           }
           connect = self.waitForCard {
@@ -477,17 +511,35 @@ final class JavaCard {
           self.finish(promise, error: error)
           return
         } catch {
-          self.finish(promise, error: NfcSessionException())
+          self.finish(promise, error: NfcSessionException("other"))
           return
         }
       }
     }
   }
 
+  /// Opens the sheet and waits for a card. When iOS refuses a new sheet at
+  /// once because the last one is still closing (busy, or ended
+  /// unexpectedly), it asks again after a moment, before anything was shown.
+  private func begin(alert: String) -> Result<TappedCard, Exception> {
+    var tries = 0
+    while true {
+      let result = waitForCard { self.reader.begin(alert: alert, onConnected: $0) }
+      tries += 1
+      if case let .failure(error) = result, tries < 3,
+        let session = error as? NfcSessionException, session.param == "nfc-202" || session.param == "nfc-203"
+      {
+        Thread.sleep(forTimeInterval: 0.8)
+        continue
+      }
+      return result
+    }
+  }
+
   /// Blocks until `start` calls back with a connected card's kind.
   private func waitForCard(_ start: (@escaping (Result<Data, Exception>) -> Void) -> Void) -> Result<TappedCard, Exception> {
     let done = DispatchSemaphore(value: 0)
-    var result: Result<TappedCard, Exception> = .failure(NfcSessionException())
+    var result: Result<TappedCard, Exception> = .failure(NfcSessionException("no-answer"))
     start { connected in
       // Called on the reader's queue, where the kind was set.
       switch connected {
@@ -497,7 +549,7 @@ final class JavaCard {
       done.signal()
     }
     if done.wait(timeout: .now() + Self.reconnectTimeout) != .success {
-      return .failure(NfcSessionException())
+      return .failure(NfcSessionException("no-card"))
     }
     return result
   }
