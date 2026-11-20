@@ -39,6 +39,8 @@ class World {
   network = true;
   /** The card is pulled away during the next remake. */
   pullNextRemake = false;
+  /** The card is pulled away before the next clear. */
+  pullNextRefill = false;
 
   marker(coin: number): Uint8Array {
     return new Uint8Array(32).fill(coin);
@@ -117,6 +119,10 @@ class World {
 
   refill(): RefillResult {
     this.log.push('refill');
+    if (this.pullNextRefill) {
+      this.pullNextRefill = false;
+      return { ok: false, status: { kind: 'retry', message: 'The card moved away.' } };
+    }
     this.card.state = 'blank';
     this.card.coin = null;
     return { ok: true, fill: this.card.fill, ms: 500 };
@@ -403,4 +409,33 @@ it('refuses to take more than the card holds, or to leave less than a card can h
   expect(await take(null)).toMatchObject({ ok: true, afterWei: 0n });
   world.log = [];
   expect(await take(1n)).toEqual({ ok: false, message: 'This card is empty.' });
+});
+
+it('taking it all, then adding before the first change is done, brings the old coin home and fills the card anew', async () => {
+  await add(35n);
+  await world.finish();
+  const walletBefore = world.wallet;
+  expect(await take(null)).toMatchObject({ ok: true, afterWei: 0n });
+  // At once, with nothing moved yet: the card is empty and is filled anew.
+  expect(await add(5n)).toMatchObject({ ok: true, beforeWei: 0n, afterWei: 5n * GHOST });
+  await world.finish();
+  expect(world.onCard()).toBe(5n * GHOST);
+  expect(world.wallet).toBe(walletBefore + 35n * GHOST - FEE - 5n * GHOST - FEE);
+  expect(world.saved).toEqual([]);
+  expect(world.kept.size).toBe(0);
+});
+
+it('taking it all on a card pulled away before it was cleared, then adding, does not count its coin twice', async () => {
+  await add(35n);
+  await world.finish();
+  const walletBefore = world.wallet;
+  world.pullNextRefill = true;
+  expect(await take(null)).toMatchObject({ ok: true, afterWei: 0n });
+  expect(world.card.state).toBe('opened');
+  // The coin is already on its way home: the card holds nothing more.
+  expect(await add(5n)).toMatchObject({ ok: true, beforeWei: 0n, afterWei: 5n * GHOST });
+  await world.finish();
+  expect(world.onCard()).toBe(5n * GHOST);
+  expect(world.wallet).toBe(walletBefore + 35n * GHOST - FEE - 5n * GHOST - FEE);
+  expect(world.saved).toEqual([]);
 });

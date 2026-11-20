@@ -28,6 +28,8 @@ import type { GhostCardStatus } from './status';
 
 /** One change of a card's balance, saved from the hold until its new coin settles. */
 export type CardChange = {
+  /** This change's own id: a card can have several going at once. */
+  id: string;
   /** The card's id (hex) and the fill it was at when the change began. */
   cardId: string;
   cardNumber: string;
@@ -112,6 +114,7 @@ function isChange(value: unknown): value is CardChange {
   const c = value as Partial<CardChange> | null;
   return (
     !!c &&
+    typeof c.id === 'string' &&
     typeof c.cardId === 'string' &&
     typeof c.oldFill === 'number' &&
     typeof c.beforeWei === 'string' &&
@@ -145,12 +148,11 @@ export function subscribeChanges(listener: () => void): () => void {
 }
 
 async function save(store: ChangeStore, change: CardChange) {
-  const rest = store.read().filter((c) => !(c.cardId === change.cardId && c.oldFill === change.oldFill));
-  await store.write([...rest, change]);
+  await store.write([...store.read().filter((c) => c.id !== change.id), change]);
 }
 
 async function drop(store: ChangeStore, change: CardChange) {
-  await store.write(store.read().filter((c) => !(c.cardId === change.cardId && c.oldFill === change.oldFill)));
+  await store.write(store.read().filter((c) => c.id !== change.id));
 }
 
 /** The payment ids the changes move themselves (Home leaves them alone). */
@@ -179,6 +181,21 @@ function withCardKey<T>(run: () => Promise<T>): Promise<T> {
 
 // ---------------------------------------------------------------------------
 // The hold
+
+/** An id no saved change has. */
+function newChangeId(store: ChangeStore): string {
+  const taken = new Set(store.read().map((c) => c.id));
+  let id = `change-${Date.now()}`;
+  for (let n = 1; taken.has(id); n++) {
+    id = `change-${Date.now()}-${n}`;
+  }
+  return id;
+}
+
+/** Whether a saved change already brings the coin with `marker` home. */
+function claimed(deps: Pick<VaultDeps, 'changes'>, marker: string): boolean {
+  return deps.changes.read().some((c) => c.oldMarker === marker && !(c.commitData === null && c.afterWei !== '0'));
+}
 
 /** A change whose hold did not finish: the card was opened (or cleared) but has no new coin yet. */
 function unfinishedOn(changes: readonly CardChange[], cardId: string, fill: number): CardChange | null {
@@ -257,6 +274,8 @@ async function hold(
   let oldMarker: string | null = null;
   // The old coin's commit data, when its own Vanish is still on its way.
   let oldCommitData: string | null = null;
+  // A change whose hold was cut off on this coin: this one takes its place.
+  let resumed: CardChange | null = null;
 
   if (opened.ok) {
     cardId = opened.cardId;
@@ -274,6 +293,7 @@ async function hold(
     const unfinished = unfinishedOn(deps.changes.read(), bytesToHex(cardId), fill);
     if (unfinished) {
       // A hold cut off before: the same coin, the balance it had.
+      resumed = unfinished;
       before = BigInt(unfinished.beforeWei);
       oldMarker = unfinished.oldMarker;
       oldCommitData = unfinished.oldCommitData;
@@ -286,6 +306,10 @@ async function hold(
       return { ok: false, message: NO_NETWORK };
     } else if (chain.spent === true) {
       return { ok: false, message: 'This card is broken: its GHOST was taken without the card.', alarm: true };
+    } else if (claimed(deps, bytesToHex(coin.marker))) {
+      // An earlier change (all of it taken off, its card not cleared) is
+      // already bringing this coin home: the card holds nothing more.
+      before = 0n;
     } else if (chain.status !== 'absent') {
       before = opened.amountWei ?? 0n;
       oldMarker = bytesToHex(coin.marker);
@@ -305,6 +329,7 @@ async function hold(
     const unfinished = unfinishedOn(deps.changes.read(), bytesToHex(cardId), fill);
     if (unfinished) {
       // Cleared in a hold cut off before it made the new key.
+      resumed = unfinished;
       before = BigInt(unfinished.beforeWei);
       oldMarker = unfinished.oldMarker;
       oldCommitData = unfinished.oldCommitData;
@@ -316,8 +341,11 @@ async function hold(
     cardNumber = opened.status?.kind === 'opened' ? opened.status.cardNumber : '';
     // A hold cut off here before is over: its coin was taken off elsewhere.
     const unfinished = unfinishedOn(deps.changes.read(), bytesToHex(cardId), fill);
-    if (unfinished?.oldMarker) {
-      keys.forgetKeptCardKey(tagOf(unfinished.oldMarker));
+    if (unfinished) {
+      if (unfinished.oldMarker) {
+        keys.forgetKeptCardKey(tagOf(unfinished.oldMarker));
+      }
+      await drop(deps.changes, unfinished);
     }
   } else {
     return failure(opened.status);
@@ -344,6 +372,7 @@ async function hold(
   payments.forgetHeldKey();
 
   const change: CardChange = {
+    id: resumed?.id ?? newChangeId(deps.changes),
     cardId: bytesToHex(cardId),
     cardNumber,
     oldFill: fill,
@@ -396,14 +425,29 @@ function failure(status: GhostCardStatus | null): ChangeResult {
  * card's new coin. A change whose hold was cut off waits for the card. A
  * change is forgotten once its new coin and its Summon have settled.
  */
-export async function moveChanges(deps: VaultDeps): Promise<void> {
+export function moveChanges(deps: VaultDeps): Promise<void> {
+  // Home and a screen may both ask: one round of moves at a time.
+  moving ??= moveAll(deps).finally(() => {
+    moving = null;
+  });
+  return moving;
+}
+
+let moving: Promise<void> | null = null;
+
+async function moveAll(deps: VaultDeps): Promise<void> {
   const { keys, payments } = deps;
   if (!keys || !payments) {
     return;
   }
   for (const saved of [...deps.changes.read()]) {
+    // Read again: a hold may have replaced it meanwhile.
+    const change = deps.changes.read().find((c) => c.id === saved.id);
+    if (!change) {
+      continue;
+    }
     try {
-      await moveChange(deps, keys, payments, saved);
+      await moveChange(deps, keys, payments, change);
     } catch {
       // Saved: the next move tries again.
     }
