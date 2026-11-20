@@ -21,7 +21,7 @@
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { hexToBytes, type CardKeyStore } from '../../modules/ghost-nfc/java-card';
 import { jsonFile } from '../storage';
-import { noteChange, type CardActivityStore } from './card-activity';
+import { noteChange, squareRows, type CardActivityStore } from './card-activity';
 import type { CoinOnChain } from './chain';
 import {
   checkGhostCard,
@@ -570,6 +570,16 @@ async function moveAll(deps: VaultDeps): Promise<void> {
   if (!keys || !payments) {
     return;
   }
+  if (deps.activity) {
+    try {
+      await squareRows(
+        deps.activity,
+        deps.changes.read().map((c) => ({ id: c.id, cutOff: cutOff(c) })),
+      );
+    } catch {
+      // Squared at the next move.
+    }
+  }
   for (const saved of [...deps.changes.read()]) {
     // Read again: a hold may have replaced it meanwhile.
     const change = deps.changes.read().find((c) => c.id === saved.id);
@@ -593,7 +603,8 @@ async function noteRow(deps: VaultDeps, done: boolean, change?: CardChange, fail
   if (!deps.activity) {
     return;
   }
-  const changes = change ? [change] : deps.changes.read();
+  // A change cut off before the card made its new key has moved nothing: no row.
+  const changes = (change ? [change] : deps.changes.read()).filter((c) => !cutOff(c));
   for (const c of changes) {
     try {
       await noteChange(deps.activity, c, done, failed);
@@ -601,6 +612,11 @@ async function noteRow(deps: VaultDeps, done: boolean, change?: CardChange, fail
       // Written at the next move.
     }
   }
+}
+
+/** Cut off before the card made its new key: nothing has moved for it yet. */
+function cutOff(c: CardChange): boolean {
+  return c.afterWei !== '0' && c.commitData === null;
 }
 
 async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPayments, saved: CardChange) {
