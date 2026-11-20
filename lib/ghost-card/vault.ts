@@ -589,14 +589,14 @@ async function moveAll(deps: VaultDeps): Promise<void> {
  * one row. With `id`, only that change; `done` marks it finished. A row that
  * cannot be written is tried again at the next move.
  */
-async function noteRow(deps: VaultDeps, done: boolean, change?: CardChange) {
+async function noteRow(deps: VaultDeps, done: boolean, change?: CardChange, failed = false) {
   if (!deps.activity) {
     return;
   }
   const changes = change ? [change] : deps.changes.read();
   for (const c of changes) {
     try {
-      await noteChange(deps.activity, c, done);
+      await noteChange(deps.activity, c, done, failed);
     } catch {
       // Written at the next move.
     }
@@ -605,20 +605,33 @@ async function noteRow(deps: VaultDeps, done: boolean, change?: CardChange) {
 
 async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPayments, saved: CardChange) {
   await noteRow(deps, false, saved);
+  let latest = saved;
   try {
-    await moveChangeSteps(deps, keys, payments, saved);
+    await moveChangeSteps(deps, keys, payments, saved, (c) => {
+      latest = c;
+    });
   } finally {
     const now = deps.changes.read().find((c) => c.id === saved.id);
-    // Finished once dropped, or once the card's new coin settled (a change
-    // can stay saved after that, watching for a late payment to its old coin).
-    const settled = (id: string | null) => id !== null && (id === 'gone' || payments.paymentState(id) === 'settled');
-    const c = now ?? saved;
-    const done = now === undefined || (c.afterWei === '0' ? c.oldMarker === null || settled(c.summonId) : settled(c.vanishId));
-    await noteRow(deps, done, c);
+    const c = now ?? latest;
+    const state = (id: string | null) => (id === null ? null : id === 'gone' ? 'settled' : payments.paymentState(id));
+    // An Add or a partial Take off is done once the card's new coin is paid;
+    // a change dropped with that Vanish failed put nothing onto the card. A
+    // change can stay saved after it is done, watching its old coin.
+    const vanish = state(c.vanishId);
+    const failed = c.afterWei !== '0' && now === undefined && vanish !== 'settled';
+    const done =
+      now === undefined || (c.afterWei === '0' ? c.oldMarker === null || state(c.summonId) === 'settled' : vanish === 'settled');
+    await noteRow(deps, done, c, failed);
   }
 }
 
-async function moveChangeSteps(deps: VaultDeps, keys: CardKeyStore, payments: VaultPayments, saved: CardChange) {
+async function moveChangeSteps(
+  deps: VaultDeps,
+  keys: CardKeyStore,
+  payments: VaultPayments,
+  saved: CardChange,
+  seen: (change: CardChange) => void,
+) {
   let change = saved;
   const after = BigInt(change.afterWei);
   if (after > 0n && change.commitData === null) {
@@ -653,6 +666,7 @@ async function moveChangeSteps(deps: VaultDeps, keys: CardKeyStore, payments: Va
     });
     if (summonId !== null) {
       change = { ...change, summonId };
+      seen(change);
       await noteRow(deps, false, change);
       await save(deps.changes, change);
     }
@@ -692,6 +706,7 @@ async function moveChangeSteps(deps: VaultDeps, keys: CardKeyStore, payments: Va
   if (change.commitData !== null && change.vanishId === null) {
     const vanishId = await payments.startVanish(after, hexToBytes(change.commitData));
     change = { ...change, vanishId };
+    seen(change);
     await noteRow(deps, false, change);
     await save(deps.changes, change);
   }

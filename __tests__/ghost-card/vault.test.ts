@@ -707,3 +707,11 @@ it('lists each Add and Take off as one row with what was added or taken off, hid
   // Every Summon and Vanish the changes made is under a row, so none is listed on its own.
   expect(cardPaymentIds(world.rows)).toEqual(new Set(world.payments.keys()));
 });
+
+it('lists an Add whose Vanish could not be paid as failed, never as added', async () => {
+  await add(5n);
+  world.wallet = 0n;
+  await world.finish();
+  expect(world.onCard()).toBe(0n);
+  expect(cardActivityItems(world.rows).map((i) => [i.card, i.state])).toEqual([['add', 'failed']]);
+});
