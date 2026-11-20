@@ -21,6 +21,7 @@
 import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { hexToBytes, type CardKeyStore } from '../../modules/ghost-nfc/java-card';
 import { jsonFile } from '../storage';
+import { noteChange, type CardActivityStore } from './card-activity';
 import type { CoinOnChain } from './chain';
 import {
   checkGhostCard,
@@ -95,6 +96,8 @@ export type VaultDeps = {
   keys: CardKeyStore | null;
   payments: VaultPayments | null;
   changes: ChangeStore;
+  /** Activity's card rows; absent, none are written. */
+  activity?: CardActivityStore;
 };
 
 /** Add `amountWei` to the card, or take `amountWei` off it (null: all of it). */
@@ -239,9 +242,9 @@ function withCardKey<T>(run: () => Promise<T>): Promise<T> {
 // ---------------------------------------------------------------------------
 // The hold
 
-/** An id no saved change has. */
-function newChangeId(store: ChangeStore): string {
-  const taken = new Set(store.read().map((c) => c.id));
+/** An id no saved change has, nor any change Activity lists. */
+function newChangeId(store: ChangeStore, activity?: CardActivityStore): string {
+  const taken = new Set([...store.read().map((c) => c.id), ...(activity?.read().map((e) => e.id) ?? [])]);
   let id = `change-${Date.now()}`;
   for (let n = 1; taken.has(id); n++) {
     id = `change-${Date.now()}-${n}`;
@@ -345,6 +348,10 @@ export async function changeCard(deps: VaultDeps, request: ChangeRequest, minimu
       // Closes the sheet if a step after a tap stopped the hold.
       nfc.javaCardHold?.(false, result.ok ? 'Done.' : null, result.ok ? null : result.message);
       payments.forgetHeldKey();
+      if (result.ok) {
+        // Activity's row for this change shows at once.
+        await noteRow(deps, false);
+      }
     }
   });
 }
@@ -494,7 +501,7 @@ async function hold(
   payments.forgetHeldKey();
 
   const change: CardChange = {
-    id: resumed?.id ?? newChangeId(deps.changes),
+    id: resumed?.id ?? newChangeId(deps.changes, deps.activity),
     cardId: bytesToHex(cardId),
     cardNumber,
     oldFill: fill,
@@ -577,7 +584,41 @@ async function moveAll(deps: VaultDeps): Promise<void> {
   }
 }
 
+/**
+ * Activity's rows for the saved changes: each change's own payments under its
+ * one row. With `id`, only that change; `done` marks it finished. A row that
+ * cannot be written is tried again at the next move.
+ */
+async function noteRow(deps: VaultDeps, done: boolean, change?: CardChange) {
+  if (!deps.activity) {
+    return;
+  }
+  const changes = change ? [change] : deps.changes.read();
+  for (const c of changes) {
+    try {
+      await noteChange(deps.activity, c, done);
+    } catch {
+      // Written at the next move.
+    }
+  }
+}
+
 async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPayments, saved: CardChange) {
+  await noteRow(deps, false, saved);
+  try {
+    await moveChangeSteps(deps, keys, payments, saved);
+  } finally {
+    const now = deps.changes.read().find((c) => c.id === saved.id);
+    // Finished once dropped, or once the card's new coin settled (a change
+    // can stay saved after that, watching for a late payment to its old coin).
+    const settled = (id: string | null) => id !== null && (id === 'gone' || payments.paymentState(id) === 'settled');
+    const c = now ?? saved;
+    const done = now === undefined || (c.afterWei === '0' ? c.oldMarker === null || settled(c.summonId) : settled(c.vanishId));
+    await noteRow(deps, done, c);
+  }
+}
+
+async function moveChangeSteps(deps: VaultDeps, keys: CardKeyStore, payments: VaultPayments, saved: CardChange) {
   let change = saved;
   const after = BigInt(change.afterWei);
   if (after > 0n && change.commitData === null) {
@@ -612,6 +653,7 @@ async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPa
     });
     if (summonId !== null) {
       change = { ...change, summonId };
+      await noteRow(deps, false, change);
       await save(deps.changes, change);
     }
   }
@@ -650,6 +692,7 @@ async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPa
   if (change.commitData !== null && change.vanishId === null) {
     const vanishId = await payments.startVanish(after, hexToBytes(change.commitData));
     change = { ...change, vanishId };
+    await noteRow(deps, false, change);
     await save(deps.changes, change);
   }
   const summonSettled =

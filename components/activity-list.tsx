@@ -3,8 +3,10 @@
 // opens its progress again. Once it settles, fails or conflicts it stays in
 // the list with that state, read from its saved record.
 import { useRouter } from 'expo-router';
+import { useSyncExternalStore } from 'react';
 import { StyleSheet, Text } from 'react-native';
 
+import { cardPaymentIds, fileCardActivity, subscribeCardActivity } from '../lib/ghost-card/card-activity';
 import { describeActivity, type ActivityItem, type ActivityRow } from '../lib/home/activity';
 import { formatSignedGhost } from '../lib/home/balance-format';
 import { useActivity, useNow } from '../lib/home/use-home';
@@ -64,7 +66,10 @@ function PendingRowView({ payment, first, onOpen }: { payment: PendingPayment; f
  */
 export function ActivityList({ nodeUrl, kept }: { nodeUrl: string; kept: readonly ActivityItem[] | undefined }) {
   const router = useRouter();
-  const pending = usePendingPayments(nodeUrl);
+  const cards = useSyncExternalStore(subscribeCardActivity, () => fileCardActivity().read());
+  // A card change's own payments show only as its row, below.
+  const hidden = cardPaymentIds(cards);
+  const pending = usePendingPayments(nodeUrl).filter((payment) => !hidden.has(payment.id));
   const now = useNow();
   const activity = useActivity(nodeUrl, kept ?? NO_ACTIVITY);
   const rows = activity.map((item) => describeActivity(item, now));
