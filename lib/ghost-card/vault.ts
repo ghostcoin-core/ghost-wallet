@@ -327,20 +327,28 @@ async function hold(
   request: ChangeRequest,
   minimumWei: bigint,
 ): Promise<ChangeResult> {
+  let only: { cardId: Uint8Array; fill: number } | undefined;
   if (deps.changes.read().some((c) => c.commitData === null && c.afterWei !== '0')) {
     // A change on this phone may have made its card's new key without saving
-    // it. Its card is read first, without opening it, so that coin is saved
-    // before anything can open it.
+    // it. The card is read first, without opening it, so that coin is saved
+    // before anything can open it; then only that card is opened.
     const checked = await checkGhostCard(deps.card);
     if (checked === null) {
       return { ok: false, message: null };
     }
     const s = checked.statement;
-    if (s && s.state === 'sealed' && checked.commitData) {
+    if (!s) {
+      return failure(checked.status);
+    }
+    if (s.state === 'sealed') {
+      if (!checked.commitData) {
+        return { ok: false, message: NOT_CHANGED };
+      }
       await adoptMade(deps, bytesToHex(s.cardId), s.fill, BigInt(s.amountWei), checked.commitData);
     }
+    only = { cardId: new Uint8Array(s.cardId), fill: s.fill };
   }
-  const opened = await openGhostCard(deps.card);
+  const opened = await openGhostCard(deps.card, only);
   let cardId: Uint8Array;
   let fill: number;
   let cardNumber: string;

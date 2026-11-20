@@ -250,14 +250,24 @@ describe('Fill', () => {
 });
 
 describe('Open', () => {
+  it('opens only the card named, when one is', async () => {
+    const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), ok());
+    await openGhostCard(d, { cardId: new Uint8Array(16).fill(0x11), fill: 1 });
+    const open = d.calls.find((c) => c.name === 'open')!;
+    expect(open.args[2]).toEqual(new Uint8Array(16).fill(0x11));
+    expect(open.args[3]).toBe(1);
+  });
+
   it('checks the statement, then has the core recompute the coin from the card’s commit data', async () => {
     const d = deps(() => ghostTap({ commitData: hex(430), opened: true }), ok());
     const result = await openGhostCard(d);
     expect(result).toMatchObject({ ok: true, amountWei: 5n * 10n ** 18n, fill: 1, cardId: new Uint8Array(16).fill(0x11) });
-    // The tap is sent this tap's challenge and nothing else: the card is all it takes.
+    // The tap is sent this tap's challenge and no code: the card is all it
+    // takes. With no card named, any card may be opened.
     const open = d.calls.find((c) => c.name === 'open')!;
-    expect(open.args.length).toBe(2);
+    expect(open.args.length).toBe(4);
     expect((open.args[1] as Uint8Array).length).toBe(32);
+    expect((open.args[2] as Uint8Array).length).toBe(0);
     const finish = d.calls.find((c) => c.name === 'finish')!.args[0] as { salt: ArrayBuffer; note: ArrayBuffer; fill: number };
     expect(finish.fill).toBe(1);
     expect(new Uint8Array(finish.salt)).toEqual(new Uint8Array(16).fill(0x50));
