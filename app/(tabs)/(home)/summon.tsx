@@ -275,7 +275,7 @@ export function SummonFlow({ olderCard = false }: { olderCard?: boolean }) {
                 accessibilityRole="button"
                 accessibilityState={{ disabled: unavailable || tapping }}
                 disabled={unavailable || tapping}
-                onPress={() => (readsKey ? void tapCard() : router.push('/open-ghost-card'))}
+                onPress={() => (readsKey ? void tapCard() : router.push({ pathname: '/open-ghost-card', params: { start: '1' } }))}
                 style={({ pressed }) => [styles.cardKeyButton, (pressed || unavailable || tapping) && styles.dimmed]}
                 testID={readsKey ? 'summon-tap-card' : 'summon-open-card'}
               >

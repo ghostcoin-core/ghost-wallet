@@ -6,7 +6,7 @@
 // amount into it. No words and no key are ever on this phone, and no Seal or
 // Ghost server takes part. The card is a bearer object: no code goes with it.
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { GhostCardStatusPanel } from '../../../components/ghost-card-ui';
@@ -40,7 +40,9 @@ export default function FillGhostCardScreen() {
   const cards = deps.nfc !== null && deps.core !== null;
 
   // Vanish hands over the amount typed there; it is still checked here like any typed amount.
-  const { amount: asked } = useLocalSearchParams<{ amount?: string }>();
+  // With `start`, Vanish's own button was the go-ahead: the card read starts at once.
+  const { amount: asked, start } = useLocalSearchParams<{ amount?: string; start?: string }>();
+  const started = useRef(false);
   const [amountText, setAmountText] = useState(typeof asked === 'string' ? asked : '');
   const [minimum, setMinimum] = useState<bigint | null>(null);
   const [busy, setBusy] = useState(false);
@@ -97,6 +99,15 @@ export default function FillGhostCardScreen() {
       setBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (start === '1' && amountOk && !started.current) {
+      started.current = true;
+      void fill();
+    }
+    // Runs once, as soon as the handed-over amount is ready to go.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [start, amountOk]);
 
   /** The Vanish into the card's commit data; the same bytes every time, so it is never paid twice. */
   async function pay(amountWei: bigint, commitData: Uint8Array) {

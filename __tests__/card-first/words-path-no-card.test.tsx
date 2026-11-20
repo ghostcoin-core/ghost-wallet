@@ -167,10 +167,10 @@ describe.each(Object.keys(DEVICES) as Device[])('on the %s', (device) => {
   it('offers the card on the amount step, as the card-only Vanish', async () => {
     renderOn(device);
     await act(async () => {});
-    // The card is the choice already made, and Continue goes to Fill a card.
+    // The card is the choice already made, and the button just says Vanish.
     expect(screen.getByTestId('vanish-choose-card').props.accessibilityState).toEqual({ selected: true });
     expect(screen.getByTestId('vanish-choose-card')).toHaveTextContent(/On a card/);
-    expect(screen.getByTestId('vanish-fill-card')).toHaveTextContent('Continue');
+    expect(screen.getByTestId('vanish-fill-card')).toHaveTextContent('Vanish');
   });
 
   it('renders no card button on the check step, and never writes a card', async () => {
