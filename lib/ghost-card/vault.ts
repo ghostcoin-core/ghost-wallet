@@ -137,6 +137,7 @@ const CANNOT_READ = 'This iPhone cannot read Ghost cards in this build.';
 const NO_NETWORK = "Can't reach the Ghost network. Nothing was changed. Try again in a moment.";
 const OPENED_ELSEWHERE =
   "This card was opened on another phone, so someone else may be able to take its GHOST. Don't accept it. If it's yours, take it all off now.";
+const SAVE_FAILED = 'Something went wrong on this iPhone. Hold the card again to finish.';
 const NOT_CHANGED = 'The card was not changed. Hold it still near the top of the iPhone and try again.';
 
 // ---------------------------------------------------------------------------
@@ -144,6 +145,7 @@ const NOT_CHANGED = 'The card was not changed. Hold it still near the top of the
 
 const FILE = 'card-changes.json';
 let cached: CardChange[] | null = null;
+let writing: Promise<unknown> = Promise.resolve();
 const listeners = new Set<() => void>();
 
 function isChange(value: unknown): value is CardChange {
@@ -172,10 +174,16 @@ export function fileChanges(): ChangeStore {
       }
       return cached;
     },
-    async write(changes) {
-      cached = changes;
-      listeners.forEach((listener) => listener());
-      await file.write(changes);
+    write(changes) {
+      // One write at a time, and what is read changes only once it is on
+      // disk: a failed save never looks saved to the next hold.
+      const next = writing.then(async () => {
+        await file.write(changes);
+        cached = changes;
+        listeners.forEach((listener) => listener());
+      });
+      writing = next.catch(() => undefined);
+      return next;
     },
   };
 }
@@ -186,12 +194,22 @@ export function subscribeChanges(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-async function save(store: ChangeStore, change: CardChange) {
-  await store.write([...store.read().filter((c) => c.id !== change.id), change]);
+// Every save reads the saved changes and writes them back, one at a time, so
+// no save starts from a list another save is still writing.
+let journal: Promise<unknown> = Promise.resolve();
+
+function mutate(store: ChangeStore, edit: (changes: CardChange[]) => CardChange[]): Promise<void> {
+  const next = journal.then(() => store.write(edit(store.read())));
+  journal = next.catch(() => undefined);
+  return next;
 }
 
-async function drop(store: ChangeStore, change: CardChange) {
-  await store.write(store.read().filter((c) => c.id !== change.id));
+function save(store: ChangeStore, change: CardChange): Promise<void> {
+  return mutate(store, (changes) => [...changes.filter((c) => c.id !== change.id), change]);
+}
+
+function drop(store: ChangeStore, change: CardChange): Promise<void> {
+  return mutate(store, (changes) => changes.filter((c) => c.id !== change.id));
 }
 
 /** The payment ids the changes move themselves (Home leaves them alone). */
@@ -314,6 +332,9 @@ export async function changeCard(deps: VaultDeps, request: ChangeRequest, minimu
   return withCardKey(async () => {
     try {
       return await hold(deps, keys, payments, request, minimumWei);
+    } catch {
+      // A save that failed: whatever the card did is picked up at its next hold.
+      return { ok: false, message: SAVE_FAILED };
     } finally {
       payments.forgetHeldKey();
     }

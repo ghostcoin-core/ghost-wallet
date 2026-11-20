@@ -45,6 +45,8 @@ class World {
   killAfterNextMake = false;
   /** The app is killed right after the card's next Open. */
   killAfterNextOpen = false;
+  /** The next save to disk fails. */
+  failNextWrite = false;
   /** The next Check tap reads nothing. */
   failNextCheck = false;
   /** Another card is held for the next Open. */
@@ -230,6 +232,10 @@ class World {
     return {
       read: () => this.saved,
       write: async (changes) => {
+        if (this.failNextWrite) {
+          this.failNextWrite = false;
+          throw new Error('disk full');
+        }
         this.saved = changes;
       },
     };
@@ -533,7 +539,7 @@ it('an app killed right after the card made its new key loses nothing: the next 
   await add(5n);
   await world.finish();
   world.killAfterNextMake = true;
-  await expect(add(10n)).rejects.toThrow('killed');
+  expect(await add(10n)).toMatchObject({ ok: false });
   // The card already holds its new key for 15, still unpaid; this phone shows what it will hold.
   expect(cardBalance(world.deps(), world.check())).toMatchObject({ kind: 'holds', amountWei: 15n * GHOST, updating: true });
   expect(await add(1n)).toMatchObject({ ok: true, beforeWei: 15n * GHOST, afterWei: 16n * GHOST });
@@ -547,10 +553,10 @@ it('a recovery hold cut off right after its Open still loses nothing', async () 
   await add(5n);
   await world.finish();
   world.killAfterNextMake = true;
-  await expect(add(10n)).rejects.toThrow('killed');
+  expect(await add(10n)).toMatchObject({ ok: false });
   // The next hold reads the card first and saves its new coin, then is killed after the Open.
   world.killAfterNextOpen = true;
-  await expect(add(1n)).rejects.toThrow('killed');
+  expect(await add(1n)).toMatchObject({ ok: false });
   expect(world.log).toContain('check');
   // The saved change finishes by itself: the old 5 comes home and 15 goes onto the card's coin.
   await world.finish();
@@ -581,7 +587,7 @@ it('while a change is unfinished, a read that fails or another card on the Open 
   await add(5n);
   await world.finish();
   world.killAfterNextMake = true;
-  await expect(add(10n)).rejects.toThrow('killed');
+  expect(await add(10n)).toMatchObject({ ok: false });
 
   world.log = [];
   world.failNextCheck = true;
@@ -599,4 +605,31 @@ it('while a change is unfinished, a read that fails or another card on the Open 
   await world.finish();
   expect(world.onCard()).toBe(16n * GHOST);
   expect(world.saved).toEqual([]);
+});
+
+it('a failed save while recovering is not taken as saved: the next hold reads the card first again', async () => {
+  await add(5n);
+  await world.finish();
+  world.killAfterNextMake = true;
+  expect(await add(10n)).toMatchObject({ ok: false });
+  // Saving the card's new coin fails.
+  world.failNextWrite = true;
+  expect(await add(1n)).toMatchObject({ ok: false, message: expect.stringMatching(/Hold the card again/) });
+  expect(world.card.state).toBe('sealed');
+  world.log = [];
+  world.killAfterNextOpen = true;
+  expect(await add(1n)).toMatchObject({ ok: false });
+  expect(world.log[0]).toBe('check');
+  await world.finish();
+  expect(await add(1n)).toMatchObject({ ok: true, beforeWei: 15n * GHOST, afterWei: 16n * GHOST });
+  await world.finish();
+  expect(world.onCard()).toBe(16n * GHOST);
+  expect(world.saved).toEqual([]);
+});
+
+it('two saves at once do not lose either', async () => {
+  const deps = world.deps();
+  await Promise.all([add(5n), moveChanges(deps)]);
+  await world.finish();
+  expect(world.onCard()).toBe(5n * GHOST);
 });
