@@ -22,7 +22,14 @@ import { bytesToHex } from '../../modules/ghost-core/account-lookup';
 import { hexToBytes, type CardKeyStore } from '../../modules/ghost-nfc/java-card';
 import { jsonFile } from '../storage';
 import type { CoinOnChain } from './chain';
-import { openGhostCard, refillGhostCard, remakeGhostCard, type CheckResult, type GhostCardDeps } from './flows';
+import {
+  checkGhostCard,
+  openGhostCard,
+  refillGhostCard,
+  remakeGhostCard,
+  type CheckResult,
+  type GhostCardDeps,
+} from './flows';
 import { ghostText } from '../seal/card-status';
 import type { GhostCardStatus } from './status';
 
@@ -108,6 +115,7 @@ export type CardBalance =
 
 /** How often a coin no one had paid is looked for: a lookup reads the coin tree. */
 const STRAY_LOOK_EVERY_MS = 5 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const lastLooked = new Map<string, number>();
 
 /** Whether to look for the change's old coin on this move. */
@@ -116,15 +124,14 @@ function lookNow(change: CardChange): boolean {
     return true;
   }
   const now = Date.now();
-  if (now - (lastLooked.get(change.id) ?? 0) < STRAY_LOOK_EVERY_MS) {
+  // After its first day, once a day.
+  const every = now - change.at > DAY_MS ? DAY_MS : STRAY_LOOK_EVERY_MS;
+  if (now - (lastLooked.get(change.id) ?? 0) < every) {
     return false;
   }
   lastLooked.set(change.id, now);
   return true;
 }
-
-/** How long a kept key of a coin no one had paid is watched for a late payment. */
-const STRAY_WATCH_MS = 7 * 24 * 60 * 60 * 1000;
 
 const CANNOT_READ = 'This iPhone cannot read Ghost cards in this build.';
 const NO_NETWORK = "Can't reach the Ghost network. Nothing was changed. Try again in a moment.";
@@ -146,7 +153,6 @@ function isChange(value: unknown): value is CardChange {
     typeof c.id === 'string' &&
     typeof c.cardId === 'string' &&
     typeof c.oldFill === 'number' &&
-    typeof c.oldCounted === 'boolean' &&
     typeof c.beforeWei === 'string' &&
     typeof c.afterWei === 'string'
   );
@@ -159,7 +165,10 @@ export function fileChanges(): ChangeStore {
     read() {
       if (cached === null) {
         const raw = file.read();
-        cached = Array.isArray(raw) ? raw.filter(isChange) : [];
+        // A change saved before `oldCounted` existed counted its old coin.
+        cached = Array.isArray(raw)
+          ? raw.filter(isChange).map((c) => ({ ...c, oldCounted: typeof c.oldCounted === 'boolean' ? c.oldCounted : true }))
+          : [];
       }
       return cached;
     },
@@ -318,6 +327,19 @@ async function hold(
   request: ChangeRequest,
   minimumWei: bigint,
 ): Promise<ChangeResult> {
+  if (deps.changes.read().some((c) => c.commitData === null && c.afterWei !== '0')) {
+    // A change on this phone may have made its card's new key without saving
+    // it. Its card is read first, without opening it, so that coin is saved
+    // before anything can open it.
+    const checked = await checkGhostCard(deps.card);
+    if (checked === null) {
+      return { ok: false, message: null };
+    }
+    const s = checked.statement;
+    if (s && s.state === 'sealed' && checked.commitData) {
+      await adoptMade(deps, bytesToHex(s.cardId), s.fill, BigInt(s.amountWei), checked.commitData);
+    }
+  }
   const opened = await openGhostCard(deps.card);
   let cardId: Uint8Array;
   let fill: number;
@@ -540,11 +562,11 @@ async function moveChange(deps: VaultDeps, keys: CardKeyStore, payments: VaultPa
         if (found === 'found') {
           return await payments.summonHeldKey();
         }
-        // Not on chain yet. A coin no one had paid at the hold is watched for
-        // a while in case a payment from another phone lands. A counted coin
+        // Not on chain yet. A coin no one had paid at the hold is watched, with
+        // its key kept, for as long as a payment from another phone may land. A counted coin
         // waits for its own Vanish, unless that failed (then it was never paid).
         if (!change.oldCounted) {
-          return Date.now() - change.at > STRAY_WATCH_MS ? 'gone' : null;
+          return null;
         }
         return change.oldCommitData !== null && onItsWay(deps, hexToBytes(change.oldCommitData), change) ? null : 'gone';
       } finally {
