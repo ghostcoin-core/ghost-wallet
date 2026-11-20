@@ -51,7 +51,7 @@ export default function HomeScreen() {
   const now = useNow();
   const snapshot = view.snapshot;
   // A card change still going through counts as done: the balance never jumps up and back.
-  const balanceWei = useCardBalance(nodeUrl, snapshot?.balanceWei ?? null, snapshot?.tipHeight ?? null);
+  const balanceWei = useCardBalance(nodeUrl, snapshot?.balanceWei ?? null, snapshot?.tipHeight ?? null, snapshot?.nonce ?? null);
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={styles.page} testID="home-screen">
