@@ -19,7 +19,8 @@ import {
   type PaymentDetails,
   type Rebuild,
 } from './payments';
-import { discardableVanish, stoppedVanish } from './pending';
+import { discardableVanish, moveAlone, openShared, stoppedVanish } from './pending';
+import { stepName } from './status-mapping';
 import type { PaymentKit } from './use-payment';
 import { treeAtTip } from './use-payment';
 
@@ -357,6 +358,13 @@ export async function startReveal(
   } catch (error) {
     throw revealRefusal(error);
   }
+  // A Summon or Claim of this coin already saved and not yet in a block (its
+  // send failed, or its window passed): the new proof joins it as its next
+  // attempt, so one coin is never two payments.
+  const saved = savedRevealOf(kit, kind, proved.marker, proved.outWei);
+  if (saved) {
+    return joinSavedReveal(kit, saved, proved);
+  }
   const details: PaymentDetails = {
     kind,
     amountWei: proved.outWei,
@@ -380,6 +388,99 @@ export async function startReveal(
     throw revealRefusal(error);
   }
   return sequence;
+}
+
+/**
+ * The saved Summon or Claim of the same amount, of the coin with `marker`,
+ * on this build's chain, still waiting for its first block and with room for
+ * another attempt. Null when there is none: then a new payment is started.
+ */
+export function savedRevealOf(
+  kit: Pick<PaymentKit, 'core' | 'store'>,
+  kind: 'summon' | 'claim',
+  marker: string,
+  outWei: string,
+): CorePaymentSequence | null {
+  let ids: string[];
+  try {
+    ids = kit.store.list();
+  } catch {
+    return null;
+  }
+  for (const id of ids) {
+    if (!id.startsWith(`${kind}-`)) {
+      continue;
+    }
+    const sequence = openShared(kit, id);
+    if (!sequence) {
+      continue;
+    }
+    const record = sequence.record();
+    const { identity } = record.intent;
+    if (identity.tag !== 'RevealMarker' || bytesToHex(identity.inner.marker).toLowerCase() !== marker.toLowerCase()) {
+      continue;
+    }
+    const step = stepName(sequence.step());
+    if (onOtherChain(record) || (step !== 'BackedUp' && step !== 'Signed' && step !== 'Sent')) {
+      continue;
+    }
+    const details = decodeDetails(record.intent.details);
+    // The same amount only: the saved details are what Activity shows, and a
+    // Summon whose fee moved brings back a different amount.
+    if (!details || details.kind !== kind || details.amountWei !== outWei || record.attempts.length >= MAX_REVEAL_ATTEMPTS) {
+      continue;
+    }
+    return sequence;
+  }
+  return null;
+}
+
+/** The core's limit on attempts a payment keeps (`MAX_ATTEMPTS` in core/src/step_sequence.rs). */
+export const MAX_REVEAL_ATTEMPTS = 32;
+
+/** How long a new try waits for Home to finish moving the saved payment it joins. */
+const JOIN_WAIT_MS = 250;
+const JOIN_TRIES = 40;
+
+/**
+ * Adds `proved` to the saved `sequence` as its newest attempt and sends it,
+ * as a rebuild does. The node's refusal fails it; a send that timed out may
+ * have reached the node, so the payment is returned as sending.
+ */
+async function joinSavedReveal(
+  kit: PaymentKit,
+  sequence: CorePaymentSequence,
+  proved: { envelope: ArrayBuffer; validUntil: bigint },
+): Promise<CorePaymentSequence> {
+  const record = sequence.record();
+  const id = record.id;
+  const newest = record.attempts.at(-1);
+  // Its last attempt is still at the node: it may yet land, so it is shown, not tried again.
+  if (newest && (await kit.node.known([bytesToHex(newest.transactionHash)]).catch(() => [false]))[0]) {
+    return sequence;
+  }
+  for (let tries = 0; tries < JOIN_TRIES; tries++) {
+    let refused: unknown = null;
+    const joined = await moveAlone(id, async () => {
+      sequence.addAttempt(proved.envelope, proved.validUntil);
+      try {
+        await kit.node.sendRaw(bytesToHex(sequence.markSent()));
+      } catch (error) {
+        if (isRefusal(error)) {
+          refused = error;
+        }
+      }
+      return true;
+    });
+    if (refused !== null) {
+      throw revealRefusal(refused);
+    }
+    if (joined) {
+      return sequence;
+    }
+    await new Promise((resolve) => setTimeout(resolve, JOIN_WAIT_MS));
+  }
+  throw new Error('The saved Summon of these coins is busy. Try again.');
 }
 
 /** A new proof of the same coin, for a fee window that moved. Needs the key typed (or its card tapped) again after a restart. */
